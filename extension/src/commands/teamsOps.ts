@@ -39,8 +39,13 @@ const CHARTER_DIR = path.join(os.homedir(), "Desktop", "soulbrew", ".maw", "team
 const ORACLES_JSON = path.join(os.homedir(), ".maw", "oracles.json");
 const MAW_TIMEOUT = 15000;
 const BUD_TIMEOUT = 90000; // scaffolding an oracle (repo + ψ vault) is slower
-// All local oracles live under this org (matches every entry in oracles.json).
-const ORACLE_ORG = "fufu-2345";
+// Target org for a NEW oracle's GitHub repo. `maw bud --org` couples the two:
+// the repo is created under this owner AND the local checkout lands in
+// `<ghq-root>/github.com/<org>/<name>-oracle`. Every repo of this stack was
+// migrated to the MyMissionControl org, so new oracles are born there too — the
+// five pre-migration oracles keep their `fufu-2345` folder + oracles.json entry
+// (maw resolves each one's path from its own recorded org, so mixing is safe).
+const ORACLE_ORG = "MyMissionControl";
 
 // maw resolves its ψ vault (where `team create` writes/checks the uniqueness
 // manifest) RELATIVE TO CWD. With no cwd, it resolved against the opaque
