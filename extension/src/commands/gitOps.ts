@@ -1,4 +1,5 @@
 import * as cp from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { type GitRawStatus } from "./gitStatus";
@@ -11,6 +12,12 @@ import { type GitRawStatus } from "./gitStatus";
 const GIT_TIMEOUT = 8000;
 const FETCH_TIMEOUT = 20000;
 const CLAUDE_TIMEOUT = 60000;
+// Staging a whole project can genuinely take a while (big worktrees, cold page
+// cache). Killing a write mid-flight is what orphans .git/index.lock, so the
+// write path gets a lot more room than the read polls.
+const WRITE_TIMEOUT = 60000;
+// A lock this old with no live git in the repo can only be an orphan.
+const STALE_LOCK_MS = 30000;
 
 export interface RunResult {
   ok: boolean;
@@ -51,8 +58,72 @@ export function run(
   });
 }
 
+// GIT_OPTIONAL_LOCKS=0 is the whole reason the status polls are safe to kill:
+// without it `git status` rewrites the index to refresh its stat cache, so it
+// holds .git/index.lock — and a poll SIGTERM'd at its timeout leaves that lock
+// behind, which then blocks every commit in the repo forever (status keeps
+// working, so the row still says "Commit (N)"). Mandatory locks (add, commit)
+// are unaffected by this env var.
 const git = (dir: string, args: string[], timeout?: number) =>
-  run("git", ["-C", dir, ...args], { timeout });
+  run("git", ["-C", dir, ...args], {
+    timeout,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+  });
+
+const indexLock = (dir: string) => path.join(dir, ".git", "index.lock");
+
+/** Best-effort: is a live `git` actually working in this repo right now?
+ *  Linux /proc only — elsewhere we fall back to the age check alone. */
+function gitRunningIn(dir: string): boolean {
+  let real: string;
+  try {
+    real = fs.realpathSync(dir);
+  } catch {
+    return false;
+  }
+  let pids: string[];
+  try {
+    pids = fs.readdirSync("/proc").filter((p) => /^\d+$/.test(p));
+  } catch {
+    return false; // no procfs → cannot tell, rely on mtime age
+  }
+  for (const pid of pids) {
+    try {
+      if (fs.readFileSync(`/proc/${pid}/comm`, "utf8").trim() !== "git") continue;
+      if (fs.readlinkSync(`/proc/${pid}/cwd`) === real) return true; // `git -C dir` chdirs
+    } catch {
+      /* process exited mid-scan, or not ours to read — ignore */
+    }
+  }
+  return false;
+}
+
+const isIndexLockError = (r: RunResult) => /index\.lock/.test(r.stderr + r.stdout);
+
+/** Remove an ORPHANED index.lock — never one that something may still hold.
+ *  Returns true only when a lock was actually reaped. */
+function reapStaleIndexLock(dir: string): boolean {
+  let ageMs: number;
+  try {
+    ageMs = Date.now() - fs.statSync(indexLock(dir)).mtimeMs;
+  } catch {
+    return false; // gone already (or unreadable) → nothing to reap
+  }
+  if (ageMs < STALE_LOCK_MS || gitRunningIn(dir)) return false;
+  try {
+    fs.unlinkSync(indexLock(dir));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** An index-writing git call that heals itself once past an orphaned lock. */
+async function writeGit(dir: string, args: string[]): Promise<RunResult> {
+  const first = await git(dir, args, WRITE_TIMEOUT);
+  if (first.ok || !isIndexLockError(first) || !reapStaleIndexLock(dir)) return first;
+  return git(dir, args, WRITE_TIMEOUT);
+}
 
 /** Gather the raw git facts parseGitButtonState needs. Never throws. */
 export async function readGitStatus(dir: string): Promise<GitRawStatus> {
@@ -98,11 +169,14 @@ export function gitInit(dir: string): Promise<RunResult> {
   return git(dir, ["init", "-b", "main"]);
 }
 
-/** Stage everything + commit with the given message (arg array — no shell). */
+/** Stage everything + commit with the given message (arg array — no shell).
+ *  Both steps write the index, so both go through writeGit: a stale lock left
+ *  by an earlier killed git is reaped and the step retried once. A lock that
+ *  something still holds is reported as-is, never stolen. */
 export async function commitAll(dir: string, message: string): Promise<RunResult> {
-  const add = await git(dir, ["add", "-A"]);
+  const add = await writeGit(dir, ["add", "-A"]);
   if (!add.ok) return add;
-  return git(dir, ["commit", "-m", message]);
+  return writeGit(dir, ["commit", "-m", message]);
 }
 
 /** Fast-forward pull. `--ff-only` refuses (harmless error) if the branch can't
