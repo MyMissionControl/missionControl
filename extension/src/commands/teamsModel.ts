@@ -88,6 +88,21 @@ export function isSafeTeamName(name: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(name);
 }
 
+/** Model ids safe to interpolate into a shell command (`claude --model X`,
+ *  `tmux send-keys '/model X'`). Whitelist only — reject, never sanitize, so a
+ *  tampered store cannot smuggle shell metacharacters into the command line.
+ *
+ *  Allows an optional bracketed window suffix (`opus[1m]`) because that IS a real
+ *  model spec Claude Code accepts. Two divergent regexes used to guard this same
+ *  value: the orchestrator launch path allowed brackets while the per-member
+ *  `/model` send did not, so any bracketed pick was silently dropped for workers
+ *  and the member fell back to the global default. One validator now, and it
+ *  matches the bash side (orches-integrate.sh `cmd_worker_model`) exactly. */
+export function isSafeModelId(model: string): boolean {
+  if (!model || model.length > 100) return false;
+  return /^[A-Za-z0-9._-]+(\[[A-Za-z0-9]+\])?$/.test(model);
+}
+
 /** Canonical oracle name: trim, then strip ONE trailing `-oracle` — the exact
  *  normalization the save path applies (a typed "fusion-oracle" becomes the
  *  oracle stem "fusion", since `maw bud fusion` makes the repo fusion-oracle).

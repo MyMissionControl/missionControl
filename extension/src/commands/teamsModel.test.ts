@@ -1,12 +1,14 @@
 import { expect, test } from "bun:test";
 
 import {
+  MODEL_ALIASES,
   awakenStatusFromClaudeMd,
   createArgs,
   deleteArgs,
   diffMembers,
   findDuplicateOracleNames,
   inviteArgs,
+  isSafeModelId,
   isSafeTeamName,
   mergeTeamStores,
   normalizeOracle,
@@ -253,4 +255,47 @@ test("awakenStatusFromClaudeMd: no/empty content → unknown", () => {
   expect(awakenStatusFromClaudeMd(null)).toBe("unknown");
   expect(awakenStatusFromClaudeMd(undefined)).toBe("unknown");
   expect(awakenStatusFromClaudeMd("   ")).toBe("unknown");
+});
+
+// isSafeModelId — ONE validator for a model id that gets interpolated into a shell
+// command (`claude --model X` at launch, `tmux send-keys '/model X'` per member).
+// Regression: two divergent regexes guarded this same value — the orchestrator
+// launch path allowed the bracketed window suffix while the per-member /model send
+// rejected it, so a bracketed pick was silently dropped and the member quietly
+// inherited the global default model.
+test("isSafeModelId: versioned ids and bare aliases pass", () => {
+  for (const m of [...MODEL_ALIASES, "claude-sonnet-5-20250929", "opus", "sonnet", "haiku_x.2"]) {
+    expect(isSafeModelId(m)).toBe(true);
+  }
+});
+
+test("isSafeModelId: bracketed window suffix passes (was silently dropped)", () => {
+  expect(isSafeModelId("opus[1m]")).toBe(true);
+  expect(isSafeModelId("claude-sonnet-5[1m]")).toBe(true);
+});
+
+test("isSafeModelId: shell metacharacters rejected, never sanitized", () => {
+  for (const bad of [
+    "x; rm -rf /",
+    "a b",
+    "$(id)",
+    "a`id`",
+    "a'b",
+    'a"b',
+    "a|b",
+    "a&b",
+    "a\nb",
+    "../etc/passwd",
+    "opus[1m",
+    "opus1m]",
+    "opus[]",
+    "opus[a;b]",
+  ]) {
+    expect(isSafeModelId(bad)).toBe(false);
+  }
+});
+
+test("isSafeModelId: empty / oversized rejected", () => {
+  expect(isSafeModelId("")).toBe(false);
+  expect(isSafeModelId("a".repeat(101))).toBe(false);
 });

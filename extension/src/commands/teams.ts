@@ -2,6 +2,8 @@
 // the parsing + validation logic can be unit-tested standalone with `bun test`.
 // The filesystem directory-walk lives in startOrchestrator.ts (vscode side).
 
+import { isSafeModelId } from "./teamsModel";
+
 export interface OracleMember {
   oracle: string;
   role: string;
@@ -257,9 +259,11 @@ export function buildTmuxLaunchCommand(
   // same repo/conversation instead of injecting into this one.
   const window = repoPath.replace(/\/+$/, "").split("/").pop() || orchestrator;
   // Per-member model from the Team Config picker. Guard against injection: real
-  // model ids are alnum/dot/hyphen plus the [1m] window suffix — anything else is
-  // dropped so a tampered config.json can't smuggle shell into the launch command.
-  const modelFlag = model && /^[A-Za-z0-9.\-[\]]+$/.test(model) ? `--model ${model} ` : "";
+  // model ids are alnum/dot/hyphen plus an optional [1m] window suffix — anything
+  // else is dropped so a tampered config.json can't smuggle shell into the launch
+  // command. Shared with the per-member `/model` send (teamUpModel) so the two
+  // paths can no longer disagree about what a valid model id is.
+  const modelFlag = model && isSafeModelId(model) ? `--model ${model} ` : "";
   const inner =
     `cd ${shSingleQuote(repoPath)} && ` +
     `claude ${modelFlag}--dangerously-skip-permissions ${shSingleQuote(kickoff)}`;

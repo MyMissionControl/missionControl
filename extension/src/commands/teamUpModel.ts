@@ -1,6 +1,8 @@
 // Pure (vscode-free) logic for the "Team up" bootstrap, split out so it is unit
 // testable under bun:test. The vscode-facing shell lives in teamUp.ts.
 
+import { isSafeModelId } from "./teamsModel";
+
 /** The `session:` value from a charter yaml (null if the file has none). Matches
  *  how `maw team up` resolves its default session (charter.session). */
 export function parseCharterSession(yaml: string): string | null {
@@ -80,9 +82,12 @@ export function buildTeamUpCommand(
   // Best-effort: one settle wait for the last sequential wake to reach its prompt,
   // then a send per member with a SAFE configured model (reject, don't sanitize, so
   // a tampered config.json can't smuggle shell into the command).
-  const SAFE_MODEL = /^[A-Za-z0-9._-]+$/;
+  // Shared validator (teamsModel.isSafeModelId) — it allows the bracketed window
+  // suffix (`opus[1m]`). The local regex here used to reject brackets while the
+  // orchestrator launch path accepted them, so a bracketed pick was silently
+  // dropped for workers and the member quietly inherited the global default.
   const sends = members
-    .filter((m) => models[m] && SAFE_MODEL.test(models[m]))
+    .filter((m) => models[m] && isSafeModelId(models[m]))
     .map((m) => `tmux send-keys -t '=${session}:${m}' '/model ${models[m]}' Enter`);
   const modelStep = sends.length ? `sleep 5 ; ${sends.join(" ; ")} ; ` : "";
   return (
