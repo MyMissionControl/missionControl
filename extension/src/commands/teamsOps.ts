@@ -14,7 +14,10 @@ import {
   isSafeTeamName,
   mergeTeamStores,
   MODEL_ALIASES,
+  parseModelsCache,
   reconcileToolMembers,
+  resolveModelAuth,
+  serializeModelsCache,
   removeArgs,
   syncCharterMembers,
   type AwakenStatus,
@@ -452,35 +455,84 @@ export function firstLine(r: RunResult): string {
 
 let _modelsCache: Promise<string[]> | null = null;
 
-/** Options for the member "model" dropdown. Base = the version-proof provider
- *  aliases (opus/sonnet/haiku). If an Anthropic API key is in the environment,
- *  augment with the concrete model IDs the provider currently serves (GET
- *  /v1/models) so the list reflects reality even after the provider renames or
- *  adds models. Cached for the panel's lifetime; never throws. */
+/** Where the fetched model list is persisted. Overridable for tests. */
+export function modelsCachePath(): string {
+  return (
+    process.env.MC_MODELS_CACHE_PATH ||
+    path.join(os.homedir(), ".mission-control", "models.json")
+  );
+}
+
+/** Claude Code's own OAuth credential — the fallback credential when no
+ *  ANTHROPIC_* env var is set (the normal state on a subscription-login machine). */
+function claudeCredsPath(): string {
+  return (
+    process.env.MC_CLAUDE_CREDS_PATH ||
+    path.join(os.homedir(), ".claude", ".credentials.json")
+  );
+}
+
+function readIfPresent(p: string): string | null {
+  try {
+    return fs.readFileSync(p, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** Options for the member "model" dropdown = the models the account can ACTUALLY
+ *  use, not a list somebody has to remember to bump (see MODEL_ALIASES for why that
+ *  bit us). Resolution order:
+ *    1. disk cache, if still inside MODELS_CACHE_TTL_MS  ← the common path
+ *    2. `GET /v1/models` with whatever credential exists (env key, else Claude Code's
+ *       own OAuth token), then WRITE the cache
+ *    3. the pinned MODEL_ALIASES
+ *  Two layers of caching on purpose: the module-level promise means one fetch per
+ *  extension host at most (so waking N oracles never fetches N times), and the file
+ *  means a reload/restart doesn't refetch either. Never throws — a dropdown must
+ *  always render. */
 export function availableModels(): Promise<string[]> {
   if (!_modelsCache) _modelsCache = computeModels();
   return _modelsCache;
 }
 
+/** Merge: pinned aliases first (recommended, stable ordering), then anything served
+ *  that isn't already covered. */
+function mergeIds(base: string[], extra: string[]): string[] {
+  return [...base, ...extra.filter((id) => !base.includes(id))];
+}
+
 async function computeModels(): Promise<string[]> {
   const base: string[] = [...MODEL_ALIASES];
-  const key = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || "";
-  if (!key) return base; // no key → offer the aliases only (already version-proof)
+  const cached = parseModelsCache(readIfPresent(modelsCachePath()), Date.now());
+  if (cached) return mergeIds(base, cached);
+
+  const auth = resolveModelAuth(process.env, readIfPresent(claudeCredsPath()));
+  if (!auth) return base; // nothing to authenticate with → pinned list
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 5000);
     const res = await fetch("https://api.anthropic.com/v1/models?limit=100", {
-      headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
+      headers: { ...auth.headers, "anthropic-version": "2023-06-01" },
       signal: ctrl.signal,
     });
     clearTimeout(timer);
+    // 401/403 is the EXPECTED outcome for a subscription OAuth token that isn't
+    // scoped for this endpoint — degrade to the pinned list, don't surface an error.
     if (!res.ok) return base;
     const data = (await res.json()) as { data?: { id?: string }[] };
     const ids = (data.data ?? [])
       .map((m) => m?.id)
       .filter((id): id is string => typeof id === "string" && id.length > 0);
-    // Aliases first (recommended), then concrete IDs not already covered.
-    return [...base, ...ids.filter((id) => !base.includes(id))];
+    if (!ids.length) return base;
+    try {
+      const p = modelsCachePath();
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, serializeModelsCache(ids, Date.now()), "utf8");
+    } catch {
+      /* cache is an optimization — a read-only FS must not break the dropdown */
+    }
+    return mergeIds(base, ids);
   } catch {
     return base;
   }

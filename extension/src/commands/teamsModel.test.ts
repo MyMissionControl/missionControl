@@ -1,19 +1,24 @@
 import { expect, test } from "bun:test";
 
 import {
+  MODELS_CACHE_TTL_MS,
   MODEL_ALIASES,
   awakenStatusFromClaudeMd,
   createArgs,
   deleteArgs,
   diffMembers,
+  extractOauthToken,
   findDuplicateOracleNames,
   inviteArgs,
   isSafeModelId,
   isSafeTeamName,
   mergeTeamStores,
   normalizeOracle,
+  parseModelsCache,
   reconcileToolMembers,
   removeArgs,
+  resolveModelAuth,
+  serializeModelsCache,
   syncCharterMembers,
   type TeamMember,
 } from "./teamsModel";
@@ -298,4 +303,96 @@ test("isSafeModelId: shell metacharacters rejected, never sanitized", () => {
 test("isSafeModelId: empty / oversized rejected", () => {
   expect(isSafeModelId("")).toBe(false);
   expect(isSafeModelId("a".repeat(101))).toBe(false);
+});
+
+// ── live model list: cache + credential resolution ────────────────────────────
+// Why this exists: MODEL_ALIASES going stale is a bug that already shipped — Opus 5
+// was unrepresentable in the picker, so a pick that read "opus-4-8" while the worker
+// ran opus-5 looked like a config mismatch rather than the dead --model path it was.
+
+test("MODEL_ALIASES: includes the current top Opus (the stale-list bug)", () => {
+  expect(MODEL_ALIASES).toContain("claude-opus-5");
+  expect(MODEL_ALIASES.every((m) => isSafeModelId(m))).toBe(true);
+});
+
+const NOW = 1_800_000_000_000;
+
+test("parseModelsCache: fresh cache returns its ids", () => {
+  const raw = serializeModelsCache(["claude-opus-5", "claude-sonnet-5"], NOW);
+  expect(parseModelsCache(raw, NOW + 1000)).toEqual(["claude-opus-5", "claude-sonnet-5"]);
+});
+
+test("parseModelsCache: expired past the TTL returns null (so we refetch)", () => {
+  const raw = serializeModelsCache(["claude-opus-5"], NOW);
+  expect(parseModelsCache(raw, NOW + MODELS_CACHE_TTL_MS + 1)).toBeNull();
+  expect(parseModelsCache(raw, NOW + MODELS_CACHE_TTL_MS - 1)).toEqual(["claude-opus-5"]);
+});
+
+test("parseModelsCache: future timestamp rejected (clock jump must not pin a stale list)", () => {
+  expect(parseModelsCache(serializeModelsCache(["claude-opus-5"], NOW + 5000), NOW)).toBeNull();
+});
+
+test("parseModelsCache: unusable input returns null, never throws", () => {
+  for (const bad of [null, undefined, "", "not json", "[1,2,3]", "{}", '{"ids":["a"]}',
+                     '{"fetchedAt":"x","ids":["a"]}', '{"fetchedAt":1,"ids":"a"}']) {
+    expect(parseModelsCache(bad as string | null, NOW)).toBeNull();
+  }
+});
+
+test("parseModelsCache: ⛔ re-validates ids from disk (they reach a --model cmdline)", () => {
+  const tampered = JSON.stringify({ fetchedAt: NOW, ids: ["claude-opus-5", "x; rm -rf /", "a b"] });
+  expect(parseModelsCache(tampered, NOW)).toEqual(["claude-opus-5"]);
+  // all-unsafe = same as no cache
+  expect(parseModelsCache(JSON.stringify({ fetchedAt: NOW, ids: ["$(id)"] }), NOW)).toBeNull();
+  expect(parseModelsCache(JSON.stringify({ fetchedAt: NOW, ids: [] }), NOW)).toBeNull();
+});
+
+test("resolveModelAuth: API key uses x-api-key, NOT bearer", () => {
+  const a = resolveModelAuth({ ANTHROPIC_API_KEY: "sk-ant-api-xxx" })!;
+  expect(a.source).toBe("api-key");
+  expect(a.headers["x-api-key"]).toBe("sk-ant-api-xxx");
+  expect(a.headers.Authorization).toBeUndefined();
+  expect(a.headers["anthropic-beta"]).toBeUndefined();
+});
+
+test("resolveModelAuth: OAuth token uses Bearer + the oauth beta header", () => {
+  const a = resolveModelAuth({ ANTHROPIC_AUTH_TOKEN: "sk-ant-oat01-yyy" })!;
+  expect(a.source).toBe("auth-token");
+  expect(a.headers.Authorization).toBe("Bearer sk-ant-oat01-yyy");
+  expect(a.headers["anthropic-beta"]).toBe("oauth-2025-04-20");
+  expect(a.headers["x-api-key"]).toBeUndefined();
+});
+
+test("resolveModelAuth: falls back to Claude Code's creds file", () => {
+  const creds = JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-zzz", expiresAt: NOW + 60_000 } });
+  const a = resolveModelAuth({}, creds)!;
+  expect(a.source).toBe("claude-oauth");
+  expect(a.headers.Authorization).toBe("Bearer sk-ant-oat01-zzz");
+});
+
+test("resolveModelAuth: env wins over the creds file", () => {
+  const creds = JSON.stringify({ claudeAiOauth: { accessToken: "from-file" } });
+  expect(resolveModelAuth({ ANTHROPIC_API_KEY: "from-env" }, creds)!.headers["x-api-key"]).toBe("from-env");
+});
+
+test("resolveModelAuth: nothing available = null (caller uses the pinned list)", () => {
+  expect(resolveModelAuth({})).toBeNull();
+  expect(resolveModelAuth({ ANTHROPIC_API_KEY: "   " }, "not json")).toBeNull();
+  expect(resolveModelAuth({}, JSON.stringify({ claudeAiOauth: {} }))).toBeNull();
+});
+
+test("extractOauthToken: finds the token at any nesting depth", () => {
+  expect(extractOauthToken(JSON.stringify({ accessToken: "t1" }))).toBe("t1");
+  expect(extractOauthToken(JSON.stringify({ a: { b: { access_token: "t2" } } }))).toBe("t2");
+  expect(extractOauthToken("garbage")).toBeNull();
+  expect(extractOauthToken(null)).toBeNull();
+});
+
+test("extractOauthToken: skips an expired token (don't send a dead credential)", () => {
+  const expired = JSON.stringify({ claudeAiOauth: { accessToken: "old", expiresAt: NOW - 1 } });
+  expect(extractOauthToken(expired, NOW)).toBeNull();
+  const live = JSON.stringify({ claudeAiOauth: { accessToken: "new", expiresAt: NOW + 1 } });
+  expect(extractOauthToken(live, NOW)).toBe("new");
+  // no expiry field = usable (shape has moved before; don't assume it's there)
+  expect(extractOauthToken(JSON.stringify({ accessToken: "noexp" }), NOW)).toBe("noexp");
 });

@@ -23,18 +23,124 @@ export const COLOR_OPTIONS = [
   "orange",
 ] as const;
 
-/** Model options for `claude --model` — pinned, versioned Claude model IDs so the
- *  dropdown shows an explicit version rather than a bare "opus"/"claude". Trade-off
- *  vs bare aliases (opus/sonnet/haiku, which auto-track the latest tier): these pin
- *  to a specific version and must be hand-bumped when a newer model ships.
- *  teamsOps.availableModels() still merges the real, currently-served model IDs on
- *  top of these when an Anthropic API key is present in the environment. */
+/** Model options for `claude --model` — the FALLBACK list only. Pinned, versioned
+ *  Claude model IDs so the dropdown shows an explicit version rather than a bare
+ *  "opus"/"claude".
+ *  ⚠️ This list going stale is a real bug, not a theoretical one: Opus 5 shipped and
+ *  nobody bumped it, so the picker could not express the model the user had actually
+ *  chosen — every pick capped at opus-4-8 while the worker (via the global default)
+ *  ran opus-5, which made a genuinely broken `--model` path look correct.
+ *  teamsOps.availableModels() therefore prefers the LIVE served list from
+ *  `GET /v1/models`, cached to disk so it is fetched at most once per TTL — not per
+ *  oracle and not per panel open. These pinned IDs are what you get when no
+ *  credential is available and no cache has been written yet. */
 export const MODEL_ALIASES = [
+  "claude-opus-5",
   "claude-opus-4-8",
   "claude-opus-4-7",
   "claude-sonnet-5",
   "claude-haiku-4-5",
 ] as const;
+
+/** How long a fetched model list stays good. Long on purpose: new models ship on
+ *  the order of weeks, and the point of the cache is that opening Team Config (or
+ *  waking a fleet of oracles) never triggers a fetch per oracle. */
+export const MODELS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** On-disk shape of the model cache. */
+export type ModelsCache = { fetchedAt: number; ids: string[] };
+
+/** parseModelsCache — PURE: validate + expire a cache file's contents.
+ *  Returns the id list, or null for anything unusable (missing / malformed /
+ *  expired / no safe ids). ⛔ ids are re-validated with isSafeModelId here, not
+ *  trusted from disk: they end up in a `claude --model <id>` command line. */
+export function parseModelsCache(
+  raw: string | null | undefined,
+  nowMs: number,
+  ttlMs: number = MODELS_CACHE_TTL_MS,
+): string[] | null {
+  if (!raw) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof obj !== "object" || obj === null) return null;
+  const { fetchedAt, ids } = obj as Partial<ModelsCache>;
+  if (typeof fetchedAt !== "number" || !Number.isFinite(fetchedAt)) return null;
+  // Reject a future timestamp too — a clock jump would otherwise pin a stale list.
+  if (fetchedAt > nowMs || nowMs - fetchedAt > ttlMs) return null;
+  if (!Array.isArray(ids)) return null;
+  const safe = ids.filter((id): id is string => typeof id === "string" && isSafeModelId(id));
+  return safe.length ? safe : null;
+}
+
+/** serializeModelsCache — PURE: the bytes to write for a freshly fetched list. */
+export function serializeModelsCache(ids: string[], nowMs: number): string {
+  return JSON.stringify({ fetchedAt: nowMs, ids } satisfies ModelsCache, null, 2);
+}
+
+/** resolveModelAuth — PURE: pick the credential to call the Anthropic API with, from
+ *  the environment first and the local Claude Code OAuth credential second.
+ *    1. ANTHROPIC_API_KEY      → `x-api-key` (the plain API-key path)
+ *    2. ANTHROPIC_AUTH_TOKEN   → `Authorization: Bearer` + the oauth beta header
+ *    3. Claude Code's own OAuth token on disk → same Bearer + beta header
+ *  ⚠️ OAuth tokens go on `Authorization: Bearer`, NEVER on `x-api-key` — swapping an
+ *     API key for an OAuth token is a header change, not a value change. The
+ *     `anthropic-beta: oauth-2025-04-20` header is required on that path.
+ *  ⚠️ Path 3 is BEST-EFFORT and unverified: a Claude Code subscription token may not
+ *     be scoped for `/v1/models` and can 401. That is fine — the caller falls back to
+ *     the pinned list. Never surface it as an error to the user.
+ *  ⛔ returns headers only — the token is never logged, cached, or echoed anywhere. */
+export function resolveModelAuth(
+  env: Record<string, string | undefined>,
+  credsRaw?: string | null,
+): { headers: Record<string, string>; source: "api-key" | "auth-token" | "claude-oauth" } | null {
+  const key = (env.ANTHROPIC_API_KEY || "").trim();
+  if (key) return { headers: { "x-api-key": key }, source: "api-key" };
+  const bearer = (env.ANTHROPIC_AUTH_TOKEN || "").trim();
+  if (bearer) return { headers: oauthHeaders(bearer), source: "auth-token" };
+  const tok = extractOauthToken(credsRaw);
+  if (tok) return { headers: oauthHeaders(tok), source: "claude-oauth" };
+  return null;
+}
+
+function oauthHeaders(token: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${token}`,
+    "anthropic-beta": "oauth-2025-04-20",
+    "user-agent": "claude-code",
+  };
+}
+
+/** extractOauthToken — PURE: find a live access token in Claude Code's credentials
+ *  JSON without hard-coding its nesting (the shape has moved before). Walks the
+ *  object for an `accessToken`/`access_token` string, and honors a sibling
+ *  `expiresAt`/`expires_at` epoch-ms so an expired token isn't sent. */
+export function extractOauthToken(raw: string | null | undefined, nowMs = Date.now()): string | null {
+  if (!raw) return null;
+  let root: unknown;
+  try {
+    root = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const stack: unknown[] = [root];
+  while (stack.length) {
+    const node = stack.pop();
+    if (typeof node !== "object" || node === null) continue;
+    const rec = node as Record<string, unknown>;
+    const tok = rec.accessToken ?? rec.access_token;
+    if (typeof tok === "string" && tok.trim()) {
+      const exp = rec.expiresAt ?? rec.expires_at;
+      if (typeof exp === "number" && Number.isFinite(exp) && exp <= nowMs) continue; // expired
+      return tok.trim();
+    }
+    for (const v of Object.values(rec)) if (typeof v === "object" && v !== null) stack.push(v);
+  }
+  return null;
+}
 
 export const DEFAULT_ROLE = "member";
 // The model a member defaults to when none is stored (or when maw wrote the bare

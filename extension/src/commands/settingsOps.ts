@@ -103,8 +103,12 @@ export const SETTINGS_SCHEMA: FieldSchema[] = [
     group: "Teams",
     type: "select",
     default: DEFAULT_MODEL,
-    // Options mirror the Team Config member dropdown (teamsModel.MODEL_ALIASES),
-    // shown without the "claude-" prefix like that dropdown does.
+    // Pinned subset only (teamsModel.MODEL_ALIASES), shown without the "claude-"
+    // prefix like the Team Config dropdown does.
+    // ⚠️ NOT a full mirror of that dropdown any more: Team Config merges the live
+    // `GET /v1/models` list on top of these (teamsOps.availableModels), which this
+    // SCHEMA can't do — it's a static module-level array and the fetch is async.
+    // So a brand-new model shows up per-member before it shows up as the default.
     options: MODEL_ALIASES.map((m) => ({
       value: m,
       label: m.replace(/^claude-/, ""),
