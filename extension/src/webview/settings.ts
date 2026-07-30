@@ -18,6 +18,7 @@ import {
   searchSectionStyle,
 } from "./searchSection";
 import { graphifyRefreshCommand } from "../commands/graphifyRefresh"; // [graphify-temp]
+import { availableModels } from "../commands/teamsOps";
 
 // Editor-area Settings page. Singleton panel + a display-ready postMessage + a
 // small message switch — mirrors accounts.ts / teams.ts. All fs lives in
@@ -44,12 +45,36 @@ function grouped(entries: SettingEntry[]): { group: string; fields: SettingEntry
     .map((group) => ({ group, fields: byGroup.get(group) as SettingEntry[] }));
 }
 
+// Model list for the "Default member model" dropdown, cached per window so
+// repainting the page never re-fetches. availableModels() itself is memoised +
+// disk-cached; this just avoids awaiting a promise we already resolved.
+let _liveModels: string[] | undefined;
+
 function pushList(panel: vscode.WebviewPanel): void {
   panel.webview.postMessage({
     type: "settings",
-    groups: grouped(listSettings()),
+    groups: grouped(listSettings(_liveModels)),
     path: configPath(),
   });
+}
+
+/** Stale-while-revalidate, same shape as pushSearch: paint immediately from the
+ *  pinned model subset (never blocks on the network), then re-push once the live
+ *  `GET /v1/models` list is in — which is what stops this page's dropdown from
+ *  disagreeing with the Team Config per-member picker. */
+async function pushListEnriched(panel: vscode.WebviewPanel): Promise<void> {
+  pushList(panel);
+  try {
+    const ids = await availableModels();
+    if (!ids.length) return;
+    const same =
+      _liveModels?.length === ids.length && _liveModels.every((m, i) => m === ids[i]);
+    if (same) return; // nothing new → don't churn the UI
+    _liveModels = ids;
+    pushList(panel);
+  } catch {
+    /* keep the pinned paint — availableModels already degrades on its own */
+  }
 }
 
 async function pushSearch(panel: vscode.WebviewPanel): Promise<void> {
@@ -108,14 +133,14 @@ export function openSettingsPanel(): vscode.WebviewPanel {
 
       case "ready":
       case "reload":
-        pushList(panel);
+        void pushListEnriched(panel);
         void pushSearch(panel);
         return;
 
       case "set": {
         if (typeof msg.key !== "string") return;
         try {
-          setSetting(msg.key, msg.value as string | number | boolean);
+          setSetting(msg.key, msg.value as string | number | boolean, _liveModels);
         } catch (err) {
           const m = err instanceof Error ? err.message : String(err);
           vscode.window.showErrorMessage(`Settings: ${m}`);

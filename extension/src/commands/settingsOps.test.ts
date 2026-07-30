@@ -6,10 +6,11 @@ import * as path from "path";
 import {
   getDefaultMemberModel,
   listSettings,
+  modelOptions,
   readConfig,
   setSetting,
 } from "./settingsOps";
-import { DEFAULT_MODEL } from "./teamsModel";
+import { DEFAULT_MODEL, MODEL_ALIASES } from "./teamsModel";
 
 // Point MC_CONFIG_PATH at a throwaway file so nothing touches the real
 // ~/.mission-control/config.json.
@@ -165,5 +166,65 @@ describe("orches_test_cap special-case (orches sidecar, not config.json)", () =>
     expect(
       listSettings().find((x) => x.key === "orches_test_cap_nolimit")?.value,
     ).toBe(true);
+  });
+});
+
+// ── live model list injection (2026-07-29) ────────────────────────────────────
+// The Settings dropdown used to render the pinned MODEL_ALIASES only, while Team
+// Config merged the live GET /v1/models list — so the two pages disagreed and a
+// newly-served model (claude-fable-5) could not be chosen as the default at all.
+const LIVE = ["claude-opus-5", "claude-fable-5", "claude-sonnet-5"];
+const modelField = (ids?: readonly string[]) =>
+  listSettings(ids).find((e) => e.key === "default_member_model");
+
+describe("Settings: live model list", () => {
+  test("no ids passed → pinned subset (the instant paint, unchanged behaviour)", () => {
+    expect(modelField()?.options?.map((o) => o.value)).toEqual([...MODEL_ALIASES]);
+  });
+
+  test("ids passed → dropdown shows the served list instead", () => {
+    expect(modelField(LIVE)?.options?.map((o) => o.value)).toEqual(LIVE);
+  });
+
+  test("empty served list falls back to pinned (never renders an empty dropdown)", () => {
+    expect(modelField([])?.options?.map((o) => o.value)).toEqual([...MODEL_ALIASES]);
+  });
+
+  test("labels stay stripped of the claude- prefix in both modes", () => {
+    expect(modelField(LIVE)?.options?.map((o) => o.label)).toEqual([
+      "opus-5",
+      "fable-5",
+      "sonnet-5",
+    ]);
+  });
+
+  test("modelOptions is pure and mirrors that fallback rule", () => {
+    expect(modelOptions([]).length).toBe(MODEL_ALIASES.length);
+    expect(modelOptions(["claude-x"])).toEqual([{ value: "claude-x", label: "x" }]);
+  });
+
+  test("setSetting ACCEPTS a live-only model when the list is supplied", () => {
+    setSetting("default_member_model", "claude-fable-5", LIVE);
+    expect(getDefaultMemberModel()).toBe("claude-fable-5");
+  });
+
+  test("setSetting still REJECTS a model nobody serves", () => {
+    expect(() => setSetting("default_member_model", "claude-made-up", LIVE)).toThrow();
+  });
+
+  test("without the list, a live-only model is rejected — the bug this fixes", () => {
+    expect(() => setSetting("default_member_model", "claude-fable-5")).toThrow();
+  });
+
+  test("setSetting echoes back the ENRICHED options, not the pinned ones", () => {
+    const out = setSetting("default_member_model", "claude-opus-5", LIVE);
+    const f = out.find((e) => e.key === "default_member_model");
+    expect(f?.options?.map((o) => o.value)).toEqual(LIVE);
+  });
+
+  test("other select keys are untouched by the injection", () => {
+    const merge = listSettings(LIVE).find((e) => e.key === "merge_mode");
+    expect(merge?.options?.map((o) => o.value)).toEqual(["online", "local"]);
+    expect(() => setSetting("merge_mode", "claude-fable-5", LIVE)).toThrow();
   });
 });

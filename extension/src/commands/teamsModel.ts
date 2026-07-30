@@ -50,6 +50,29 @@ export const MODELS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** On-disk shape of the model cache. */
 export type ModelsCache = { fetchedAt: number; ids: string[] };
 
+/** mergeModelIds — PURE: pinned aliases first (stable, recommended ordering), then
+ *  anything the API serves that the pinned list does not already express.
+ *
+ *  ⛔ Why the date-suffix rule: `GET /v1/models` (verified live 2026-07-29, HTTP 200 on a
+ *  subscription OAuth token) returns 11 ids, and some are dated snapshots of a model the
+ *  pinned list already carries as an undated alias — e.g. served
+ *  `claude-haiku-4-5-20251001` vs pinned `claude-haiku-4-5`. Appending both put two rows
+ *  for the SAME model in the picker, which is exactly the kind of near-duplicate that makes
+ *  a user pick the wrong one. A served id whose trailing `-YYYYMMDD` is stripped to an
+ *  already-present alias is dropped; genuinely older models that ONLY exist in dated form
+ *  (claude-opus-4-1-20250805) still come through, because stripping them matches nothing. */
+export function mergeModelIds(base: readonly string[], extra: readonly string[]): string[] {
+  const have = new Set(base);
+  const out = [...base];
+  for (const id of extra) {
+    if (have.has(id)) continue;
+    if (have.has(id.replace(/-\d{8}$/, ""))) continue; // dated snapshot of a pinned alias
+    have.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
 /** parseModelsCache — PURE: validate + expire a cache file's contents.
  *  Returns the id list, or null for anything unusable (missing / malformed /
  *  expired / no safe ids). ⛔ ids are re-validated with isSafeModelId here, not

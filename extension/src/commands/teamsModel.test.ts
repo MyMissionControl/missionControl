@@ -12,6 +12,7 @@ import {
   inviteArgs,
   isSafeModelId,
   isSafeTeamName,
+  mergeModelIds,
   mergeTeamStores,
   normalizeOracle,
   parseModelsCache,
@@ -395,4 +396,63 @@ test("extractOauthToken: skips an expired token (don't send a dead credential)",
   expect(extractOauthToken(live, NOW)).toBe("new");
   // no expiry field = usable (shape has moved before; don't assume it's there)
   expect(extractOauthToken(JSON.stringify({ accessToken: "noexp" }), NOW)).toBe("noexp");
+});
+
+// ── mergeModelIds — live served list vs pinned aliases. Shapes taken from the REAL
+//    GET /v1/models response (verified 2026-07-29, HTTP 200 on a subscription OAuth
+//    token): 11 ids, several of them dated snapshots of a model already pinned. ──
+test("mergeModelIds: pinned order first, appends only genuinely new ids", () => {
+  expect(
+    mergeModelIds(["claude-opus-5", "claude-sonnet-5"], ["claude-sonnet-5", "claude-fable-5"]),
+  ).toEqual(["claude-opus-5", "claude-sonnet-5", "claude-fable-5"]);
+});
+
+test("mergeModelIds: drops a dated snapshot of an alias already pinned", () => {
+  // served claude-haiku-4-5-20251001 IS pinned claude-haiku-4-5 — two rows, one model
+  expect(mergeModelIds(["claude-haiku-4-5"], ["claude-haiku-4-5-20251001"])).toEqual([
+    "claude-haiku-4-5",
+  ]);
+});
+
+test("mergeModelIds: keeps an older model that ONLY exists in dated form", () => {
+  expect(mergeModelIds(["claude-opus-5"], ["claude-opus-4-1-20250805"])).toEqual([
+    "claude-opus-5",
+    "claude-opus-4-1-20250805",
+  ]);
+});
+
+test("mergeModelIds: dedupes repeats inside the served list itself", () => {
+  expect(mergeModelIds(["a"], ["b", "b", "c"])).toEqual(["a", "b", "c"]);
+});
+
+test("mergeModelIds: empty served list leaves the pinned list untouched", () => {
+  expect(mergeModelIds(["claude-opus-5"], [])).toEqual(["claude-opus-5"]);
+});
+
+test("mergeModelIds: a dated id survives when its stripped form is NOT pinned", () => {
+  expect(mergeModelIds(["claude-opus-5"], ["claude-zzz-20240101"])).toEqual([
+    "claude-opus-5",
+    "claude-zzz-20240101",
+  ]);
+});
+
+test("mergeModelIds: the real 11-id response yields no duplicates", () => {
+  const served = [
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+    "claude-opus-4-5-20251101",
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-5-20250929",
+    "claude-opus-4-1-20250805",
+  ];
+  const out = mergeModelIds([...MODEL_ALIASES], served);
+  expect(out).toContain("claude-fable-5");
+  expect(out).toContain("claude-haiku-4-5");
+  expect(out).not.toContain("claude-haiku-4-5-20251001");
+  expect(new Set(out).size).toBe(out.length);
 });

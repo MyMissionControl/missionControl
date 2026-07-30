@@ -14,6 +14,7 @@ import {
   isSafeTeamName,
   mergeTeamStores,
   MODEL_ALIASES,
+  mergeModelIds,
   parseModelsCache,
   reconcileToolMembers,
   resolveModelAuth,
@@ -496,16 +497,10 @@ export function availableModels(): Promise<string[]> {
   return _modelsCache;
 }
 
-/** Merge: pinned aliases first (recommended, stable ordering), then anything served
- *  that isn't already covered. */
-function mergeIds(base: string[], extra: string[]): string[] {
-  return [...base, ...extra.filter((id) => !base.includes(id))];
-}
-
 async function computeModels(): Promise<string[]> {
   const base: string[] = [...MODEL_ALIASES];
   const cached = parseModelsCache(readIfPresent(modelsCachePath()), Date.now());
-  if (cached) return mergeIds(base, cached);
+  if (cached) return mergeModelIds(base, cached);
 
   const auth = resolveModelAuth(process.env, readIfPresent(claudeCredsPath()));
   if (!auth) return base; // nothing to authenticate with → pinned list
@@ -532,7 +527,7 @@ async function computeModels(): Promise<string[]> {
     } catch {
       /* cache is an optimization — a read-only FS must not break the dropdown */
     }
-    return mergeIds(base, ids);
+    return mergeModelIds(base, ids);
   } catch {
     return base;
   }

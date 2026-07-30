@@ -103,12 +103,10 @@ export const SETTINGS_SCHEMA: FieldSchema[] = [
     group: "Teams",
     type: "select",
     default: DEFAULT_MODEL,
-    // Pinned subset only (teamsModel.MODEL_ALIASES), shown without the "claude-"
-    // prefix like the Team Config dropdown does.
-    // ⚠️ NOT a full mirror of that dropdown any more: Team Config merges the live
-    // `GET /v1/models` list on top of these (teamsOps.availableModels), which this
-    // SCHEMA can't do — it's a static module-level array and the fetch is async.
-    // So a brand-new model shows up per-member before it shows up as the default.
+    // Pinned subset (teamsModel.MODEL_ALIASES), shown without the "claude-" prefix
+    // like the Team Config dropdown does. This static array is the INSTANT paint;
+    // listSettings(modelIds) swaps in the live served list when the caller has it
+    // (see modelOptions below) so the two dropdowns agree.
     options: MODEL_ALIASES.map((m) => ({
       value: m,
       label: m.replace(/^claude-/, ""),
@@ -196,9 +194,28 @@ export function getDefaultMemberModel(): string {
   return typeof v === "string" && v.trim() ? v : DEFAULT_MODEL;
 }
 
+/** The key whose select options come from the live model list, not the schema. */
+const LIVE_MODEL_KEY = "default_member_model";
+
+/** modelOptions — PURE: {value,label} rows for the model dropdown.
+ *  ⛔ Why this is injected rather than fetched here: the served list arrives from an
+ *  async `GET /v1/models` (teamsOps.availableModels), and settingsOps must stay
+ *  sync + vscode-free + importable by bun test — and importing teamsOps would also
+ *  couple the settings page to git/oracle-path code it has no business knowing.
+ *  Caller passes what it already has; empty/absent falls back to the pinned subset. */
+export function modelOptions(
+  modelIds?: readonly string[],
+): { value: string; label: string }[] {
+  const ids = modelIds && modelIds.length ? modelIds : MODEL_ALIASES;
+  return ids.map((m) => ({ value: m, label: m.replace(/^claude-/, "") }));
+}
+
 /** Schema-driven view: every known field (file value or default) plus any
- *  unknown keys still on disk, so the page shows the whole file. */
-export function listSettings(): SettingEntry[] {
+ *  unknown keys still on disk, so the page shows the whole file.
+ *  `modelIds` (optional) = the live served model list; when given, the
+ *  "Default member model" dropdown shows it instead of the pinned subset, so this
+ *  page and the Team Config per-member picker can no longer disagree. */
+export function listSettings(modelIds?: readonly string[]): SettingEntry[] {
   const raw = readConfig();
   const entries: SettingEntry[] = SETTINGS_SCHEMA.map((f) => ({
     key: f.key,
@@ -206,7 +223,7 @@ export function listSettings(): SettingEntry[] {
     group: f.group,
     type: f.type,
     help: f.help,
-    options: f.options,
+    options: f.key === LIVE_MODEL_KEY ? modelOptions(modelIds) : f.options,
     legacy: !!f.legacy,
     value: f.key in raw ? (raw[f.key] as string | number | boolean) : f.default,
     known: true,
@@ -248,22 +265,23 @@ export function listSettings(): SettingEntry[] {
 export function setSetting(
   key: string,
   value: string | number | boolean,
+  modelIds?: readonly string[],
 ): SettingEntry[] {
   // auto_skill_enabled toggles the CLAUDE.md block, not a config.json value.
   if (key === "auto_skill_enabled") {
     setAutoSkillEnabled(value === true || value === "true");
-    return listSettings();
+    return listSettings(modelIds);
   }
   // orches cap knobs write the orches sidecar, not config.json. The number field
   // validates a positive integer (throw → UI error toast); the slide toggle sets
   // "loop until pass" without disturbing the number.
   if (key === "orches_test_cap") {
     writeTestCapNumber(value as string | number);
-    return listSettings();
+    return listSettings(modelIds);
   }
   if (key === "orches_test_cap_nolimit") {
     writeTestCapNoLimit(value === true || value === "true");
-    return listSettings();
+    return listSettings(modelIds);
   }
 
   const schema = SCHEMA_BY_KEY.get(key);
@@ -278,8 +296,15 @@ export function setSetting(
       if (!Number.isFinite(n)) throw new Error(`${key} must be a number`);
       next = n;
     } else if (schema.type === "select") {
-      const ok = (schema.options ?? []).some((o) => o.value === value);
-      if (!ok) throw new Error(`${key}: '${String(value)}' is not a valid option`);
+      // ⛔ the model dropdown's valid set is the LIVE list, not the schema's pinned
+      //   subset — otherwise picking a newly-served model (claude-fable-5) throws
+      //   "not a valid option" and the save silently fails in the UI.
+      const allowed =
+        key === LIVE_MODEL_KEY
+          ? modelOptions(modelIds).map((o) => o.value)
+          : (schema.options ?? []).map((o) => o.value);
+      if (!allowed.includes(String(value)))
+        throw new Error(`${key}: '${String(value)}' is not a valid option`);
       next = String(value);
     } else {
       next = String(value);
@@ -299,5 +324,5 @@ export function setSetting(
   const p = configPath();
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(raw, null, 2) + "\n", "utf8");
-  return listSettings();
+  return listSettings(modelIds);
 }
