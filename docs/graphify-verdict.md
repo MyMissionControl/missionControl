@@ -168,7 +168,9 @@ Zero LLM tokens in every case; clustering names communities with a deterministic
 
 **Correction (2026-07-27):** the sentence below about `built_at_commit` was based on reading 0.9.18 source, and execution disproved it — 0.9.29's `update` writes graph-level attributes of `{}` on **both** the clustered and `--no-cluster` paths, so there is no commit anchor to compare against on either. Freshness is now tracked by a hand-written `BUILT_AT.json` sidecar next to each rebuilt graph. Everything else in this subsection held.
 
-The reason this still counts against adoption is that **nothing keeps them fresh and the tool cannot tell you it is stale**:
+**Superseded 2026-07-30: automation now exists.** `~/.oracle/graphify/refresh-graphs.sh` runs from cron on Monday and Friday at 18:00 Asia/Bangkok (`CRON_TZ` pinned in the crontab, since `/etc/timezone` and `/etc/localtime` disagree on this box after the UTC→Bangkok migration). It rebuilds only the repos whose HEAD or working tree moved, refuses a rebuild that collapses below 50% of the previous node count, regenerates the HTML views, self-heals a view that fell behind its graph, and stamps every view with the commit and render time so staleness is visible in the browser. It was verified under `env -i PATH=/usr/bin:/bin` — cron's minimal environment — not just by hand. The paragraph below still explains *why* the tool's own mechanisms could not be used for this.
+
+The reason this counted against adoption before that script existed is that **nothing kept them fresh and the tool cannot tell you it is stale**:
 
 - No cron entry, no systemd timer, no running process, no git hooks — the rebuild was never wired anywhere.
 - `graphify check-update` prints nothing and **exits 0**.
