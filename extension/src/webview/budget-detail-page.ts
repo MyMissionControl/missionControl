@@ -1,28 +1,19 @@
 import * as vscode from "vscode";
 
-import {
-  type Breakdown,
-  type Bucket,
-  type UsageSummary,
-  collapseProjectDayDetail,
-  collapseProjectHours,
-  getInstantUsage,
-  refreshUsage,
-} from "../usage";
+import { type UsageSummary } from "../usage";
+import { scanProjectUsage } from "../commands/projectUsageScan";
 
-// Editor-area panel: ONE project's Claude usage over time, as a bar chart.
-// Opened from a project row on the Budget page (budget.ts). The host collapses
-// the summary's per-cwd hourly buckets into a single hour-keyed series for THIS
-// project (usage.collapseProjectHours) and hands the webview only that series;
-// the client rolls it up over a user-chosen date RANGE [start, end] (picked via a
-// two-click calendar or a preset), with the bar unit DERIVED from the span (<=2d ->
-// hourly, <=92d -> daily, <=1095d -> monthly, else yearly); clicking a bar zooms
-// into its sub-range. Below the bars, a donut pie breaks the SAME range's spend
-// into input / output / cache-write / cache-read (host sends per-day byProject
-// DayDetail as `seriesDetail`). Bars use the same blue as the project rows'.
+// Editor-area panel: ONE project's Claude usage — the "Project Usage" drill-down.
+// Opened from a project row on the Budget page. The rich per-hour / per-session /
+// per-model / per-skill detail is scanned ON DEMAND for THIS project only
+// (commands/projectUsageScan.ts) so it never bloats the global usage cache. The
+// client rolls the hourly series up into year → month → day → hour buckets, each
+// bar stacked by token type; a side rail + models + sessions + skills fill the
+// history the old single-bar/donut layout was missing.
 //
-// Singleton panel (mirrors budget.ts). _root/_name hold the currently-shown
-// project so a background refresh re-collapses the right series.
+// Singleton panel. _root/_name hold the currently-shown project so a reopen
+// re-scans the right one. `summary` is accepted for call-site compatibility with
+// budget.ts but no longer needed — the scan reads transcripts directly.
 let _panel: vscode.WebviewPanel | undefined;
 let _root = "";
 let _name = "";
@@ -30,7 +21,7 @@ let _name = "";
 export function openBudgetDetailPanel(
   projectRoot: string,
   projectName: string,
-  summary: UsageSummary,
+  _summary?: UsageSummary,
 ): vscode.WebviewPanel {
   _root = projectRoot;
   _name = projectName;
@@ -38,14 +29,7 @@ export function openBudgetDetailPanel(
   if (_panel) {
     _panel.title = projectName + " — Usage";
     _panel.reveal();
-    postDetail(_panel, summary); // instant paint from the passed snapshot
-    // Reuse path: also kick a fresh scan + repaint (mirrors the ready handler on
-    // first open). Without this, reopening the panel for an actively-growing project
-    // only ever shows the cached summary passed in — so recent usage looks missing.
-    const panel = _panel;
-    void refreshUsage()
-      .then((fresh) => postDetail(panel, fresh))
-      .catch(() => {});
+    postUsage(_panel);
     return _panel;
   }
 
@@ -55,713 +39,552 @@ export function openBudgetDetailPanel(
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
-
   _panel = panel;
   panel.onDidDispose(() => {
     _panel = undefined;
   });
 
   panel.webview.html = renderDetailShell();
-
-  panel.webview.onDidReceiveMessage(async (msg) => {
+  panel.webview.onDidReceiveMessage((msg) => {
     if (!msg || typeof msg.type !== "string") return;
-    if (msg.type === "ready") {
-      const instant = await getInstantUsage();
-      if (instant) postDetail(panel, instant);
-      // Fresh scan in the background, then repaint — same stale-while-revalidate
-      // pattern as the budget panel.
-      void refreshUsage()
-        .then((fresh) => postDetail(panel, fresh))
-        .catch(() => {});
-    }
+    if (msg.type === "ready") postUsage(panel);
+    else if (msg.type === "close") panel.dispose(); // Back → return to the Budget list
   });
 
   return panel;
 }
 
-function postDetail(panel: vscode.WebviewPanel, summary: UsageSummary): void {
-  const series: Record<string, Bucket> = collapseProjectHours(summary, _root);
-  const seriesDetail: Record<string, Breakdown> = collapseProjectDayDetail(summary, _root);
-  panel.webview.postMessage({ type: "updateDetail", projectName: _name, series, seriesDetail });
+/** Scan this project's transcripts and hand the client the full usage payload.
+ *  The scan is synchronous FS work bounded to one project's transcript dirs. */
+function postUsage(panel: vscode.WebviewPanel): void {
+  let u;
+  try {
+    u = scanProjectUsage(_root);
+  } catch {
+    u = { hourly: {}, models: {}, sessions: [], skills: [] };
+  }
+  panel.webview.postMessage({ type: "usage", projectName: _name, hourly: u.hourly, models: u.models, sessions: u.sessions, skills: u.skills });
 }
 
-// NOTE: like budget.ts, the client <script> below is written with string
-// concatenation only — NO backticks and NO backslashes — so this outer template
-// literal never has to escape anything inside it.
+// NOTE: the client <script> below is written with string concatenation only —
+// NO backticks and NO backslashes — so this outer template literal never has to
+// escape anything. The only regexes used (esc) contain no backslashes.
 function renderDetailShell(): string {
-  return `<!DOCTYPE html><html lang="th"><head>
+  return `<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
-  :root { color-scheme: light dark; }
-  body {
-    font-family: var(--vscode-font-family);
-    color: var(--vscode-foreground);
-    background: var(--vscode-editor-background);
-    padding: 22px 24px; margin: 0;
+  :root, :root[data-theme="dark"] {
+    --bg:#0d1117; --panel:#11171d; --editor:#0f151b; --card:#161f28;
+    --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.13);
+    --txt:#e7eef5; --muted:#8a97a4; --faint:#5c6773;
+    --accent:#2f9dc4; --accent2:#40c8ea; --accentSoft:rgba(47,157,196,.15); --accentGlow:rgba(64,200,234,.28);
+    --dot:rgba(255,255,255,.028);
   }
-  .wrap { max-width: 1100px; margin: 0 auto; }
-  .head { margin-bottom: 22px; }
-  .title { font-size: 12px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; opacity: 0.55; margin: 0 0 6px; }
-  .hero { font-size: 26px; font-weight: 800; line-height: 1.05; letter-spacing: -0.8px; word-break: break-all; }
-  .subtitle { font-size: 12px; opacity: 0.6; margin-top: 5px; }
-
-  .controls { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
-  .seg { display: inline-flex; gap: 4px; }
-  .btn { background: transparent; color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35)); border-radius: 6px; padding: 6px 14px; font-size: 12px; cursor: pointer; }
-  .btn.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; font-weight: 600; }
-  .btn:hover:not(.active) { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.15)); }
-
-  .range-picker { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; position: relative; }
-  .range-trigger { font-variant-numeric: tabular-nums; min-width: 216px; text-align: center; }
-  .btn[disabled] { opacity: 0.4; cursor: default; }
-  .btn[disabled]:hover { border-color: var(--vscode-panel-border, rgba(128,128,128,0.35)); background: transparent; }
-
-  /* range calendar popover (two-click: pick start, then end) */
-  .cal-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 60; width: 256px; padding: 10px; border-radius: 10px;
-    background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
-    border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
-    box-shadow: 0 8px 28px rgba(0,0,0,0.32); }
-  .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-  .cal-title { font-size: 12.5px; font-weight: 700; }
-  .cal-nav { background: transparent; color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35)); border-radius: 6px; width: 26px; height: 26px; cursor: pointer; font-size: 15px; line-height: 1; }
-  .cal-nav:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.15)); }
-  .cal-hint { font-size: 11px; opacity: 0.6; margin: 2px 0 8px; }
-  .cal-week, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
-  .cal-week span { font-size: 10px; opacity: 0.5; text-align: center; padding: 2px 0; }
-  .cal-cell { text-align: center; font-size: 12px; padding: 6px 0; border-radius: 6px; font-variant-numeric: tabular-nums; }
-  .cal-day { cursor: pointer; }
-  .cal-day:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.18)); }
-  .cal-blank { visibility: hidden; }
-  .in-range { background: var(--vscode-list-inactiveSelectionBackground, rgba(77,157,224,0.22)); }
-  .sel-start, .sel-end { background: var(--vscode-button-background, var(--vscode-charts-blue, #4d9de0)); color: var(--vscode-button-foreground, #ffffff); font-weight: 700; }
-
-  .chart-box { padding: 16px 18px; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); border-radius: 10px; background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.05)); }
-  .chart-title { font-size: 12px; font-weight: 600; opacity: 0.8; margin-bottom: 14px; letter-spacing: 0.2px; }
-  #chart { width: 100%; height: 340px; display: block; }
-
-  .bar { fill: var(--vscode-charts-blue, #4d9de0); transition: opacity 0.1s; }
-  .bar:hover { opacity: 0.72; }
-  .axis-label { font-size: 10px; fill: var(--vscode-foreground); opacity: 0.55; }
-  .axis-line { stroke: var(--vscode-foreground); stroke-width: 1; opacity: 0.18; }
-
-  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); font-size: 12px; opacity: 0.85; }
-  .legend-item { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
-  .legend-swatch { width: 11px; height: 11px; border-radius: 3px; background: var(--vscode-charts-blue, #4d9de0); }
-
-  /* token-cost breakdown pie (donut), scoped to the selected range */
-  .pie-box { margin-top: 16px; padding: 16px 18px; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); border-radius: 10px; background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.05)); }
-  .pie-title { font-size: 12px; font-weight: 600; opacity: 0.8; margin-bottom: 14px; letter-spacing: 0.2px; }
-  .pie-wrap { display: flex; gap: 26px; align-items: center; flex-wrap: wrap; }
-  #pie { width: 188px; height: 188px; flex: 0 0 auto; }
-  .pie-slice { transition: opacity 0.1s; }
-  .pie-slice:hover { opacity: 0.78; }
-  .pie-legend { display: flex; flex-direction: column; gap: 9px; font-size: 12px; flex: 1 1 240px; min-width: 240px; }
-  .pie-legend .row { display: flex; align-items: center; gap: 9px; font-variant-numeric: tabular-nums; }
-  .pie-legend .sw { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }
-  .pie-legend .lab { opacity: 0.9; min-width: 88px; }
-  .pie-legend .val { opacity: 0.7; }
-  .pie-legend .pct { margin-left: auto; opacity: 0.55; }
-  .pie-total { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); font-size: 12px; opacity: 0.85; font-variant-numeric: tabular-nums; }
-
-  /* year/month bars drill one level deeper on click */
-  .bar.drill, .hit.drill { cursor: pointer; }
-
-  /* floating detail tooltip (follows the cursor; never eats the click) */
-  #tip {
-    position: fixed; z-index: 50; pointer-events: none; display: none; min-width: 128px; max-width: 260px;
-    background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
-    border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
-    border-radius: 9px; padding: 10px 12px; box-shadow: 0 6px 24px rgba(0,0,0,0.28); font-size: 12px;
+  :root[data-theme="light"] {
+    --bg:#e9edf1; --panel:#f9fbfc; --editor:#ffffff; --card:#ffffff;
+    --border:rgba(15,30,45,.10); --border2:rgba(15,30,45,.17);
+    --txt:#132029; --muted:#5a6b78; --faint:#94a1ad;
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); --accentGlow:rgba(14,136,173,.18);
+    --dot:rgba(15,30,45,.035);
   }
-  #tip .tt-when { font-weight: 700; font-size: 12.5px; margin-bottom: 5px; }
-  #tip .tt-cost { font-size: 17px; font-weight: 800; letter-spacing: -0.4px; font-variant-numeric: tabular-nums; }
-  #tip .tt-cost .cur { font-size: 12px; font-weight: 700; opacity: 0.55; margin-right: 1px; }
-  #tip .tt-tok { opacity: 0.62; margin-top: 2px; font-variant-numeric: tabular-nums; }
-  #tip .tt-hint { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); opacity: 0.62; font-size: 11px; }
+  :root { --pad:20px; --gap:14px; --cardpad:15px; --radius:14px; --secgap:20px;
+    --uifont:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --mono:'JetBrains Mono',var(--vscode-editor-font-family),ui-monospace,monospace; }
+  * { box-sizing: border-box; }
+  body { font-family: var(--uifont); font-size: 13.5px; color: var(--txt);
+    background: var(--editor); background-image: radial-gradient(var(--dot) 1px, transparent 1px);
+    background-size: 24px 24px; margin: 0; padding: var(--pad); }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+
+  .head { display: flex; align-items: flex-start; gap: 20px; margin-bottom: 16px; }
+  .head .htext { flex: 1; min-width: 0; }
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 2px; text-transform: uppercase; font-weight: 600; color: var(--faint); }
+  .pname { font-size: 27px; font-weight: 700; letter-spacing: -.4px; margin-top: 7px; }
+  .crumbs { display: flex; align-items: center; gap: 8px; margin-top: 9px; font-family: var(--mono); font-size: 11.5px; flex-wrap: wrap; }
+  .crumbs .cr { color: var(--muted); cursor: pointer; }
+  .crumbs .cr:hover { color: var(--accent2); }
+  .crumbs .cr.cur { color: var(--txt); cursor: default; }
+  .crumbs .sep { color: var(--faint); }
+  .crumbs .hint { color: var(--faint); font-size: 11px; }
+  .backbtn { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 8px;
+    background: var(--card); border: 1px solid var(--border2); color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 600; font-family: var(--uifont); }
+  .backbtn:hover { border-color: var(--accent); color: var(--txt); }
+  .backbtn svg { width: 12px; height: 12px; }
+
+  .shortcuts { display: flex; gap: 9px; margin-bottom: var(--secgap); }
+  .sc { height: 30px; padding: 0 15px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: var(--uifont);
+    background: var(--card); border: 1px solid var(--border2); color: var(--muted); }
+  .sc:hover { border-color: var(--accent); }
+  .sc.active { color: var(--txt); background: var(--accentSoft); border-color: var(--accent); }
+  #calBtn { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; }
+  #calBtn svg { width: 13px; height: 13px; }
+  .calpanel { padding: 14px; margin-bottom: var(--secgap); max-width: 340px; }
+  .calhead { display: flex; align-items: center; justify-content: center; gap: 14px; margin-bottom: 12px; }
+  .calhead .caltitle { font-family: var(--mono); font-size: 12.5px; font-weight: 700; min-width: 150px; text-align: center; }
+  .calnav { width: 28px; height: 28px; border-radius: 7px; background: var(--card); border: 1px solid var(--border2); color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; font-family: var(--uifont); }
+  .calnav:hover { border-color: var(--accent); color: var(--txt); }
+  .calgrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+  .calgrid .dow { text-align: center; font-family: var(--mono); font-size: 9px; letter-spacing: .5px; color: var(--faint); padding: 3px 0; }
+  .calgrid .cd { position: relative; height: 30px; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11.5px; color: var(--muted); border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
+  .calgrid .cd.blank { cursor: default; }
+  .calgrid .cd:not(.blank):hover { border-color: var(--accent); color: var(--txt); }
+  .calgrid .cd.has::after { content: ""; position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); width: 4px; height: 4px; border-radius: 50%; background: var(--accent2); }
+  .calgrid .cd.in { background: var(--accentSoft); color: var(--txt); border-radius: 0; }
+  .calgrid .cd.s { background: var(--accent); color: #fff; border-top-left-radius: 7px; border-bottom-left-radius: 7px; }
+  .calgrid .cd.e { background: var(--accent); color: #fff; border-top-right-radius: 7px; border-bottom-right-radius: 7px; }
+  .calgrid .cd.s.has::after, .calgrid .cd.e.has::after { background: #fff; }
+  .calgrid .cd.today { font-weight: 700; box-shadow: inset 0 0 0 1px var(--border2); }
+  .calfoot { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .calfoot .cclr { margin-left: auto; height: 26px; padding: 0 11px; border-radius: 7px; background: var(--card); border: 1px solid var(--border2); color: var(--muted); cursor: pointer; font-size: 11px; font-family: var(--uifont); }
+  .calfoot .cclr:hover { border-color: var(--accent); color: var(--txt); }
+
+  .row2 { display: flex; gap: var(--gap); margin-bottom: var(--secgap); }
+  .pc { padding: var(--cardpad); border-radius: var(--radius); background: var(--card); border: 1px solid var(--border); }
+  .clabel { font-family: var(--mono); font-size: 10px; letter-spacing: 1.6px; text-transform: uppercase; font-weight: 600; color: var(--faint); }
+  .chart { flex: 1; min-width: 0; }
+  .ctitle { display: flex; align-items: center; gap: 10px; }
+  .ctitle .ct { font-size: 13.5px; font-weight: 700; }
+  .ctitle .cleg { margin-left: auto; display: flex; gap: 10px; font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
+  .ctitle .cleg i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 4px; vertical-align: middle; }
+  .plotwrap { display: flex; gap: 8px; margin-top: 14px; }
+  .yaxis { display: flex; flex-direction: column; justify-content: space-between; height: 210px; font-family: var(--mono); font-size: 9.5px; color: var(--faint); text-align: right; }
+  .plot { flex: 1; min-width: 0; display: flex; align-items: flex-end; gap: 4px; height: 210px; border-bottom: 1px solid var(--border2); border-left: 1px solid var(--border2); padding-left: 4px; }
+  .col { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; }
+  .bar { display: flex; flex-direction: column-reverse; border-radius: 3px 3px 0 0; overflow: hidden; }
+  .bar.clk { cursor: pointer; }
+  .bar.clk:hover { opacity: .82; }
+  .bar > span { display: block; }
+  .xlabels { display: flex; gap: 4px; margin-top: 6px; padding-left: 4px; }
+  .xlabels .xl { flex: 1; min-width: 0; text-align: center; font-family: var(--mono); font-size: 9px; color: var(--faint); overflow: hidden; }
+  .cfoot { display: flex; align-items: center; gap: 16px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .cfoot .tot { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; color: var(--txt); }
+  .cfoot .tot i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+
+  .rail { width: 296px; flex: none; display: flex; flex-direction: column; gap: var(--gap); }
+  .stack { display: flex; gap: 2px; height: 12px; border-radius: 6px; overflow: hidden; margin-top: 12px; }
+  .stack > span { display: block; height: 100%; }
+  .legend { display: flex; flex-direction: column; gap: 7px; margin-top: 12px; }
+  .lg { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+  .lg .sw { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .lg .lb { color: var(--muted); } .lg .fill { flex: 1; }
+  .lg .vl { font-family: var(--mono); color: var(--txt); } .lg .pc2 { font-family: var(--mono); color: var(--faint); width: 40px; text-align: right; }
+  .toprail { flex: 1; }
+  .topcols { display: flex; font-family: var(--mono); font-size: 9px; letter-spacing: 1.2px; color: var(--faint); border-bottom: 1px solid var(--border2); padding-bottom: 6px; margin-top: 10px; }
+  .topcols .a { flex: 1; } .topcols .b { }
+  .topitem { margin-top: 10px; }
+  .topitem .tl { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; }
+  .topitem .tl .tn { color: var(--txt); } .topitem .tl .tc { color: var(--muted); }
+  .topitem .tbar { height: 5px; border-radius: 3px; background: var(--accent2); margin-top: 5px; }
+
+  .row3 { display: flex; gap: var(--gap); }
+  .models { width: 296px; flex: none; }
+  .mblock { margin-top: 12px; }
+  .mrow1 { display: flex; align-items: center; gap: 8px; }
+  .mrow1 .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .mrow1 .mid { flex: 1; min-width: 0; font-family: var(--mono); font-size: 11.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mrow1 .mc { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .mrow2 { display: flex; justify-content: space-between; margin-top: 3px; padding-left: 16px; font-size: 10.5px; color: var(--faint); }
+  .mrow2 .mt { font-family: var(--mono); font-size: 10px; }
+
+  .sesscard { flex: 1; min-width: 0; border-radius: 11px; background: var(--card); border: 1px solid var(--border); overflow: hidden; }
+  .shead, .srow { display: flex; align-items: center; gap: 12px; }
+  .shead { padding: 11px 15px; border-bottom: 1px solid var(--border2); font-family: var(--mono); font-size: 9.5px; letter-spacing: 1.2px; color: var(--faint); }
+  .srow { padding: 10px 15px; border-top: 1px solid var(--border); }
+  .srow:first-child { border-top: none; }
+  .c-start { width: 110px; flex: none; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .c-len { width: 60px; flex: none; font-family: var(--mono); font-size: 11.5px; }
+  .c-model { width: 104px; flex: none; display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; }
+  .c-model .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .c-branch { flex: 1; min-width: 0; font-family: var(--mono); font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .c-cost { width: 70px; flex: none; text-align: right; font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+
+  .skills { margin-top: var(--secgap); }
+  .sk-head { display: flex; align-items: center; }
+  .sk-head .rc { margin-left: auto; font-family: var(--mono); font-size: 9.5px; color: var(--faint); }
+  .skblock { margin-top: 12px; }
+  .skline { display: flex; align-items: center; gap: 10px; }
+  .skline .sn { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+  .skline .sd { font-size: 11px; color: var(--faint); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .skline .sr { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .skline .scst { font-family: var(--mono); font-size: 11.5px; font-weight: 600; width: 68px; text-align: right; }
+  .skbar { height: 5px; border-radius: 3px; background: var(--accent2); margin-top: 6px; }
+  .empty { color: var(--faint); font-size: 12px; padding: 30px 4px; text-align: center; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="head">
-    <div class="title">Mission Control — Project usage</div>
-    <div class="hero" id="proj-name">—</div>
-    <div class="subtitle">ยอดใช้จ่าย Claude Code ของโปรเจกต์นี้ ตามช่วงเวลา</div>
+    <div class="htext">
+      <div class="eyebrow">Mission Control — Project Usage</div>
+      <div class="pname" id="pname">—</div>
+      <div class="crumbs" id="crumbs"></div>
+    </div>
+    <button class="backbtn" id="back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Back</button>
   </div>
 
-  <div class="controls">
-    <div class="range-picker">
-      <button class="btn range-trigger" id="range-trigger" title="เลือกช่วงวันที่"><span id="range-text">—</span></button>
-      <div class="cal-pop" id="cal-pop" style="display:none;">
-        <div class="cal-head">
-          <button class="cal-nav" id="cal-prev" title="เดือนก่อนหน้า">‹</button>
-          <div class="cal-title" id="cal-title">—</div>
-          <button class="cal-nav" id="cal-next" title="เดือนถัดไป">›</button>
-        </div>
-        <div class="cal-hint" id="cal-hint">เลือกวันเริ่มต้น</div>
-        <div class="cal-week"><span>อา</span><span>จ</span><span>อ</span><span>พ</span><span>พฤ</span><span>ศ</span><span>ส</span></div>
-        <div class="cal-grid" id="cal-grid"></div>
-      </div>
+  <div class="shortcuts" id="shortcuts">
+    <button class="sc" data-sc="today">Today</button>
+    <button class="sc" data-sc="week">This week</button>
+    <button class="sc" data-sc="month">This month</button>
+    <button class="sc" data-sc="year">This year</button>
+    <button class="sc" id="calBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg><span id="calBtnTxt">Custom range</span></button>
+  </div>
+
+  <div class="pc calpanel" id="calPanel" style="display:none">
+    <div class="calhead">
+      <button class="calnav" id="calPrev">‹</button>
+      <span class="caltitle" id="calTitle">—</span>
+      <button class="calnav" id="calNext">›</button>
     </div>
-    <div class="seg presets">
-      <button class="btn" data-preset="today">วันนี้</button>
-      <button class="btn" data-preset="week">สัปดาห์นี้</button>
-      <button class="btn" data-preset="month">เดือนนี้</button>
-      <button class="btn" data-preset="year">ปีนี้</button>
+    <div class="calgrid" id="calGrid"></div>
+    <div class="calfoot"><span id="calFoot"></span><button class="cclr" id="calClear">Clear</button></div>
+  </div>
+
+  <div class="row2">
+    <div class="pc chart">
+      <div class="ctitle"><span class="ct" id="ctitle">—</span><span class="cleg" id="cleg"></span></div>
+      <div class="plotwrap"><div class="yaxis" id="yaxis"></div><div class="plot" id="plot"></div></div>
+      <div class="xlabels" id="xlabels"></div>
+      <div class="cfoot" id="cfoot"></div>
+    </div>
+    <div class="rail">
+      <div class="pc"><div class="clabel">Token types</div><div class="stack" id="rail-stack"></div><div class="legend" id="rail-legend"></div></div>
+      <div class="pc toprail"><div class="clabel" id="top-label">TOP</div><div id="top-list"></div></div>
     </div>
   </div>
 
-  <div class="chart-box">
-    <div class="chart-title" id="chart-title">—</div>
-    <svg id="chart" viewBox="0 0 1000 340" preserveAspectRatio="xMidYMid meet"></svg>
-    <div class="legend" id="legend"></div>
+  <div class="row3">
+    <div class="pc models"><div class="clabel">Models used</div><div class="stack" id="mstack"></div><div id="mlist"></div></div>
+    <div class="sesscard">
+      <div class="shead"><span class="c-start">STARTED</span><span class="c-len">LENGTH</span><span class="c-model">MODEL</span><span class="c-branch">BRANCH</span><span class="c-cost">COST</span></div>
+      <div id="sessions"></div>
+    </div>
   </div>
 
-  <div class="pie-box" id="pie-box">
-    <div class="pie-title" id="pie-title">สัดส่วนค่าใช้จ่ายตามชนิด token</div>
-    <div class="pie-wrap">
-      <svg id="pie" viewBox="0 0 200 200" preserveAspectRatio="xMidYMid meet"></svg>
-      <div class="pie-legend" id="pie-legend"></div>
-    </div>
-    <div class="pie-total" id="pie-total"></div>
+  <div class="pc skills">
+    <div class="sk-head"><span class="clabel">Skills fired</span><span class="rc">RUNS · COST</span></div>
+    <div id="skills-list"></div>
   </div>
 </div>
 
-<div id="tip"></div>
-
 <script>
   var vscode = acquireVsCodeApi();
-  var MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
-  var THMONTHS_FULL = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
-  // token-cost categories for the pie — mirrors budget-detail.ts CATS (colors +
-  // Thai meanings). tok/cost are the Breakdown field names to read per category.
-  var PIE_CATS = [
-    { label: "Input", color: "var(--vscode-charts-green, #3fb950)", tok: "inTok", cost: "inCost", meaning: "โค้ด/ข้อความที่ Claude อ่านสดรอบนั้น (ไม่อยู่ใน cache)" },
-    { label: "Output", color: "var(--vscode-charts-red, #f14c4c)", tok: "outTok", cost: "outCost", meaning: "คำตอบที่ Claude สร้าง — แพงสุดต่อ token" },
-    { label: "Cache write", color: "var(--vscode-charts-orange, #e0803f)", tok: "cacheWriteTok", cost: "cacheWriteCost", meaning: "บันทึก context ลง cache ครั้งแรก — 1.25-2x ของ input" },
-    { label: "Cache read", color: "var(--vscode-charts-blue, #4d9de0)", tok: "cacheReadTok", cost: "cacheReadCost", meaning: "อ่าน context เดิมซ้ำจาก cache — ถูกสุด 0.1x ของ input; session ยิ่งยาว/ไม่ compact ยิ่งบวมตรงนี้" }
+  (function () { var b = document.body.classList;
+    document.documentElement.dataset.theme = (b.contains("vscode-light") || b.contains("vscode-high-contrast-light")) ? "light" : "dark"; })();
+
+  function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+  var USD = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function money(n) { return "$" + USD.format(n || 0); }
+  var TOK = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+  function tokM(n) { return TOK.format(n || 0); }
+  function p2(n) { return String(n).padStart(2, "0"); }
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  // Token categories (fixed order + colors, matching the Budget tab).
+  var CATS = [
+    { key: "cacheRead", color: "#4f9cf9", label: "Cache read" },
+    { key: "cacheWrite", color: "#e8a33d", label: "Cache write" },
+    { key: "output", color: "#f4796b", label: "Output" },
+    { key: "input", color: "#5ecf8f", label: "Input" }
   ];
+  function emptyCats() { return { cacheRead: { tokens: 0, usd: 0 }, cacheWrite: { tokens: 0, usd: 0 }, output: { tokens: 0, usd: 0 }, input: { tokens: 0, usd: 0 } }; }
+  function addCats(dst, src) { CATS.forEach(function (c) { var s = src[c.key] || { tokens: 0, usd: 0 }; dst[c.key].tokens += s.tokens || 0; dst[c.key].usd += s.usd || 0; }); }
 
-  var state = { series: {}, seriesDetail: {}, start: "", end: "", bucket: "day", autoRange: true, projectName: "" };
-  var calMonth = "", pickStart = null, pickHover = null, calOpen = false; // range-calendar popover state
-  var LAST = []; // buckets from the last renderChart, indexed to match each rect's data-i
-  var PIE_LAST = []; // pie slices from the last renderPie, indexed to match each slice's data-cat
-  var TOKFMT = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
-  function fmtTok(n) { return TOKFMT.format(n || 0); }
-  function fmtUsd3(n) { return String(parseFloat((n || 0).toFixed(3))); } // up to 3 decimals, trimmed
+  var STATE = { scope: { level: "week" }, data: null,
+    cal: { open: false, viewY: (new Date()).getFullYear(), viewM: (new Date()).getMonth(), selStart: null, selEnd: null } };
+  function ymd(d) { return d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate()); }
+  function shortD(s) { var p = String(s).split("-"); return (+p[2]) + " " + MONTHS[(+p[1]) - 1]; }
 
-  function esc(x) {
-    return String(x == null ? "" : x).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // Total cost of a candidate scope, straight from the hourly buckets.
+  function costForScope(sc) {
+    var now = new Date(), y = now.getFullYear();
+    if (sc.level === "year") return sumPrefix(y + "-").cost;
+    if (sc.level === "month") return sumPrefix(sc.month + "-").cost;
+    if (sc.level === "day") return sumPrefix(sc.day + " ").cost;
+    var t = 0; // week = the 8 days ending today
+    for (var i = 7; i >= 0; i--) { var d = new Date(now); d.setDate(now.getDate() - i); t += sumPrefix(ymd(d) + " ").cost; }
+    return t;
   }
-  function pad2(n) { n = String(n); return n.length < 2 ? "0" + n : n; }
-  function fmtY(v) {
-    if (v >= 100) return String(Math.round(v));
-    if (v >= 10) return v.toFixed(1);
-    return v.toFixed(2);
+  // Most recent local day that actually has spend (for projects idle in every current period).
+  function mostRecentDay() {
+    var h = STATE.data.hourly, best = "";
+    for (var k in h) { if (h[k].cost > 0) { var day = k.slice(0, 10); if (day > best) best = day; } }
+    return best;
   }
-  function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); } // m = 1..12
-
-  // ── date helpers (all dates are LOCAL "YYYY-MM-DD" strings) ──
-  function parseDate(s) {
-    var y = parseInt(s.substring(0, 4), 10);
-    var m = parseInt(s.substring(5, 7), 10) || 1;
-    var d = parseInt(s.substring(8, 10), 10) || 1;
-    return new Date(y, m - 1, d);
-  }
-  function fmtDate(dt) { return dt.getFullYear() + "-" + pad2(dt.getMonth() + 1) + "-" + pad2(dt.getDate()); }
-  function addDays(s, n) { var dt = parseDate(s); dt.setDate(dt.getDate() + n); return fmtDate(dt); }
-  function spanDays(a, b) { return Math.round((parseDate(b) - parseDate(a)) / 86400000); }
-
-  // Bar unit is DERIVED from the range span so any range shows a sane bar count.
-  function deriveBucket() {
-    var n = spanDays(state.start, state.end);
-    if (n <= 2) return "hour";
-    if (n <= 92) return "day";
-    if (n <= 1095) return "month";
-    return "year";
+  // On entry, show the NARROWEST current period that has activity: today → week → month → year.
+  // If the project was idle in all of them, jump to its most recent active day so the chart is never blank.
+  function pickDefaultScope() {
+    var now = new Date(), ym = now.getFullYear() + "-" + p2(now.getMonth() + 1);
+    var order = [{ level: "day", day: ymd(now) }, { level: "week" }, { level: "month", month: ym }, { level: "year" }];
+    for (var i = 0; i < order.length; i++) if (costForScope(order[i]) >= 0.005) return order[i];
+    var md = mostRecentDay();
+    return md ? { level: "day", day: md } : { level: "week" };
   }
 
-  // latest / earliest day that actually has usage (series keys are "YYYY-MM-DD HH:00")
-  function anchorDay() {
-    var keys = Object.keys(state.series);
-    if (keys.length) { keys.sort(); return keys[keys.length - 1].substring(0, 10); }
-    var now = new Date();
-    return now.getFullYear() + "-" + pad2(now.getMonth() + 1) + "-" + pad2(now.getDate());
-  }
-  function minActiveDay() {
-    var keys = Object.keys(state.series);
-    if (!keys.length) return anchorDay();
-    keys.sort(); return keys[0].substring(0, 10);
-  }
-
-  // Roll the hour-keyed series up to the DERIVED bucket over [start,end], ZERO-
-  // FILLING every slot so the time axis stays continuous. Each item carries its
-  // canonical key + kind so tooltip / zoom needn't re-derive from the bar index.
-  function bucketsFor() {
-    var s = state.series || {};
-    var keys = Object.keys(s);
-    var bkt = state.bucket;
-    var out = [], agg = {}, i, k, b;
-
-    function keyOf(k) {
-      if (bkt === "hour") return k.substring(0, 13);  // "YYYY-MM-DD HH"
-      if (bkt === "day") return k.substring(0, 10);   // "YYYY-MM-DD"
-      if (bkt === "month") return k.substring(0, 7);  // "YYYY-MM"
-      return k.substring(0, 4);                       // "YYYY"
-    }
-    for (i = 0; i < keys.length; i++) {
-      k = keys[i];
-      var dpart = k.substring(0, 10);
-      if (dpart < state.start || dpart > state.end) continue; // range filter (lexical on YYYY-MM-DD)
-      var kk = keyOf(k);
-      b = agg[kk] || (agg[kk] = { cost: 0, tokens: 0 });
-      b.cost += s[k].cost; b.tokens += s[k].tokens;
-    }
-    function push(key, label, kind) {
-      var g = agg[key] || { cost: 0, tokens: 0 };
-      out.push({ key: key, label: label, kind: kind, cost: g.cost, tokens: g.tokens });
-    }
-
-    if (bkt === "hour") {
-      var cur = state.start;
-      while (cur <= state.end) {
-        for (var h = 0; h < 24; h++) push(cur + " " + pad2(h), pad2(h), "hour");
-        cur = addDays(cur, 1);
-      }
-    } else if (bkt === "day") {
-      var dd = state.start;
-      while (dd <= state.end) {
-        push(dd, parseInt(dd.substring(8, 10), 10) + "/" + parseInt(dd.substring(5, 7), 10), "day");
-        dd = addDays(dd, 1);
-      }
-    } else if (bkt === "month") {
-      var multiYear = state.start.substring(0, 4) !== state.end.substring(0, 4);
-      var y = parseInt(state.start.substring(0, 4), 10), m = parseInt(state.start.substring(5, 7), 10);
-      var ey = parseInt(state.end.substring(0, 4), 10), em = parseInt(state.end.substring(5, 7), 10);
-      while (y < ey || (y === ey && m <= em)) {
-        push(y + "-" + pad2(m), MONTHS[m - 1] + (multiYear ? " " + String(y).substring(2) : ""), "month");
-        m++; if (m > 12) { m = 1; y++; }
-      }
-    } else {
-      var y0 = parseInt(state.start.substring(0, 4), 10), y1 = parseInt(state.end.substring(0, 4), 10);
-      for (var yy = y0; yy <= y1; yy++) push(String(yy), String(yy), "year");
-    }
+  // Sum hourly buckets whose key starts with the prefix into one {cost,tokens,cats}.
+  function sumPrefix(prefix) {
+    var h = STATE.data.hourly, out = { cost: 0, tokens: 0, cats: emptyCats() };
+    for (var k in h) { if (k.indexOf(prefix) === 0) { out.cost += h[k].cost; out.tokens += h[k].tokens; addCats(out.cats, h[k].cats); } }
     return out;
   }
 
-  function unitLabel() {
-    if (state.bucket === "hour") return "รายชั่วโมง";
-    if (state.bucket === "day") return "รายวัน";
-    if (state.bucket === "month") return "รายเดือน";
-    return "รายปี";
-  }
-  function humanDate(s) {
-    var mo = parseInt(s.substring(5, 7), 10);
-    return parseInt(s.substring(8, 10), 10) + " " + MONTHS[mo - 1] + " " + s.substring(0, 4);
-  }
-  function dmy(s) { return s.substring(8, 10) + "/" + s.substring(5, 7) + "/" + s.substring(0, 4); }
-  function chartTitle() {
-    if (state.start === state.end) return unitLabel() + " · " + humanDate(state.start);
-    return unitLabel() + " · " + humanDate(state.start) + " – " + humanDate(state.end);
-  }
-
-  function line(x1, y1, x2, y2) {
-    return '<line class="axis-line" x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" />';
-  }
-
-  function renderChart() {
-    var svg = document.getElementById("chart");
-    document.getElementById("chart-title").textContent = chartTitle();
-    var data = bucketsFor();
-    LAST = data;
-    hideTip(); // a repaint replaces the rects a tip/highlight was anchored to
-    renderPie(); // the token-cost pie follows the same [start,end] range
-
-    var totalCost = 0, active = 0, maxCost = 0, i;
-    for (i = 0; i < data.length; i++) {
-      totalCost += data[i].cost;
-      if (data[i].cost > 0) active++;
-      if (data[i].cost > maxCost) maxCost = data[i].cost;
-    }
-
-    if (!data.length || totalCost <= 0) {
-      svg.innerHTML = '<text x="500" y="168" text-anchor="middle" class="axis-label" style="font-size:13px;">ไม่มีข้อมูลการใช้งานในช่วงเวลานี้</text>';
-      document.getElementById("legend").innerHTML = "";
-      return;
-    }
-    if (maxCost <= 0) maxCost = 0.01;
-
-    var W = 1000, H = 340, padL = 56, padR = 16, padT = 16, padB = 44;
-    var cw = W - padL - padR, ch = H - padT - padB;
-
-    var out = "<g>";
-    out += line(padL, padT, padL, H - padB);
-    out += line(padL, H - padB, W - padR, H - padB);
-
-    for (i = 0; i <= 4; i++) {
-      var gy = padT + (ch / 4) * i;
-      var val = maxCost * (1 - i / 4);
-      out += '<line class="axis-line" x1="' + padL + '" y1="' + gy.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + gy.toFixed(1) + '" stroke-dasharray="2,3" opacity="0.12" />';
-      out += '<text class="axis-label" x="' + (padL - 8) + '" y="' + (gy + 3).toFixed(1) + '" text-anchor="end">$' + fmtY(val) + "</text>";
-    }
-
-    var slot = cw / data.length;
-    var bw = Math.max(1, slot * 0.66);
-    var step = data.length > 16 ? Math.ceil(data.length / 16) : 1;
-    var dc = state.bucket !== "hour" ? " drill" : ""; // any non-hour bar zooms in on click
-    for (i = 0; i < data.length; i++) {
-      var d = data[i];
-      var cx = padL + slot * (i + 0.5);
-      if (d.cost > 0) {
-        var bh = (d.cost / maxCost) * ch;
-        var bx = cx - bw / 2;
-        var by = H - padB - bh;
-        // full-height transparent hit area so the WHOLE column reacts to hover/click
-        out += '<rect class="hit' + dc + '" data-i="' + i + '" x="' + (cx - slot / 2).toFixed(1) + '" y="' + padT + '" width="' + slot.toFixed(1) + '" height="' + ch + '" fill="transparent" pointer-events="all" />';
-        out += '<rect class="bar' + dc + '" data-i="' + i + '" x="' + bx.toFixed(1) + '" y="' + by.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + bh.toFixed(1) + '" rx="2" />';
+  // Build the chart buckets + meta for the current scope.
+  function aggregate() {
+    var sc = STATE.scope, now = new Date(), y = now.getFullYear();
+    var buckets = [], title = "", unit = "month";
+    if (sc.level === "year") {
+      title = "Monthly · " + y; unit = "month";
+      for (var m = 1; m <= 12; m++) { var key = y + "-" + p2(m); var b = sumPrefix(key + "-"); buckets.push({ label: MONTHS[m - 1], cost: b.cost, cats: b.cats, drill: b.cost > 0 ? { level: "month", month: key } : null }); }
+    } else if (sc.level === "month") {
+      var parts = sc.month.split("-"), yy = +parts[0], mm = +parts[1];
+      title = "Daily · " + MONTHS[mm - 1] + " " + yy; unit = "day";
+      var dim = new Date(yy, mm, 0).getDate();
+      for (var dd = 1; dd <= dim; dd++) { var dk = sc.month + "-" + p2(dd); var bd = sumPrefix(dk + " "); buckets.push({ label: String(dd), cost: bd.cost, cats: bd.cats, drill: bd.cost > 0 ? { level: "day", day: dk } : null }); }
+    } else if (sc.level === "week") {
+      unit = "day"; var days = [];
+      for (var i = 7; i >= 0; i--) { var d = new Date(now); d.setDate(now.getDate() - i); days.push(d); }
+      title = "Daily · " + days[0].getDate() + " – " + days[7].getDate() + " " + MONTHS[days[7].getMonth()] + " " + y;
+      days.forEach(function (d) { var dk = ymd(d); var bw = sumPrefix(dk + " "); buckets.push({ label: d.getDate() + " " + MONTHS[d.getMonth()], cost: bw.cost, cats: bw.cats, drill: bw.cost > 0 ? { level: "day", day: dk } : null }); });
+    } else if (sc.level === "range") {
+      unit = "day";
+      var fd = new Date(sc.from + "T00:00:00"), td = new Date(sc.to + "T00:00:00");
+      if (fd > td) { var tmp = fd; fd = td; td = tmp; }
+      title = "Daily · " + shortD(ymd(fd)) + " – " + shortD(ymd(td));
+      var cur = new Date(fd), guard = 0;
+      while (cur <= td && guard < 800) {
+        var dk = ymd(cur); var br = sumPrefix(dk + " ");
+        buckets.push({ label: cur.getDate() + " " + MONTHS[cur.getMonth()], cost: br.cost, cats: br.cats, drill: br.cost > 0 ? { level: "day", day: dk } : null });
+        cur.setDate(cur.getDate() + 1); guard++;
       }
-      if (i % step === 0) {
-        out += '<text class="axis-label" x="' + cx.toFixed(1) + '" y="' + (H - padB + 15) + '" text-anchor="middle">' + esc(d.label) + "</text>";
-      }
+    } else { // day
+      unit = "hour"; var dp = sc.day.split("-");
+      title = "Hourly · " + (+dp[2]) + " " + MONTHS[(+dp[1]) - 1] + " " + dp[0];
+      for (var h = 0; h < 24; h++) { var hk = sc.day + " " + p2(h); var hb = STATE.data.hourly[hk]; buckets.push({ label: p2(h), cost: hb ? hb.cost : 0, cats: hb ? hb.cats : emptyCats(), drill: null }); }
     }
-    out += "</g>";
-    svg.innerHTML = out;
-
-    document.getElementById("legend").innerHTML =
-      '<div class="legend-item"><span class="legend-swatch"></span><span>รวม $' + totalCost.toFixed(2) + "</span></div>" +
-      '<div class="legend-item"><span>ช่วงที่มีการใช้งาน ' + active + "/" + data.length + "</span></div>" +
-      '<div class="legend-item"><span>สูงสุด $' + maxCost.toFixed(2) + "</span></div>";
+    return { title: title, unit: unit, buckets: buckets };
   }
 
-  // ── token-cost breakdown pie (donut), summed over the selected range ────────
-  function sumDetail() {
-    var s = state.seriesDetail || {}, keys = Object.keys(s), i, k, b;
-    var t = { inTok: 0, outTok: 0, cacheReadTok: 0, cacheWriteTok: 0, inCost: 0, outCost: 0, cacheReadCost: 0, cacheWriteCost: 0 };
-    for (i = 0; i < keys.length; i++) {
-      k = keys[i]; // "YYYY-MM-DD" (per-day breakdown)
-      if (k < state.start || k > state.end) continue; // range filter (lexical on YYYY-MM-DD)
-      b = s[k];
-      t.inTok += b.inTok; t.outTok += b.outTok; t.cacheReadTok += b.cacheReadTok; t.cacheWriteTok += b.cacheWriteTok;
-      t.inCost += b.inCost; t.outCost += b.outCost; t.cacheReadCost += b.cacheReadCost; t.cacheWriteCost += b.cacheWriteCost;
-    }
-    return t;
-  }
-  function renderPie() {
-    var bd = sumDetail();
-    var total = bd.inCost + bd.outCost + bd.cacheReadCost + bd.cacheWriteCost;
-    var svg = document.getElementById("pie");
-    var legend = document.getElementById("pie-legend");
-    var rangeTxt = state.start === state.end ? humanDate(state.start) : humanDate(state.start) + " – " + humanDate(state.end);
-    document.getElementById("pie-title").textContent = "สัดส่วนค่าใช้จ่ายตามชนิด token · " + rangeTxt;
-    if (total <= 0) {
-      svg.innerHTML = '<text x="100" y="104" text-anchor="middle" class="axis-label" style="font-size:12px;">ไม่มีค่าใช้จ่ายในช่วงนี้</text>';
-      legend.innerHTML = "";
-      document.getElementById("pie-total").textContent = "";
-      return;
-    }
-    // slices sorted by cost desc (same ordering as budget-detail.ts buildDetail)
-    var slices = PIE_CATS.map(function (c) {
-      var cost = bd[c.cost];
-      return { label: c.label, color: c.color, meaning: c.meaning, cost: cost, tok: bd[c.tok], pct: Math.round((cost / total) * 1000) / 10 };
-    }).sort(function (a, b) { return b.cost - a.cost; });
-    PIE_LAST = slices;
-
-    // Donut via stroked circle arcs. A real-but-tiny slice (e.g. Input at 0.0%)
-    // has a sub-pixel arc that used to paint as a stray radial streak, so the old
-    // code skipped it — which made it vanish from the ring. Instead floor every
-    // NONZERO slice to MIN_ARC so it always shows as a wedge big enough to see AND
-    // to hover, never a razor streak, never gone. A genuinely zero slice (cost 0)
-    // draws nothing and lives in the legend only. off advances by the DRAWN length
-    // so a floored slice can't be overpainted by the next one.
-    var R = 66, W = 26, C = 2 * Math.PI * R, MIN_ARC = 10, off = 0, out = "", i;
-    for (i = 0; i < slices.length; i++) {
-      var s = slices[i], len = (s.cost / total) * C;
-      if (len > 0) {
-        var drawn = len < MIN_ARC ? MIN_ARC : len;
-        out += '<circle class="pie-slice" data-cat="' + i + '" cx="100" cy="100" r="' + R + '" fill="none" stroke="' + s.color + '" stroke-width="' + W + '"'
-          + ' stroke-dasharray="' + drawn.toFixed(2) + " " + (C - drawn).toFixed(2) + '" stroke-dashoffset="' + (-off).toFixed(2) + '"'
-          + ' transform="rotate(-90 100 100)"></circle>';
-        off += drawn;
-      }
-    }
-    svg.innerHTML = out;
-
-    var lg = "", j;
-    for (j = 0; j < slices.length; j++) {
-      var s2 = slices[j];
-      lg += '<div class="row" data-cat="' + j + '">'
-        + '<span class="sw" style="background:' + s2.color + '"></span>'
-        + '<span class="lab">' + esc(s2.label) + "</span>"
-        + '<span class="val">' + esc(fmtTok(s2.tok) + " (" + fmtUsd3(s2.cost) + " usd)") + "</span>"
-        + '<span class="pct">' + s2.pct.toFixed(1) + "%</span></div>";
-    }
-    legend.innerHTML = lg;
-    var totalTok = bd.inTok + bd.outTok + bd.cacheReadTok + bd.cacheWriteTok;
-    document.getElementById("pie-total").textContent = "รวม " + fmtTok(totalTok) + " (" + fmtUsd3(total) + " usd)";
-  }
-  // pie tooltip — reuses the bars' floating #tip (styled, instant) instead of the
-  // native title, so hovering a slice/legend row feels the same as the bars.
-  function pieTipHtml(i) {
-    var s = PIE_LAST[i];
-    if (!s) return "";
-    var h = '<div class="tt-when">' + esc(s.label) + "</div>";
-    h += '<div class="tt-cost"><span class="cur">$</span>' + fmtUsd3(s.cost) + "</div>";
-    h += '<div class="tt-tok">' + fmtTok(s.tok) + " tokens · " + s.pct.toFixed(1) + "%</div>";
-    h += '<div class="tt-hint">' + esc(s.meaning) + "</div>";
-    return h;
-  }
-
-  // ── Hover detail + click-to-drill ─────────────────────────────────────────
-  function periodLabel(i) {
-    var d = LAST[i];
-    if (!d) return "";
-    if (d.kind === "hour") {
-      var hh = d.key.substring(11, 13);
-      return humanDate(d.key.substring(0, 10)) + " " + hh + ":00 - " + hh + ":59 น.";
-    }
-    if (d.kind === "day") return humanDate(d.key);
-    if (d.kind === "month") return MONTHS[parseInt(d.key.substring(5, 7), 10) - 1] + " " + d.key.substring(0, 4);
-    return "ปี " + d.key;
-  }
-  function drillHint() {
-    return state.bucket === "hour" ? "" : "คลิกเพื่อซูมเข้าไปในช่วงนี้";
-  }
-  function tipContent(i) {
-    var d = LAST[i];
-    if (!d) return "";
-    var html = '<div class="tt-when">' + esc(periodLabel(i)) + "</div>";
-    html += '<div class="tt-cost"><span class="cur">$</span>' + d.cost.toFixed(2) + "</div>";
-    html += '<div class="tt-tok">' + fmtTok(d.tokens) + " tokens</div>";
-    var hint = drillHint();
-    if (hint) html += '<div class="tt-hint">' + hint + "</div>";
-    return html;
-  }
-  function setHighlight(i) {
-    var bars = document.querySelectorAll("rect.bar");
-    for (var j = 0; j < bars.length; j++) bars[j].style.opacity = "";
-    if (i >= 0) {
-      var el = document.querySelector('rect.bar[data-i="' + i + '"]');
-      if (el) el.style.opacity = "0.72";
-    }
-  }
-  function positionTip(x, y) {
-    var tip = document.getElementById("tip");
-    var w = tip.offsetWidth, h = tip.offsetHeight;
-    var nx = x + 16, ny = y + 16;
-    if (nx + w > window.innerWidth - 8) nx = x - w - 16;
-    if (ny + h > window.innerHeight - 8) ny = window.innerHeight - h - 8;
-    if (nx < 8) nx = 8;
-    if (ny < 8) ny = 8;
-    tip.style.left = nx + "px";
-    tip.style.top = ny + "px";
-  }
-  var TIP_I = -1;
-  function showTip(i, x, y) {
-    var tip = document.getElementById("tip");
-    if (TIP_I !== i) { tip.innerHTML = tipContent(i); tip.style.display = "block"; setHighlight(i); TIP_I = i; }
-    positionTip(x, y);
-  }
-  function hideTip() {
-    var tip = document.getElementById("tip");
-    if (tip) tip.style.display = "none";
-    setHighlight(-1);
-    TIP_I = -1;
-  }
-  function zoomInto(i) {
-    var d = LAST[i];
-    if (!d || d.kind === "hour") return; // hour is the deepest level
-    if (d.kind === "year") { applyRange(d.key + "-01-01", d.key + "-12-31"); return; }
-    if (d.kind === "month") {
-      var y = parseInt(d.key.substring(0, 4), 10), m = parseInt(d.key.substring(5, 7), 10);
-      applyRange(d.key + "-01", d.key + "-" + pad2(daysInMonth(y, m)));
-      return;
-    }
-    applyRange(d.key, d.key); // day -> that single day (auto-becomes hourly)
-  }
-
-  // ── range control ──────────────────────────────────────────────────────────
-  function syncControls() {
-    document.getElementById("range-text").textContent = dmy(state.start) + " – " + dmy(state.end);
-    if (calOpen) renderCal();
-  }
-  function applyRange(ns, ne) {
-    if (!ns || !ne) return;
-    if (ns > ne) { var t = ns; ns = ne; ne = t; } // forgiving: swap a reversed range
-    state.autoRange = false; // an explicit pick (calendar/preset/bar-zoom) — stop auto-following the data span
-    state.start = ns; state.end = ne;
-    state.bucket = deriveBucket();
-    syncControls();
-    renderChart();
-  }
-  function realToday() {
+  function crumbLabel(sc) {
     var now = new Date();
-    return now.getFullYear() + "-" + pad2(now.getMonth() + 1) + "-" + pad2(now.getDate());
+    var out = [{ set: { level: "year" }, txt: String(now.getFullYear()), cur: sc.level === "year" }];
+    if (sc.level === "range") { out.push({ set: null, txt: shortD(sc.from) + " – " + shortD(sc.to), cur: true }); return out; }
+    if (sc.level === "week") out.push({ set: { level: "week" }, txt: "This week", cur: true });
+    if (sc.level === "month" || (sc.level === "day" && sc.month)) {
+      var mk = sc.month || (sc.day ? sc.day.slice(0, 7) : "");
+      var mm = +mk.split("-")[1];
+      out.push({ set: { level: "month", month: mk }, txt: MONTHS[mm - 1], cur: sc.level === "month" });
+    }
+    if (sc.level === "day") { var dp = sc.day.split("-"); out.push({ set: null, txt: (+dp[2]) + " " + MONTHS[(+dp[1]) - 1], cur: true }); }
+    return out;
   }
-  // calendar presets: today / this-week (Sun-first) / this-month / this-year,
-  // each running from the period start up to today.
-  function applyPreset(p) {
-    var today = realToday(), start;
-    if (p === "today") start = today;
-    else if (p === "week") start = addDays(today, -parseDate(today).getDay()); // back to Sunday
-    else if (p === "month") start = today.substring(0, 7) + "-01";
-    else if (p === "year") start = today.substring(0, 4) + "-01-01";
-    else return;
-    applyRange(start, today);
+  function renderCrumbs() {
+    var sc = STATE.scope, crumbs = crumbLabel(sc), deepest = sc.level === "day";
+    var html = "";
+    crumbs.forEach(function (c, i) {
+      if (i) html += '<span class="sep">›</span>';
+      html += '<span class="cr' + (c.cur ? " cur" : "") + '"' + (c.set && !c.cur ? ' data-crumb="' + i + '"' : "") + ">" + esc(c.txt) + "</span>";
+    });
+    html += '<span class="sep">·</span><span class="hint">' + (deepest ? "Deepest level — use the breadcrumb to go back" : "Click a bar to drill down") + "</span>";
+    document.getElementById("crumbs").innerHTML = html;
+    STATE._crumbs = crumbs;
   }
 
-  // ── range calendar (popover, two-click start -> end, queries on 2nd click) ──
-  function openCal() {
-    calOpen = true; pickStart = null; pickHover = null;
-    calMonth = state.end.substring(0, 7); // open on the current end month
-    document.getElementById("cal-pop").style.display = "block";
+  function renderShortcuts() {
+    var sc = STATE.scope, now = new Date();
+    var active = sc.level === "year" ? "year" : sc.level === "week" ? "week"
+      : (sc.level === "month" && sc.month === now.getFullYear() + "-" + p2(now.getMonth() + 1)) ? "month"
+      : (sc.level === "day" && sc.day === ymd(now)) ? "today" : "";
+    document.querySelectorAll("#shortcuts .sc").forEach(function (b) { b.classList[b.getAttribute("data-sc") === active ? "add" : "remove"]("active"); });
+  }
+
+  function renderChart(agg) {
+    document.getElementById("ctitle").textContent = agg.title;
+    document.getElementById("cleg").innerHTML = CATS.map(function (c) { return '<span><i style="background:' + c.color + '"></i>' + c.label + "</span>"; }).join("");
+    var max = 0; agg.buckets.forEach(function (b) { if (b.cost > max) max = b.cost; });
+    document.getElementById("yaxis").innerHTML = [1, .75, .5, .25, 0].map(function (f) { return "<span>" + money(max * f) + "</span>"; }).join("");
+    var plotH = 210, n = agg.buckets.length;
+    document.getElementById("plot").innerHTML = agg.buckets.map(function (b, i) {
+      if (b.cost <= 0) return '<div class="col"></div>';
+      var barPx = Math.max(2, Math.round(b.cost / max * plotH));
+      var segs = CATS.map(function (c) {
+        var u = (b.cats[c.key] || {}).usd || 0; if (u <= 0) return "";
+        return '<span style="height:' + (u / b.cost * barPx) + 'px;background:' + c.color + '"></span>';
+      }).join("");
+      var tip = b.label + " · " + money(b.cost);
+      return '<div class="col"><div class="bar' + (b.drill ? " clk" : "") + '" data-bar="' + i + '" title="' + esc(tip) + '" style="height:' + barPx + 'px">' + segs + "</div></div>";
+    }).join("");
+    // x labels: thin out per bucket count
+    var every = n > 24 ? 5 : n > 12 ? 3 : 1;
+    document.getElementById("xlabels").innerHTML = agg.buckets.map(function (b, i) {
+      var show = (i % every === 0) || i === n - 1;
+      return '<span class="xl">' + (show ? esc(b.label) : "") + "</span>";
+    }).join("");
+    var total = 0, active = 0, peak = 0;
+    agg.buckets.forEach(function (b) { total += b.cost; if (b.cost > 0) active++; if (b.cost > peak) peak = b.cost; });
+    document.getElementById("cfoot").innerHTML = '<span class="tot"><i></i>Total ' + money(total) + "</span><span>Active " + active + "/" + n + "</span><span>Peak " + money(peak) + "</span>";
+    STATE._buckets = agg.buckets; STATE._unit = agg.unit;
+  }
+
+  function renderRail(agg) {
+    var tot = emptyCats(), sum = 0;
+    agg.buckets.forEach(function (b) { addCats(tot, b.cats); });
+    CATS.forEach(function (c) { sum += tot[c.key].usd; });
+    document.getElementById("rail-stack").innerHTML = sum > 0 ? CATS.map(function (c) { var w = tot[c.key].usd / sum * 100; return w > 0 ? '<span style="width:' + w + '%;background:' + c.color + '"></span>' : ""; }).join("") : '<span style="width:100%;background:var(--border)"></span>';
+    document.getElementById("rail-legend").innerHTML = CATS.map(function (c) {
+      var u = tot[c.key].usd, pct = sum > 0 ? Math.round(u / sum * 100) : 0;
+      return '<div class="lg"><span class="sw" style="background:' + c.color + '"></span><span class="lb">' + c.label + '</span><span class="fill"></span><span class="vl">' + money(u) + '</span><span class="pc2">' + pct + '%</span></div>';
+    }).join("");
+    // TOP <unit>
+    var unitWord = agg.unit === "month" ? "MONTHS" : agg.unit === "hour" ? "HOURS" : "DAYS";
+    var colWord = agg.unit === "month" ? "MONTH" : agg.unit === "hour" ? "HOUR" : "DAY";
+    document.getElementById("top-label").textContent = "TOP " + unitWord;
+    var top = agg.buckets.filter(function (b) { return b.cost > 0; }).slice().sort(function (a, b) { return b.cost - a.cost; }).slice(0, 4);
+    var maxTop = top.length ? top[0].cost : 1;
+    var html = '<div class="topcols"><span class="a">' + colWord + '</span><span class="b">COST</span></div>';
+    html += top.map(function (b, i) {
+      var op = 1 - i * 0.18;
+      return '<div class="topitem"><div class="tl"><span class="tn">' + esc(b.label) + '</span><span class="tc">' + money(b.cost) + '</span></div>' +
+        '<div class="tbar" style="width:' + Math.max(6, b.cost / maxTop * 100) + '%;opacity:' + op + '"></div></div>';
+    }).join("");
+    document.getElementById("top-list").innerHTML = top.length ? html : '<div class="empty">No spend</div>';
+  }
+
+  function modelFamily(id) { id = (id || "").toLowerCase(); return id.indexOf("opus") >= 0 ? "opus" : id.indexOf("sonnet") >= 0 ? "sonnet" : id.indexOf("haiku") >= 0 ? "haiku" : "other"; }
+  var MODELCOL = { opus: "#c9a0ff", sonnet: "#4f9cf9", haiku: "#5ecf8f", other: "#8a97a4" };
+  var MODELROLE = { opus: "deep work", sonnet: "default", haiku: "cheap loops", other: "" };
+  function shortModel(id) { return String(id || "").replace(/^claude-/, ""); }
+
+  function renderModels() {
+    var models = STATE.data.models || {}, ids = Object.keys(models);
+    var totCost = 0, totTok = 0; ids.forEach(function (m) { totCost += models[m].cost; totTok += models[m].tokens; });
+    ids.sort(function (a, b) { return models[b].cost - models[a].cost; });
+    document.getElementById("mstack").innerHTML = totCost > 0 ? ids.map(function (m) { var w = models[m].cost / totCost * 100; return '<span style="width:' + w + '%;background:' + MODELCOL[modelFamily(m)] + '"></span>'; }).join("") : '<span style="width:100%;background:var(--border)"></span>';
+    document.getElementById("mlist").innerHTML = ids.length ? ids.map(function (m) {
+      var fam = modelFamily(m), col = MODELCOL[fam];
+      var pct = totCost > 0 ? Math.round(models[m].cost / totCost * 100) : 0;
+      return '<div class="mblock"><div class="mrow1"><span class="dot" style="background:' + col + '"></span><span class="mid">' + esc(shortModel(m)) + '</span><span class="mc">' + money(models[m].cost) + '</span></div>' +
+        '<div class="mrow2"><span>' + esc(MODELROLE[fam]) + '</span><span class="mt">' + tokM(models[m].tokens) + ' · ' + pct + '%</span></div></div>';
+    }).join("") : '<div class="empty">No model data</div>';
+  }
+
+  function fmtStart(ms) { var d = new Date(ms); return d.getDate() + " " + MONTHS[d.getMonth()] + " · " + p2(d.getHours()) + ":" + p2(d.getMinutes()); }
+  function fmtLen(ms) { var s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); if (h) return h + "h " + m + "m"; if (m) return m + "m"; return s + "s"; }
+  function renderSessions() {
+    var ss = (STATE.data.sessions || []).slice(0, 40);
+    document.getElementById("sessions").innerHTML = ss.length ? ss.map(function (s) {
+      var col = MODELCOL[modelFamily(s.model)];
+      return '<div class="srow"><span class="c-start">' + esc(fmtStart(s.startMs)) + '</span><span class="c-len">' + esc(fmtLen(s.durationMs)) + '</span>' +
+        '<span class="c-model"><span class="dot" style="background:' + col + '"></span>' + esc(shortModel(s.model)) + '</span>' +
+        '<span class="c-branch">' + esc(s.branch || "—") + '</span><span class="c-cost">' + money(s.cost) + '</span></div>';
+    }).join("") : '<div class="empty">No sessions</div>';
+  }
+
+  function renderSkills() {
+    var sk = STATE.data.skills || [];
+    var maxRuns = sk.length ? sk[0].runs : 1;
+    document.getElementById("skills-list").innerHTML = sk.length ? sk.map(function (s) {
+      var w = Math.max(6, s.runs / maxRuns * 100), op = Math.max(.4, s.runs / maxRuns);
+      return '<div class="skblock"><div class="skline"><span class="sn">' + esc(s.name) + '</span><span class="sd"></span>' +
+        '<span class="sr">' + s.runs + '×</span><span class="scst">' + money(s.cost) + '</span></div>' +
+        '<div class="skbar" style="width:' + w + '%;opacity:' + op + '"></div></div>';
+    }).join("") : '<div class="empty">No skills fired for this project</div>';
+  }
+
+  function render() {
+    if (!STATE.data) return;
+    document.getElementById("pname").textContent = STATE.data.projectName || "—";
+    renderCrumbs();
+    renderShortcuts();
     renderCal();
+    var agg = aggregate();
+    renderChart(agg);
+    renderRail(agg);
+    renderModels();
+    renderSessions();
+    renderSkills();
   }
-  function closeCal() {
-    calOpen = false; pickStart = null; pickHover = null;
-    document.getElementById("cal-pop").style.display = "none";
+
+  // ── events ──
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    if (t.closest && t.closest("#back")) { post("close"); return; }
+    if (t.closest && t.closest("#calBtn")) { STATE.cal.open ? (STATE.cal.open = false) : openCalendar(); renderCal(); return; }
+    if (t.closest && t.closest("#calPrev")) { var c1 = STATE.cal; if (--c1.viewM < 0) { c1.viewM = 11; c1.viewY--; } renderCal(); return; }
+    if (t.closest && t.closest("#calNext")) { var c2 = STATE.cal; if (++c2.viewM > 11) { c2.viewM = 0; c2.viewY++; } renderCal(); return; }
+    if (t.closest && t.closest("#calClear")) { clearCalSel(); setScopeShortcut("week"); return; }
+    var cd = t.closest ? t.closest(".cd[data-day]") : null;
+    if (cd) { pickDay(cd.getAttribute("data-day")); return; }
+    var sc = t.closest ? t.closest("#shortcuts .sc") : null;
+    if (sc && sc.hasAttribute("data-sc")) { setScopeShortcut(sc.getAttribute("data-sc")); return; }
+    var cr = t.closest ? t.closest(".cr[data-crumb]") : null;
+    if (cr) { var i = +cr.getAttribute("data-crumb"); var c = STATE._crumbs && STATE._crumbs[i]; if (c && c.set) { STATE.scope = c.set; render(); } return; }
+    var bar = t.closest ? t.closest(".bar.clk") : null;
+    if (bar) { var b = STATE._buckets[+bar.getAttribute("data-bar")]; if (b && b.drill) { STATE.scope = b.drill; render(); } return; }
+  });
+  function setScopeShortcut(sc) {
+    var now = new Date();
+    if (sc === "today") STATE.scope = { level: "day", day: ymd(now) };
+    else if (sc === "week") STATE.scope = { level: "week" };
+    else if (sc === "month") STATE.scope = { level: "month", month: now.getFullYear() + "-" + p2(now.getMonth() + 1) };
+    else STATE.scope = { level: "year" };
+    clearCalSel();
+    render();
   }
-  function navMonth(delta) {
-    var y = parseInt(calMonth.substring(0, 4), 10), m = parseInt(calMonth.substring(5, 7), 10) + delta;
-    while (m < 1) { m += 12; y--; }
-    while (m > 12) { m -= 12; y++; }
-    calMonth = y + "-" + pad2(m);
-    renderCal();
+  function post(type) { vscode.postMessage({ type: type }); }
+
+  // ── inline range calendar: click a day for the start, click again for the end ──
+  var DOW = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+  function clearCalSel() { STATE.cal.selStart = null; STATE.cal.selEnd = null; }
+  function openCalendar() {
+    var cal = STATE.cal, sc = STATE.scope;
+    // aim the month view at wherever we currently are
+    if (sc.level === "range") { var fp = sc.from.split("-"); cal.viewY = +fp[0]; cal.viewM = +fp[1] - 1; }
+    else if (sc.level === "day") { var dp = sc.day.split("-"); cal.viewY = +dp[0]; cal.viewM = +dp[1] - 1; }
+    else if (sc.level === "month") { var mp = sc.month.split("-"); cal.viewY = +mp[0]; cal.viewM = +mp[1] - 1; }
+    cal.open = true; renderCal();
   }
-  // rs..re to highlight: pending pick (start..hover) while selecting, else committed range
-  function pickRange() {
-    if (pickStart) {
-      var other = pickHover || pickStart;
-      return pickStart < other ? [pickStart, other] : [other, pickStart];
-    }
-    return [state.start, state.end];
+  function pickDay(ds) {
+    var cal = STATE.cal;
+    if (!cal.selStart || cal.selEnd) { cal.selStart = ds; cal.selEnd = null; }   // begin a fresh selection
+    else if (ds < cal.selStart) { cal.selStart = ds; cal.selEnd = null; }         // earlier click → new start
+    else { cal.selEnd = ds; STATE.scope = { level: "range", from: cal.selStart, to: cal.selEnd }; }
+    render();
   }
-  // Update highlight classes IN PLACE on the existing cells. MUST NOT rebuild the
-  // grid: reassigning innerHTML under the pointer makes the browser re-fire
-  // mouseover, and a mouseover-driven rebuild storms (re-render loop) that eats the
-  // click (mousedown/mouseup land on different node generations).
-  function paintRange() {
-    var r = pickRange(), rs = r[0], re = r[1];
-    var cells = document.getElementById("cal-grid").querySelectorAll("[data-date]");
-    for (var i = 0; i < cells.length; i++) {
-      var ds = cells[i].getAttribute("data-date");
-      var cls = "cal-cell cal-day";
-      if (ds === rs) cls += " sel-start";
-      if (ds === re) cls += " sel-end";
-      if (ds > rs && ds < re) cls += " in-range";
-      cells[i].className = cls;
-    }
-  }
-  // Full structure rebuild — only when the visible month changes (open / nav).
   function renderCal() {
-    var y = parseInt(calMonth.substring(0, 4), 10), m = parseInt(calMonth.substring(5, 7), 10);
-    document.getElementById("cal-title").textContent = THMONTHS_FULL[m - 1] + " " + y;
-    document.getElementById("cal-hint").textContent = pickStart ? "เลือกวันสิ้นสุด" : "เลือกวันเริ่มต้น";
-    var firstDow = new Date(y, m - 1, 1).getDay(); // 0 = Sunday
-    var dim = daysInMonth(y, m), html = "", i, d;
-    for (i = 0; i < firstDow; i++) html += '<span class="cal-cell cal-blank"></span>';
-    for (d = 1; d <= dim; d++) html += '<span class="cal-cell cal-day" data-date="' + (calMonth + "-" + pad2(d)) + '">' + d + "</span>";
-    document.getElementById("cal-grid").innerHTML = html;
-    paintRange();
-  }
-  function onDayClick(ds) {
-    if (!ds) return;
-    if (!pickStart) { // first click: mark start, repaint in place (no rebuild -> no storm)
-      pickStart = ds; pickHover = ds;
-      document.getElementById("cal-hint").textContent = "เลือกวันสิ้นสุด";
-      paintRange();
-      return;
+    var cal = STATE.cal, sc = STATE.scope;
+    var txt = document.getElementById("calBtnTxt");
+    if (txt) txt.textContent = sc.level === "range" ? shortD(sc.from) + " – " + shortD(sc.to) : "Custom range";
+    var btn = document.getElementById("calBtn");
+    if (btn) btn.classList[sc.level === "range" ? "add" : "remove"]("active");
+    var panel = document.getElementById("calPanel");
+    if (panel) panel.style.display = cal.open ? "block" : "none";
+    if (!cal.open) return;
+    document.getElementById("calTitle").textContent = MONTHS[cal.viewM] + " " + cal.viewY;
+    var first = new Date(cal.viewY, cal.viewM, 1).getDay();
+    var dim = new Date(cal.viewY, cal.viewM + 1, 0).getDate();
+    var today = ymd(new Date()), s = cal.selStart, e = cal.selEnd;
+    var html = DOW.map(function (d) { return '<div class="dow">' + d + "</div>"; }).join("");
+    for (var i = 0; i < first; i++) html += '<div class="cd blank"></div>';
+    for (var d = 1; d <= dim; d++) {
+      var ds = cal.viewY + "-" + p2(cal.viewM + 1) + "-" + p2(d), cls = "cd";
+      if (sumPrefix(ds + " ").cost >= 0.005) cls += " has";
+      if (s && e) { if (ds === s) cls += " s"; if (ds === e) cls += " e"; if (ds > s && ds < e) cls += " in"; }
+      else if (s && ds === s) cls += " s e";
+      if (ds === today) cls += " today";
+      html += '<div class="' + cls + '" data-day="' + ds + '">' + d + "</div>";
     }
-    var s = pickStart < ds ? pickStart : ds;
-    var e = pickStart < ds ? ds : pickStart;
-    closeCal();
-    applyRange(s, e); // second click commits + queries immediately
+    document.getElementById("calGrid").innerHTML = html;
+    document.getElementById("calFoot").textContent = s ? (shortD(s) + (e ? " – " + shortD(e) : " – …")) : "Click a day to set the start, then click again for the end";
   }
-  function onDayHover(ds) {
-    if (!pickStart || !ds) return;
-    pickHover = ds; paintRange(); // repaint in place; never rebuild the grid on hover
-  }
-
-  var chartEl = document.getElementById("chart");
-  chartEl.addEventListener("mousemove", function (e) {
-    var el = e.target && e.target.closest ? e.target.closest("[data-i]") : null;
-    if (!el) { hideTip(); return; }
-    showTip(parseInt(el.getAttribute("data-i"), 10), e.clientX, e.clientY);
-  });
-  chartEl.addEventListener("mouseleave", hideTip);
-  chartEl.addEventListener("click", function (e) {
-    var el = e.target && e.target.closest ? e.target.closest("[data-i]") : null;
-    if (!el) return;
-    zoomInto(parseInt(el.getAttribute("data-i"), 10));
-  });
-
-  // pie slices + legend rows share the bars' floating tooltip (via data-cat)
-  function pieMove(e) {
-    var el = e.target && e.target.closest ? e.target.closest("[data-cat]") : null;
-    if (!el) { hideTip(); return; }
-    var tip = document.getElementById("tip");
-    tip.innerHTML = pieTipHtml(parseInt(el.getAttribute("data-cat"), 10));
-    tip.style.display = "block";
-    positionTip(e.clientX, e.clientY);
-  }
-  ["pie", "pie-legend"].forEach(function (id) {
-    var el = document.getElementById(id);
-    el.addEventListener("mousemove", pieMove);
-    el.addEventListener("mouseleave", hideTip);
-  });
-
-  // range trigger + calendar + preset controls
-  document.getElementById("range-trigger").addEventListener("click", function (e) {
-    e.stopPropagation();
-    if (calOpen) closeCal(); else openCal();
-  });
-  document.getElementById("cal-pop").addEventListener("click", function (e) { e.stopPropagation(); });
-  document.getElementById("cal-prev").addEventListener("click", function () { navMonth(-1); });
-  document.getElementById("cal-next").addEventListener("click", function () { navMonth(1); });
-  (function () {
-    var grid = document.getElementById("cal-grid");
-    grid.addEventListener("click", function (e) {
-      var c = e.target && e.target.closest ? e.target.closest("[data-date]") : null;
-      if (c) onDayClick(c.getAttribute("data-date"));
-    });
-    grid.addEventListener("mouseover", function (e) {
-      var c = e.target && e.target.closest ? e.target.closest("[data-date]") : null;
-      if (c) onDayHover(c.getAttribute("data-date"));
-    });
-  })();
-  (function () {
-    var pb = document.querySelectorAll("[data-preset]");
-    for (var i = 0; i < pb.length; i++) {
-      (function (btn) {
-        btn.addEventListener("click", function () { applyPreset(btn.getAttribute("data-preset")); });
-      })(pb[i]);
-    }
-  })();
-  document.addEventListener("click", function () { if (calOpen) closeCal(); });
 
   window.addEventListener("message", function (ev) {
-    var m = ev.data;
-    if (!m || m.type !== "updateDetail") return;
-    var projChanged = m.projectName && m.projectName !== state.projectName;
-    state.series = m.series || {};
-    state.seriesDetail = m.seriesDetail || {};
-    if (projChanged) state.autoRange = true; // new project (singleton panel reuse) -> follow ITS data span again
-    state.projectName = m.projectName || state.projectName;
-    document.getElementById("proj-name").textContent = m.projectName || "—";
-    // While autoRange (until the user picks a range) keep the window on the full
-    // active span (earliest..latest day with usage). This makes late-arriving data
-    // (a fresh background scan) and project switches show up instead of being hidden
-    // behind a stale window. A user pick sets autoRange=false (see applyRange).
-    if (state.autoRange) {
-      state.start = minActiveDay();
-      state.end = anchorDay();
-      state.bucket = deriveBucket();
-      syncControls();
-    }
-    renderChart();
+    var m = ev.data; if (!m || m.type !== "usage") return;
+    STATE.data = m;
+    STATE.cal.open = false; clearCalSel();
+    STATE.scope = pickDefaultScope();
+    render();
   });
-
   post("ready");
-  function post(type) { vscode.postMessage({ type: type }); }
 </script>
 </body></html>`;
 }

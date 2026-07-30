@@ -7,7 +7,12 @@ import {
   guessRole,
   groupListeners,
   scanLocalhosts,
+  scanLocalhostsEnriched,
   getProjectsRoot,
+  classifyKind,
+  prettyCmd,
+  formatUptime,
+  parsePsFull,
   type RawListener,
 } from "./localhostScan";
 
@@ -68,4 +73,43 @@ test("scanLocalhosts: returns an array and never throws", () => {
   // getProjectsRoot is null OR an absolute path ending in /projects
   const root = getProjectsRoot();
   expect(root === null || root.endsWith("/projects")).toBe(true);
+});
+
+test("scanLocalhostsEnriched: returns an array and never throws", () => {
+  expect(Array.isArray(scanLocalhostsEnriched())).toBe(true);
+});
+
+test("classifyKind: db/docs win over web/api; args disambiguate node; port fallback; else null", () => {
+  expect(classifyKind("postgres", "", 5432)).toBe("db");
+  expect(classifyKind("node", "redis-server", 6380)).toBe("db"); // arg wins
+  expect(classifyKind("node", "storybook dev -p 6006", 6006)).toBe("docs");
+  expect(classifyKind("next-server", "", 3000)).toBe("web");
+  expect(classifyKind("node", "vite --host", 5199)).toBe("web"); // vite arg → web, not api
+  expect(classifyKind("uvicorn", "app:api", 8000)).toBe("api");
+  expect(classifyKind("node", "", 9999)).toBe("api"); // bare node → api
+  expect(classifyKind("mystery", "", 5432)).toBe("db"); // port fallback
+  expect(classifyKind("mystery", "", 3000)).toBe("web");
+  expect(classifyKind("mystery", "", 4000)).toBe("api");
+  expect(classifyKind("mystery", "", 9999)).toBeNull();
+});
+
+test("prettyCmd: path tokens → basename; falls back to comm when no args", () => {
+  expect(prettyCmd("/home/u/.local/bin/uvicorn app:api", "python3")).toBe("uvicorn app:api");
+  expect(prettyCmd("/usr/bin/node /p/node_modules/.bin/vite --host", "node")).toBe("node vite --host");
+  expect(prettyCmd("", "next-server")).toBe("next-server");
+  expect(prettyCmd("   ", "postgres")).toBe("postgres");
+});
+
+test("formatUptime: seconds → compact d/h/m/s", () => {
+  expect(formatUptime(45)).toBe("45s");
+  expect(formatUptime(600)).toBe("10m");
+  expect(formatUptime(3720)).toBe("1h 2m");
+  expect(formatUptime(90000)).toBe("1d 1h");
+  expect(formatUptime(-1)).toBe("");
+});
+
+test("parsePsFull: pid/rss/etimes/args incl. args with spaces", () => {
+  const m = parsePsFull("15740 123456 3720 /usr/bin/python3 -m uvicorn app:api\n15648 65536 45 node\n");
+  expect(m.get(15740)).toEqual({ rssKB: 123456, etimes: 3720, args: "/usr/bin/python3 -m uvicorn app:api" });
+  expect(m.get(15648)).toEqual({ rssKB: 65536, etimes: 45, args: "node" });
 });

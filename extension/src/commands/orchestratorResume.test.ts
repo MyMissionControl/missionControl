@@ -7,6 +7,7 @@ import {
   defaultTeamForProject,
   isProjectLive,
   isResumable,
+  nextSprintFromPlan,
   parseOrchesMeta,
   parsePlan,
   parseStateValue,
@@ -52,6 +53,28 @@ test("parsePlan: counts total + done from checkbox lines", () => {
 test("parsePlan: no checkbox lines → null", () => {
   expect(parsePlan("# แผน\n\nไม่มี checkbox เลย")).toBeNull();
   expect(parsePlan("")).toBeNull();
+});
+
+test("nextSprintFromPlan: first unchecked sprint → {id,title}; parses number + em-dash title", () => {
+  const raw = [
+    "- [x] Sprint 1 — engine",
+    "- [X] Sprint 2 — api",
+    "- [ ] Sprint 3 — payment retry",
+    "- [ ] Sprint 4 — polish",
+  ].join("\n");
+  expect(nextSprintFromPlan(raw)).toEqual({ id: "S3", title: "payment retry" });
+});
+
+test("nextSprintFromPlan: unlabeled item → id '' with the raw text as title", () => {
+  expect(nextSprintFromPlan("- [x] Sprint 1 — a\n- [ ] wire up the checkout flow")).toEqual({
+    id: "",
+    title: "wire up the checkout flow",
+  });
+});
+
+test("nextSprintFromPlan: all done / no plan → null", () => {
+  expect(nextSprintFromPlan("- [x] Sprint 1 — a\n- [X] Sprint 2 — b")).toBeNull();
+  expect(nextSprintFromPlan("")).toBeNull();
 });
 
 test("isResumable: a plan with unchecked sprints alone makes it resumable", () => {

@@ -6,13 +6,16 @@ import { type ProjectDetail, buildDetail } from "../budget-detail";
 import { openBudgetDetailPanel } from "./budget-detail-page";
 import {
   type ProjectAgg,
+  type ProjectPeriods,
   type UsageSummary,
+  collapseProjectDayDetail,
   computeUsage,
   getInstantUsage,
   getProjectLedger,
   groupByProjectRoot,
   localMonthKey,
   localTodayKey,
+  projectPeriods,
   refreshUsage,
   sumByPrefix,
   unwiredProviders,
@@ -25,7 +28,9 @@ import {
 // script stays dumb (host sends display-ready strings).
 let _panel: vscode.WebviewPanel | undefined;
 
-const fmt = (n: number) => "$" + n.toFixed(2);
+// One formatted-money helper (thousands separators + 2dp). Kept as the single
+// format point so the hero + the matching stat card read identically to the cent.
+const fmt = (n: number) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 // resolveProject / groupByProjectRoot (cwd -> project root/name grouping) live in
 // usage.ts so the detail page reuses the exact same grouping — imported above.
@@ -35,6 +40,7 @@ export interface BudgetView {
   todayFmt: string;
   last7Fmt: string;
   allTimeFmt: string;
+  daily14: number[]; // raw daily spend, oldest→newest (index 13 = today) for the 14-day chart
   projects: ProjectRow[]; // every project under projects/ — client sorts + pages
   monthStartMs: number; // local start-of-month (ms) — client's "this month" filter
   providerNote: string; // reminder when a provider on disk isn't summed in yet ("" = none)
@@ -50,6 +56,7 @@ export interface ProjectRow {
   lastMs: number; // last activity (ms) — client sorts by recency + month filter
   detail: ProjectDetail; // per-category token/$ split — powers the click-to-open pie popup
   live: boolean; // false = folder/transcripts gone now; numbers come from the durable ledger
+  periods?: ProjectPeriods; // today/week/month/all cost+token+4-cat split (attached by attachPeriods)
 }
 
 /** Build the full display view from a usage snapshot `u`: this-month / today /
@@ -71,6 +78,18 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
     if (!Number.isNaN(t.getTime()) && t.getTime() >= cutoff.getTime()) {
       last7 += u.byDay[day].cost;
     }
+  }
+
+  // 14-day daily spend series (raw, oldest→newest; index 13 = today) for the chart.
+  const ymd = (d: Date) =>
+    d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  const dayBase = new Date();
+  dayBase.setHours(0, 0, 0, 0);
+  const daily14: number[] = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(dayBase);
+    d.setDate(dayBase.getDate() - i);
+    daily14.push(u.byDay[ymd(d)]?.cost ?? 0);
   }
 
   const home = os.homedir();
@@ -122,6 +141,7 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
     todayFmt: fmt(today),
     last7Fmt: fmt(last7),
     allTimeFmt: fmt(u.total.cost),
+    daily14,
     projects,
     monthStartMs: monthStart.getTime(),
     providerNote,
@@ -129,8 +149,31 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
   };
 }
 
+/** Attach each project's today / week / month / all breakdown so the Budget
+ *  page's period filter can re-scope spend + the pie without another host round-
+ *  trip. Live projects get real day-scoped numbers; a ledger-only project (folder
+ *  gone) has no day series → its scoped periods are 0 and only "all" (from its
+ *  all-time row cost, applied client-side) shows a total. */
+function attachPeriods(u: UsageSummary, view: BudgetView): void {
+  const home = os.homedir();
+  const ymd = (d: Date) =>
+    d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  const weekStart = new Date();
+  weekStart.setHours(0, 0, 0, 0);
+  weekStart.setDate(weekStart.getDate() - 6);
+  const todayKey = localTodayKey();
+  const weekStartKey = ymd(weekStart);
+  const monthPrefix = localMonthKey();
+  for (const p of view.projects) {
+    const absRoot = p.path.startsWith("~") ? home + p.path.slice(1) : p.path;
+    p.periods = projectPeriods(collapseProjectDayDetail(u, absRoot), todayKey, weekStartKey, monthPrefix);
+  }
+}
+
 async function postView(panel: vscode.WebviewPanel, u: UsageSummary): Promise<void> {
-  panel.webview.postMessage({ type: "budget", ...(await buildBudgetView(u)) });
+  const view = await buildBudgetView(u);
+  attachPeriods(u, view);
+  panel.webview.postMessage({ type: "budget", ...view });
 }
 
 /** Paint instantly from the cached snapshot, then repaint when a fresh scan
@@ -214,406 +257,429 @@ function renderShell(): string {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
-  :root { color-scheme: light dark; }
-  body {
-    font-family: var(--vscode-font-family);
-    color: var(--vscode-foreground);
-    background: var(--vscode-editor-background);
-    padding: 22px 24px; margin: 0;
+  :root, :root[data-theme="dark"] {
+    --bg:#0d1117; --panel:#11171d; --editor:#0f151b; --card:#161f28;
+    --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.13);
+    --txt:#e7eef5; --muted:#8a97a4; --faint:#5c6773;
+    --accent:#2f9dc4; --accent2:#40c8ea; --accentSoft:rgba(47,157,196,.15); --accentGlow:rgba(64,200,234,.28);
+    --dot:rgba(255,255,255,.028);
   }
-  .wrap { max-width: 760px; margin: 0 auto; }
-  .head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
-  .title { font-size: 13px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; opacity: 0.6; margin: 0 0 6px; }
-  .hero { font-size: 40px; font-weight: 800; line-height: 1; letter-spacing: -1px; }
-  .hero .cur { font-size: 22px; font-weight: 700; opacity: 0.55; vertical-align: 6px; margin-right: 2px; }
-  .hero-sub { font-size: 12px; opacity: 0.6; margin-top: 6px; }
-  .refresh {
-    background: transparent; color: var(--vscode-foreground);
-    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35)); border-radius: 6px;
-    padding: 6px 12px; font-size: 12px; cursor: pointer; flex-shrink: 0; white-space: nowrap;
+  :root[data-theme="light"] {
+    --bg:#e9edf1; --panel:#f9fbfc; --editor:#ffffff; --card:#ffffff;
+    --border:rgba(15,30,45,.10); --border2:rgba(15,30,45,.17);
+    --txt:#132029; --muted:#5a6b78; --faint:#94a1ad;
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); --accentGlow:rgba(14,136,173,.18);
+    --dot:rgba(15,30,45,.035);
   }
-  .refresh:hover { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.15)); }
+  :root { --pad:20px; --gap:14px; --cardpad:15px; --radius:14px; --secgap:20px; --fs:13.5px;
+    --uifont:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --mono:'JetBrains Mono',var(--vscode-editor-font-family),ui-monospace,monospace; }
+  * { box-sizing: border-box; }
+  body { font-family: var(--uifont); font-size: var(--fs); color: var(--txt);
+    background: var(--editor); background-image: radial-gradient(var(--dot) 1px, transparent 1px);
+    background-size: 24px 24px; margin: 0; padding: var(--pad); }
+  .wrap { max-width: 1000px; margin: 0 auto; }
 
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 22px; }
-  .tile {
-    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); border-radius: 10px;
-    padding: 14px 16px; background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.05));
-  }
-  .tile .k { font-size: 11px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; opacity: 0.6; }
-  .tile .v { font-size: 22px; font-weight: 700; margin-top: 7px; letter-spacing: -0.5px; }
+  /* Header */
+  .head { display: flex; align-items: flex-start; gap: 20px; margin-bottom: var(--secgap); }
+  .head .htext { flex: 1; min-width: 0; }
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 2px; text-transform: uppercase; font-weight: 600; color: var(--faint); }
+  .hero { display: flex; align-items: baseline; gap: 3px; margin-top: 8px; font-family: var(--mono); }
+  .hero .cur { font-size: 26px; font-weight: 600; color: var(--muted); }
+  .hero .amt { font-size: 46px; font-weight: 600; letter-spacing: -1.5px; line-height: 1; color: var(--txt); }
+  .hero .dec { color: var(--muted); }
+  .hero-sub { font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+  .hright { flex: none; display: flex; align-items: center; gap: 10px; }
+  .seg { display: flex; gap: 2px; padding: 3px; border-radius: 9px; background: var(--card); border: 1px solid var(--border2); }
+  .seg .s { height: 26px; padding: 0 12px; display: inline-flex; align-items: center; border-radius: 6px;
+    font-size: 11.5px; font-weight: 600; color: var(--faint); background: transparent; cursor: pointer; font-family: var(--uifont); white-space: nowrap; }
+  .seg .s.active { color: var(--txt); background: var(--accentSoft); box-shadow: inset 0 0 0 1px var(--accent); }
+  .refresh { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: 8px;
+    background: var(--card); border: 1px solid var(--border2); color: var(--txt); font-size: 12.5px; font-weight: 600; cursor: pointer; font-family: var(--uifont); }
+  .refresh:hover { border-color: var(--accent); }
+  .refresh svg { width: 13px; height: 13px; }
+  .refresh[disabled] { opacity: .5; cursor: default; }
 
-  .section-k { font-size: 11px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; opacity: 0.6; margin: 0 0 10px; }
+  /* Stat cards */
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); margin-bottom: var(--secgap); }
+  .tile { padding: var(--cardpad); border-radius: var(--radius); background: var(--card); border: 1px solid var(--border); }
+  .tile.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .tile .k { font-size: 11.5px; color: var(--muted); }
+  .tile .v { font-family: var(--mono); font-size: 20px; font-weight: 600; margin-top: 6px; }
+  @media (max-width: 720px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
 
-  .primary {
-    background: var(--vscode-button-background); color: var(--vscode-button-foreground);
-    border: none; border-radius: 6px; padding: 7px 13px; font-size: 12.5px; font-weight: 600;
-    cursor: pointer; white-space: nowrap;
-  }
-  .primary:hover { background: var(--vscode-button-hoverBackground); }
-  .b {
-    background: transparent; color: var(--vscode-foreground);
-    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35)); border-radius: 6px;
-    padding: 7px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
-  }
-  .b:hover { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.15)); }
+  /* Two-up row */
+  .twoup { display: flex; gap: var(--gap); margin-bottom: var(--secgap); }
+  .panelcard { padding: var(--cardpad); border-radius: var(--radius); background: var(--card); border: 1px solid var(--border); }
+  .clabel { font-family: var(--mono); font-size: 10px; letter-spacing: 1.6px; text-transform: uppercase; font-weight: 600; color: var(--faint); }
+  .daily { flex: 1; min-width: 0; }
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: 56px; margin-top: 12px; }
+  .bars .b { flex: 1; background: var(--accent); opacity: .75; border-radius: 2px 2px 0 0; min-height: 2px; }
+  .bars .b.today { background: var(--accent2); opacity: 1; box-shadow: 0 0 8px var(--accent2); }
+  .daily .cap { font-family: var(--mono); font-size: 9.5px; color: var(--faint); margin-top: 8px; }
+  .toks { width: 340px; flex: none; }
+  .stack { display: flex; gap: 2px; height: 12px; border-radius: 6px; overflow: hidden; margin-top: 12px; }
+  .stack > span { display: block; height: 100%; }
+  .legend { display: flex; flex-direction: column; gap: 7px; margin-top: 12px; }
+  .lg { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+  .lg .sw { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .lg .lb { color: var(--muted); }
+  .lg .fill { flex: 1; }
+  .lg .vl { font-family: var(--mono); color: var(--txt); }
+  .lg .pc { font-family: var(--mono); color: var(--faint); width: 34px; text-align: right; }
 
-  .rows { display: flex; flex-direction: column; gap: 8px; }
-  .prow {
-    display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 12px;
-    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.22)); border-radius: 8px;
-    padding: 10px 14px; background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.04));
-  }
-  .prow .rank { font-size: 12px; opacity: 0.45; font-variant-numeric: tabular-nums; text-align: center; }
-  .prow .pth { min-width: 0; }
-  .prow .path { font-size: 13px; font-family: var(--vscode-editor-font-family, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .prow .pbar { height: 4px; border-radius: 4px; background: var(--vscode-panel-border, rgba(128,128,128,0.2)); margin-top: 7px; overflow: hidden; }
-  .prow .pbar > span { display: block; height: 100%; background: var(--vscode-charts-blue, #4d9de0); opacity: 0.7; border-radius: 4px; }
-  .prow .cost { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
-  .prow .tok { font-size: 11px; font-weight: 500; opacity: 0.55; margin-top: 3px; font-variant-numeric: tabular-nums; }
-  .empty { opacity: 0.55; font-size: 12.5px; padding: 12px 4px; }
+  /* Table */
+  .secbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .section-k { font-family: var(--mono); font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase; font-weight: 600; color: var(--faint); }
+  .secbar .rng { font-family: var(--mono); font-size: 9.5px; color: var(--faint); }
+  .secbar .hair { flex: 1; height: 1px; background: var(--border); }
+  .secbar .hint { font-size: 10px; color: var(--faint); }
+  .pager { display: flex; align-items: center; gap: 7px; }
+  .pager .pg { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px;
+    background: var(--card); border: 1px solid var(--border2); color: var(--txt); cursor: pointer; }
+  .pager .pg svg { width: 13px; height: 13px; }
+  .pager .pg:hover:not([disabled]) { border-color: var(--accent); }
+  .pager .pg[disabled] { color: var(--faint); opacity: .4; cursor: default; }
+  .pager .pi { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 34px; text-align: center; }
 
-  /* ledger-only row: project's folder/transcripts are gone locally now — totals
-     come from the durable ledger, not a live rescan */
-  .prow.removed { opacity: 0.72; }
-  .tag-removed { font-size: 11px; font-weight: 500; opacity: 0.65; }
+  .tbl { border-radius: 11px; background: var(--card); border: 1px solid var(--border); overflow: hidden; }
+  .thead { display: flex; align-items: center; gap: 14px; padding: 9px 15px; border-bottom: 1px solid var(--border2);
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: 1.2px; font-weight: 600; color: var(--faint); }
+  .thead .th-rank { width: 14px; text-align: right; flex: none; }
+  .thead .th-name { width: 230px; flex: none; }
+  .thead .th-mix { flex: 1; min-width: 0; }
+  .thead .th-tok { width: 74px; text-align: right; flex: none; }
+  .thead .th-cost { width: 76px; text-align: right; flex: none; }
+  .thead .sortable { cursor: pointer; }
+  .thead .sortable:hover { color: var(--txt); }
+  .thead .active-sort { color: var(--accent2); }
+  .thead .arrow { margin-left: 3px; }
 
-  .pk-head { display: flex; align-items: center; justify-content: space-between; gap: 12px 10px; margin-bottom: 10px; flex-wrap: wrap; }
-  .sortbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .search {
-    background: var(--vscode-input-background, transparent); color: var(--vscode-input-foreground, inherit);
-    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.35)));
-    border-radius: 6px; padding: 6px 10px; font-size: 12px; width: 150px;
-  }
-  .search::placeholder { color: var(--vscode-input-placeholderForeground, currentColor); opacity: 0.6; }
-  .search:focus { outline: none; border-color: var(--vscode-focusBorder); }
-  .dir { padding: 6px 11px; font-size: 13px; line-height: 1; }
-  /* fixed width so cycling "ล่าสุด" / "USD" / "token ที่ใช้" doesn't resize the button */
-  #sort-field { min-width: 96px; text-align: center; }
-  #scope { min-width: 68px; text-align: center; }
-  .b.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; font-weight: 600; }
-  .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; font-size: 12px; }
-  .pager .pinfo { opacity: 0.6; font-variant-numeric: tabular-nums; }
-  .b[disabled] { opacity: 0.4; cursor: default; }
+  .prow { position: relative; display: flex; align-items: center; gap: 14px; padding: 13px 15px; cursor: pointer; border-top: 1px solid var(--border); }
+  .prow:first-child { border-top: none; }
+  .prow:hover { background: var(--accentSoft); }
+  .prow .rank { width: 14px; text-align: right; flex: none; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .prow .pname { width: 230px; flex: none; font-family: var(--mono); font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prow .mixcol { flex: 1; min-width: 0; }
+  .prow .mix { display: flex; gap: 1px; height: 16px; border-radius: 5px; overflow: hidden; }
+  .prow .mix > span { display: block; height: 100%; }
+  .prow .tok { width: 74px; text-align: right; flex: none; font-family: var(--mono); font-size: 10px; color: var(--faint); }
+  .prow .cost { width: 76px; text-align: right; flex: none; font-family: var(--mono); font-size: 13px; font-weight: 600; }
+  .prow.removed { opacity: .72; }
+  .empty { color: var(--faint); font-size: 13px; padding: 26px 15px; }
+  .notice { margin-bottom: 16px; padding: 10px 14px; border-radius: 10px; font-size: 12px; line-height: 1.5;
+    border: 1px solid var(--border2); background: var(--card); color: var(--muted); }
 
-  .notice {
-    margin-bottom: 18px; padding: 10px 14px; border-radius: 8px; font-size: 12px; line-height: 1.5;
-    border: 1px solid var(--vscode-charts-yellow, #d18616);
-    background: color-mix(in srgb, var(--vscode-charts-yellow, #d18616) 12%, transparent);
-    color: var(--vscode-foreground);
-  }
-
-  .foot {
-    margin-top: 22px; padding-top: 14px; font-size: 11.5px; line-height: 1.6; opacity: 0.6;
-    border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
-  }
-
-  /* project row is clickable -> opens detail view; hovering shows the pie tip */
-  .prow { cursor: pointer; transition: border-color 0.12s; }
-  .prow:hover { border-color: var(--vscode-focusBorder); }
-
-  /* floating token-breakdown pie, shown on row hover (pointer-events:none so it
-     never eats the click that opens the detail view) */
-  #tip {
-    position: fixed; z-index: 50; pointer-events: none; display: none; max-width: 300px;
-    background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
-    border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
-    border-radius: 10px; padding: 12px 14px; box-shadow: 0 6px 24px rgba(0,0,0,0.28); font-size: 12px;
-  }
-  #tip .t-name { font-weight: 700; font-size: 13px; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #tip .t-total { opacity: 0.7; margin-bottom: 10px; font-variant-numeric: tabular-nums; }
-  #tip .t-wrap { display: flex; gap: 13px; align-items: center; }
-  #tip .pie { width: 88px; height: 88px; border-radius: 50%; flex-shrink: 0; }
-  #tip .t-legend { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-  #tip .lg { display: flex; align-items: center; gap: 7px; font-size: 11px; white-space: nowrap; }
-  #tip .sw { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
-  #tip .lg .lb { opacity: 0.72; }
-  #tip .lg .vl { margin-left: auto; padding-left: 10px; font-variant-numeric: tabular-nums; opacity: 0.92; }
-  #tip .t-empty { opacity: 0.6; }
+  /* Dwell popover (donut) */
+  #dwell { position: fixed; z-index: 30; pointer-events: none; display: none; width: 392px;
+    padding: 16px 18px; border-radius: 13px; background: var(--panel); border: 1px solid var(--border2); box-shadow: 0 18px 44px rgba(0,0,0,.45); }
+  #dwell .d-body { display: flex; align-items: center; gap: 18px; }
+  #dwell .donutwrap { position: relative; width: 104px; height: 104px; flex-shrink: 0; }
+  #dwell .donut { width: 104px; height: 104px; display: block; }
+  #dwell .dcenter { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
+  #dwell .dcenter .dv { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--txt); line-height: 1.05; max-width: 48px; text-align: center; overflow: hidden; text-overflow: ellipsis; }
+  #dwell .dcenter .du { font-family: var(--mono); font-size: 7.5px; letter-spacing: .5px; color: var(--faint); margin-top: 1px; }
+  #dwell .d-right { flex: 1; min-width: 0; }
+  #dwell .d-name { font-family: var(--mono); font-size: 11.5px; font-weight: 600; margin-bottom: 10px; }
+  #dwell .lg { margin-top: 7px; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="head">
-    <div>
-      <div class="title">Mission Control — Claude usage</div>
-      <div class="hero"><span id="hero">—</span></div>
-      <div class="hero-sub">ยอดใช้จ่ายเดือนนี้ (คำนวณจาก transcript ในเครื่อง)</div>
+    <div class="htext">
+      <div class="eyebrow">Mission Control — Claude Usage</div>
+      <div class="hero"><span class="cur">$</span><span class="amt" id="hero-amt">—</span></div>
+      <div class="hero-sub" id="hero-sub">ยอดใช้จ่ายเดือนนี้ (คำนวณจาก transcript ในเครื่อง)</div>
     </div>
-    <button class="refresh" id="refresh">⟳ รีเฟรช</button>
+    <div class="hright">
+      <div class="seg" id="period">
+        <span class="s" data-p="today">วันนี้</span>
+        <span class="s" data-p="week">สัปดาห์นี้</span>
+        <span class="s active" data-p="month">เดือนนี้</span>
+      </div>
+      <button class="refresh" id="refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg>รีเฟรช</button>
+    </div>
   </div>
 
   <div class="tiles" id="tiles"></div>
-
   <div class="notice" id="provider-note" style="display:none"></div>
 
-  <div class="pk-head">
-    <div class="section-k" id="projects-k" style="margin:0">โปรเจกต์</div>
-    <div class="sortbar">
-      <input class="search" id="proj-search" type="text" placeholder="ค้นหาชื่อโปรเจค…" />
-      <button class="b" id="sort-field" title="สลับเกณฑ์เรียง: token ที่ใช้ → USD → ล่าสุด">ล่าสุด</button>
-      <button class="b dir" id="sort-dir" title="สลับมากไปน้อย / น้อยไปมาก">↓</button>
-      <button class="b" id="scope" title="สลับ เดือนนี้ / ทั้งหมด">เดือนนี้</button>
+  <div class="twoup">
+    <div class="panelcard daily"><div class="clabel">รายวัน · 14 วัน</div><div class="bars" id="bars"></div><div class="cap" id="daily-cap"></div></div>
+    <div class="panelcard toks"><div class="clabel">แยกตามประเภท token</div><div class="stack" id="stack"></div><div class="legend" id="tok-legend"></div></div>
+  </div>
+
+  <div class="secbar">
+    <span class="section-k" id="projects-k">PROJECTS</span>
+    <span class="rng" id="range"></span>
+    <span class="hair"></span>
+    <span class="hint">คลิกหัวคอลัมน์เพื่อเรียง · ชี้ค้าง 3 วิ ดูกราฟวงกลม</span>
+    <div class="pager" id="pager" hidden>
+      <button class="pg" id="pg-prev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+      <span class="pi" id="pg-info"></span>
+      <button class="pg" id="pg-next"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
     </div>
   </div>
-  <div class="rows" id="projects"></div>
-  <div class="pager" id="pager"></div>
-
-  <div class="foot" id="foot"></div>
+  <div class="tbl">
+    <div class="thead">
+      <span class="th-rank">#</span>
+      <span class="th-name">PROJECT</span>
+      <span class="th-mix">TOKEN MIX</span>
+      <span class="th-tok sortable" data-sort="tok">TOKENS<span class="arrow"></span></span>
+      <span class="th-cost sortable" data-sort="cost">COST<span class="arrow"></span></span>
+    </div>
+    <div id="rows"></div>
+  </div>
 </div>
 
-<div id="tip"></div>
+<div id="dwell"></div>
 
 <script>
   const vscode = acquireVsCodeApi();
+  (function () { var b = document.body.classList;
+    document.documentElement.dataset.theme = (b.contains("vscode-light") || b.contains("vscode-high-contrast-light")) ? "light" : "dark"; })();
 
   function esc(s) {
-    return String(s == null ? "" : s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
-  function money(fmt) {
-    const s = esc(fmt);
-    if (s.charAt(0) === "$") return '<span class="cur">$</span>' + s.slice(1);
-    return s;
-  }
+  var USD = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function money2(n) { return "$" + USD.format(n || 0); }
+  var TOKFMT = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+  function fmtTokens(n) { return TOKFMT.format(n || 0); }
   function post(type) { vscode.postMessage({ type: type }); }
 
-  var TOKFMT = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
-  function fmtTokens(n) { return TOKFMT.format(n || 0) + " tok"; }
+  var PAGE_SIZE = 6;
+  var STATE = { view: null, period: "month", sortKey: "cost", sortDir: "desc", page: 0, dwellRow: null, dwellTimer: null };
+  var PERIOD_WORD = { today: "วันนี้", week: "สัปดาห์นี้", month: "เดือนนี้" };
+  // Fixed categorical colors (outside the teal accent palette) — identical in dark + light.
+  var CATS = [
+    { key: "cacheRead", color: "#4f9cf9", label: "Cache read" },
+    { key: "output", color: "#f4796b", label: "Output" },
+    { key: "cacheWrite", color: "#e8a33d", label: "Cache write" },
+    { key: "input", color: "#5ecf8f", label: "Input" }
+  ];
 
-  // ── Hover pie: the per-project token breakdown, shown as a floating tip while
-  // the cursor is over a project row. Data rides on each project's .detail
-  // (slices/totalText/hasCost from buildDetail). Click still opens the detail
-  // view — the tip is pointer-events:none so it never intercepts the click.
-  function pieBg(slices) {
-    var total = 0, i;
-    for (i = 0; i < slices.length; i++) total += slices[i].cost;
-    if (total <= 0) return "transparent";
-    // Floor each NONZERO slice to MIN_DEG so a tiny-but-real share (e.g. Input at
-    // 0.0%) still shows a visible wedge instead of collapsing to a 0deg band. The
-    // big slices then share whatever degrees remain, so the disc still sums to
-    // 360; a genuinely zero slice (cost 0) gets no wedge at all.
-    var MIN_DEG = 8, raw = [], smallDeg = 0, bigRaw = 0;
-    for (i = 0; i < slices.length; i++) {
-      raw[i] = (slices[i].cost / total) * 360;
-      if (raw[i] <= 0) continue;
-      if (raw[i] < MIN_DEG) smallDeg += MIN_DEG; else bigRaw += raw[i];
-    }
-    var room = 360 - smallDeg; // degrees left for the big (>= MIN_DEG) slices
-    var acc = 0, stops = [], d;
-    for (i = 0; i < slices.length; i++) {
-      if (raw[i] <= 0) continue;
-      else if (raw[i] < MIN_DEG) d = MIN_DEG;
-      else d = (room > 0 && bigRaw > 0) ? (raw[i] / bigRaw) * room : raw[i];
-      var start = acc;
-      acc += d;
-      stops.push(slices[i].color + " " + start.toFixed(2) + "deg " + acc.toFixed(2) + "deg");
-    }
-    return "conic-gradient(" + stops.join(", ") + ")";
+  // Selected-period {cost, tokens, cats} for a project — day-scoped from the host.
+  function periodOf(p) {
+    var pd = (p.periods && p.periods[STATE.period]) || { cost: 0, tokens: 0, cats: {} };
+    return { cost: pd.cost || 0, tokens: pd.tokens || 0, cats: pd.cats || {} };
   }
-  function tipHtml(p) {
-    var d = p.detail || {};
-    var html = '<div class="t-name">' + esc(p.name) + "</div>";
-    html += '<div class="t-total">' + esc(d.totalText || "") + "</div>";
-    if (!d.hasCost) return html + '<div class="t-empty">ยังไม่มียอดใช้จ่ายที่คิดเงิน</div>';
-    var slices = d.slices || [];
-    html += '<div class="t-wrap"><div class="pie" style="background:' + pieBg(slices) + '"></div>';
-    html += '<div class="t-legend">';
-    for (var i = 0; i < slices.length; i++) {
-      var s = slices[i];
-      html += '<div class="lg" title="' + esc(s.meaning || "") + '">' +
-        '<span class="sw" style="background:' + s.color + '"></span>' +
-        '<span class="lb">' + esc(s.label) + "</span>" +
-        '<span class="vl">' + esc(s.text) + "</span></div>";
-    }
-    return html + "</div></div>";
-  }
-  function projFromKey(key) {
-    var v = STATE.view;
-    if (!v) return null;
-    var list = v.projects || [];
-    for (var i = 0; i < list.length; i++) if (list[i].path === key) return list[i];
-    return null;
-  }
-  function positionTip(x, y) {
-    var tip = document.getElementById("tip");
-    var w = tip.offsetWidth, h = tip.offsetHeight;
-    var nx = x + 16, ny = y + 16;
-    if (nx + w > window.innerWidth - 8) nx = x - w - 16;
-    if (ny + h > window.innerHeight - 8) ny = window.innerHeight - h - 8;
-    if (nx < 8) nx = 8;
-    if (ny < 8) ny = 8;
-    tip.style.left = nx + "px";
-    tip.style.top = ny + "px";
-  }
-  var TIP_KEY = null;
-  function hideTip() { document.getElementById("tip").style.display = "none"; TIP_KEY = null; }
-  function updateTip(e) {
-    var t = e.target;
-    var row = t && t.closest ? t.closest(".prow") : null;
-    var key = row ? row.getAttribute("data-key") : null;
-    if (!key) { if (TIP_KEY) hideTip(); return; }
-    var p = projFromKey(key);
-    if (!p) { if (TIP_KEY) hideTip(); return; }
-    var tip = document.getElementById("tip");
-    if (TIP_KEY !== key) { tip.innerHTML = tipHtml(p); tip.style.display = "block"; TIP_KEY = key; }
-    positionTip(e.clientX, e.clientY);
+  function heroFmt() {
+    var v = STATE.view; if (!v) return "$0.00";
+    return { today: v.todayFmt, week: v.last7Fmt, month: v.monthFmt }[STATE.period] || v.monthFmt;
   }
 
-  var PAGE_SIZE = 10;
-  // sortKey cycles: "tokens" (token usage) → "usd" (USD cost) → "recent" (ล่าสุด).
-  // It also drives what's shown big + the bar: "tokens" → tokens, otherwise USD cost.
-  var STATE = { view: null, sortKey: "recent", sortDir: "desc", scope: "month", query: "", page: 0, maxCost: 0, maxTokens: 0 };
-
-  function renderProjects() {
-    var v = STATE.view;
-    if (!v) return;
-    var list = (v.projects || []).slice();
-    // scope filter: this-month (touched since local month start) vs all
-    if (STATE.scope === "month") {
-      list = list.filter(function (p) { return p.lastMs >= v.monthStartMs; });
+  // ── donut pie: wedges by USD, start 12 o'clock clockwise, center punched out ──
+  function pt(deg) { var r = deg * Math.PI / 180; return (50 + 42 * Math.sin(r)).toFixed(2) + " " + (50 - 42 * Math.cos(r)).toFixed(2); }
+  // metric = "usd" (wedges by dollars) or "tokens" (wedges by token count) so the
+  // pie matches whatever the table is sorted by.
+  function donutSvg(cats, metric) {
+    var total = 0; CATS.forEach(function (c) { total += (cats[c.key] || {})[metric] || 0; });
+    if (total <= 0) return "";
+    var nz = CATS.filter(function (c) { return ((cats[c.key] || {})[metric] || 0) > 0; });
+    var body;
+    if (nz.length === 1) { body = '<circle cx="50" cy="50" r="42" fill="' + nz[0].color + '"/>'; }
+    else {
+      var a = 0, parts = [];
+      CATS.forEach(function (c) {
+        var val = (cats[c.key] || {})[metric] || 0; if (val <= 0) return;
+        var sweep = val / total * 360, a0 = a, a1 = a + sweep; a = a1;
+        parts.push('<path d="M50 50 L' + pt(a0) + ' A42 42 0 ' + (sweep > 180 ? 1 : 0) + ' 1 ' + pt(a1) + ' Z" fill="' + c.color + '"/>');
+      });
+      body = parts.join("");
     }
-    // name search
-    var q = STATE.query.trim().toLowerCase();
-    if (q) list = list.filter(function (p) { return p.name.toLowerCase().indexOf(q) !== -1; });
-    // sort by chosen key + direction; break exact ties by name so the order is
-    // stable (never depends on Map/insertion order).
+    return '<svg class="donut" viewBox="0 0 100 100">' + body + '<circle cx="50" cy="50" r="26" fill="var(--panel)"/></svg>';
+  }
+
+  // Hide projects with no spend in the selected period (they render as $0.00).
+  function visibleList() {
+    var v = STATE.view; if (!v) return [];
+    var list = (v.projects || []).filter(function (p) { return periodOf(p).cost >= 0.005; });
     list.sort(function (a, b) {
-      var d;
-      if (STATE.sortKey === "tokens") d = a.tokens - b.tokens;
-      else if (STATE.sortKey === "usd") d = a.cost - b.cost;
-      else d = a.lastMs - b.lastMs;
-      if (d === 0) return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+      var d = STATE.sortKey === "tok" ? (periodOf(a).tokens - periodOf(b).tokens) : (periodOf(a).cost - periodOf(b).cost);
+      if (d === 0) d = a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
       return STATE.sortDir === "desc" ? -d : d;
     });
-    var total = list.length;
-    var pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    return list;
+  }
+
+  function updateHero() {
+    var s = heroFmt();
+    var body = s.charAt(0) === "$" ? s.slice(1) : s;
+    var dot = body.lastIndexOf(".");
+    var intPart = dot >= 0 ? body.slice(0, dot) : body;
+    var decPart = dot >= 0 ? body.slice(dot) : "";
+    document.getElementById("hero-amt").innerHTML = esc(intPart) + '<span class="dec">' + esc(decPart) + "</span>";
+    document.getElementById("hero-sub").textContent = "ยอดใช้จ่าย" + PERIOD_WORD[STATE.period] + " (คำนวณจาก transcript ในเครื่อง)";
+    // segment active state
+    var segs = document.querySelectorAll("#period .s");
+    for (var i = 0; i < segs.length; i++) segs[i].classList[segs[i].getAttribute("data-p") === STATE.period ? "add" : "remove"]("active");
+  }
+
+  function renderTiles() {
+    var v = STATE.view;
+    var tiles = [
+      { k: "เดือนนี้", v: v.monthFmt, p: "month" },
+      { k: "วันนี้", v: v.todayFmt, p: "today" },
+      { k: "7 วันล่าสุด", v: v.last7Fmt, p: "week" },
+      { k: "ทั้งหมด", v: v.allTimeFmt, p: "all" }
+    ];
+    document.getElementById("tiles").innerHTML = tiles.map(function (t) {
+      return '<div class="tile' + (t.p === STATE.period ? " active" : "") + '"><div class="k">' + esc(t.k) + '</div><div class="v">' + esc(t.v) + "</div></div>";
+    }).join("");
+  }
+
+  function renderDaily() {
+    var d = (STATE.view && STATE.view.daily14) || [];
+    var max = 0; for (var i = 0; i < d.length; i++) if (d[i] > max) max = d[i];
+    var today = d.length ? d[d.length - 1] : 0;
+    document.getElementById("bars").innerHTML = d.map(function (val, i) {
+      var h = max > 0 ? Math.max(2, Math.round(val / max * 52)) : 2;
+      return '<span class="b' + (i === d.length - 1 ? " today" : "") + '" style="height:' + h + 'px" title="' + money2(val) + '"></span>';
+    }).join("");
+    document.getElementById("daily-cap").textContent = "วันนี้ " + money2(today) + " · สูงสุดในรอบ " + money2(max);
+  }
+
+  // Portfolio token-type totals for the active period (sum across visible spend).
+  function portfolioCats() {
+    var tot = { cacheRead: 0, output: 0, cacheWrite: 0, input: 0 }, sum = 0;
+    (STATE.view.projects || []).forEach(function (p) {
+      var cats = periodOf(p).cats;
+      CATS.forEach(function (c) { var u = (cats[c.key] || {}).usd || 0; tot[c.key] += u; sum += u; });
+    });
+    return { tot: tot, sum: sum };
+  }
+  function renderTokenBar() {
+    var pc = portfolioCats(), sum = pc.sum;
+    document.getElementById("stack").innerHTML = sum > 0 ? CATS.map(function (c) {
+      var w = pc.tot[c.key] / sum * 100;
+      return w > 0 ? '<span style="width:' + w + '%;background:' + c.color + '"></span>' : "";
+    }).join("") : '<span style="width:100%;background:var(--border)"></span>';
+    document.getElementById("tok-legend").innerHTML = CATS.map(function (c) {
+      var u = pc.tot[c.key], pct = sum > 0 ? Math.round(u / sum * 100) : 0;
+      return '<div class="lg"><span class="sw" style="background:' + c.color + '"></span>' +
+        '<span class="lb">' + c.label + '</span><span class="fill"></span>' +
+        '<span class="vl">' + money2(u) + '</span><span class="pc">' + pct + '%</span></div>';
+    }).join("");
+  }
+
+  function renderHeaders() {
+    document.querySelectorAll(".thead .sortable").forEach(function (h) {
+      var key = h.getAttribute("data-sort"), active = key === STATE.sortKey;
+      h.classList[active ? "add" : "remove"]("active-sort");
+      h.querySelector(".arrow").textContent = active ? (STATE.sortDir === "desc" ? " ↓" : " ↑") : "";
+    });
+  }
+
+  function renderTable() {
+    cancelDwell();
+    var list = visibleList();
+    document.getElementById("projects-k").textContent = "PROJECTS (" + list.length + ")";
+    renderHeaders();
+    var maxCost = list.reduce(function (m, p) { var c = periodOf(p).cost; return c > m ? c : m; }, 0);
+    var rowsEl = document.getElementById("rows");
+    if (!list.length) { rowsEl.innerHTML = '<div class="empty">ไม่มีการใช้จ่ายในช่วงนี้</div>'; renderPager(0, 0); document.getElementById("range").textContent = ""; return; }
+    var pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
     if (STATE.page >= pages) STATE.page = pages - 1;
     if (STATE.page < 0) STATE.page = 0;
-    var start = STATE.page * PAGE_SIZE;
-    var slice = list.slice(start, start + PAGE_SIZE);
-
-    document.getElementById("projects-k").textContent = "โปรเจกต์ (" + total + ")";
-    document.getElementById("sort-field").textContent =
-      STATE.sortKey === "tokens" ? "token ที่ใช้" : STATE.sortKey === "usd" ? "USD" : "ล่าสุด";
-    document.getElementById("sort-dir").textContent = STATE.sortDir === "desc" ? "↓" : "↑";
-    var scopeBtn = document.getElementById("scope");
-    scopeBtn.textContent = STATE.scope === "all" ? "ทั้งหมด" : "เดือนนี้";
-    scopeBtn.classList[STATE.scope === "all" ? "add" : "remove"]("active");
-
-    var el = document.getElementById("projects");
-    if (!total) {
-      el.innerHTML = '<div class="empty">ยังไม่มีข้อมูลการใช้จ่าย</div>';
-      document.getElementById("pager").innerHTML = "";
-      return;
-    }
-    el.innerHTML = slice
-      .map(function (p, i) {
-        // display + bar follow the sort mode: token usage → tokens, otherwise USD cost
-        var showTokens = STATE.sortKey === "tokens";
-        var val = showTokens ? p.tokens : p.cost;
-        var max = showTokens ? STATE.maxTokens : STATE.maxCost;
-        var pct = max > 0 ? Math.max(3, Math.round((val / max) * 100)) : 0;
-        var rank = start + i + 1;
-        var big = showTokens ? esc(fmtTokens(p.tokens)) : money(p.costFmt);
-        var small = showTokens ? money(p.costFmt) : esc(fmtTokens(p.tokens));
-        var removedTag = p.live === false ? ' <span class="tag-removed">(ลบแล้วจากเครื่อง)</span>' : "";
-        return (
-          '<div class="prow' + (p.live === false ? " removed" : "") + '" data-key="' + esc(p.path) + '"><div class="rank">' + rank + "</div>" +
-          '<div class="pth"><div class="path" title="' + esc(p.path) + '">' + esc(p.name) + removedTag + "</div>" +
-          '<div class="pbar"><span style="width:' + pct + '%"></span></div></div>' +
-          '<div class="cost">' + big +
-          '<div class="tok">' + small + "</div></div></div>"
-        );
-      })
-      .join("");
-
+    var start = STATE.page * PAGE_SIZE, slice = list.slice(start, start + PAGE_SIZE);
+    rowsEl.innerHTML = slice.map(function (p, i) {
+      var pd = periodOf(p);
+      var barW = maxCost > 0 ? Math.max(6, Math.round(pd.cost / maxCost * 100)) : 6;
+      var segs = pd.cost > 0 ? CATS.map(function (c) {
+        var u = (pd.cats[c.key] || {}).usd || 0; var w = u / pd.cost * 100;
+        return w > 0 ? '<span style="width:' + w + '%;background:' + c.color + '"></span>' : "";
+      }).join("") : "";
+      return '<div class="prow' + (p.live === false ? " removed" : "") + '" data-key="' + esc(p.path) + '">' +
+        '<div class="rank">' + (start + i + 1) + "</div>" +
+        '<div class="pname" title="' + esc(p.name) + '">' + esc(p.name) + "</div>" +
+        '<div class="mixcol"><div class="mix" style="width:' + barW + '%">' + segs + "</div></div>" +
+        '<div class="tok">' + fmtTokens(pd.tokens) + " tok</div>" +
+        '<div class="cost">' + money2(pd.cost) + "</div></div>";
+    }).join("");
+    document.getElementById("range").textContent = "— " + (start + 1) + "–" + (start + slice.length) + " จาก " + list.length;
+    renderPager(pages, list.length);
+  }
+  function renderPager(pages, total) {
     var pg = document.getElementById("pager");
-    if (pages <= 1) {
-      pg.innerHTML = "";
-    } else {
-      pg.innerHTML =
-        '<button class="b" id="pg-prev"' + (STATE.page === 0 ? " disabled" : "") + ">‹ ก่อนหน้า</button>" +
-        '<span class="pinfo">หน้า ' + (STATE.page + 1) + "/" + pages + "</span>" +
-        '<button class="b" id="pg-next"' + (STATE.page >= pages - 1 ? " disabled" : "") + ">ถัดไป ›</button>";
-    }
+    if (pages <= 1) { pg.setAttribute("hidden", ""); return; }
+    pg.removeAttribute("hidden");
+    document.getElementById("pg-info").textContent = (STATE.page + 1) + " / " + pages;
+    var prev = document.getElementById("pg-prev"), next = document.getElementById("pg-next");
+    if (STATE.page <= 0) prev.setAttribute("disabled", ""); else prev.removeAttribute("disabled");
+    if (STATE.page >= pages - 1) next.setAttribute("disabled", ""); else next.removeAttribute("disabled");
   }
 
   function render(v) {
-    hideTip(); // a repaint replaces the row DOM; drop any tip anchored to it
     STATE.view = v;
-    STATE.maxCost = (v.projects || []).reduce(function (m, x) { return x.cost > m ? x.cost : m; }, 0);
-    STATE.maxTokens = (v.projects || []).reduce(function (m, x) { return x.tokens > m ? x.tokens : m; }, 0);
-    document.getElementById("hero").innerHTML = money(v.monthFmt);
-
-    const tiles = [
-      { k: "เดือนนี้", v: v.monthFmt },
-      { k: "วันนี้", v: v.todayFmt },
-      { k: "7 วันล่าสุด", v: v.last7Fmt },
-      { k: "ทั้งหมด", v: v.allTimeFmt },
-    ];
-    document.getElementById("tiles").innerHTML = tiles
-      .map(function (t) {
-        return '<div class="tile"><div class="k">' + esc(t.k) + '</div><div class="v">' + money(t.v) + "</div></div>";
-      })
-      .join("");
-
+    updateHero();
+    renderTiles();
     var pn = document.getElementById("provider-note");
-    if (v.providerNote) {
-      pn.textContent = "⚠ " + v.providerNote;
-      pn.style.display = "block";
-    } else {
-      pn.style.display = "none";
-    }
-
-    renderProjects();
-
-    document.getElementById("foot").textContent =
-      v.sessions + " sessions · คำนวณจาก ~/.claude/projects · Anthropic list pricing";
+    if (v.providerNote) { pn.textContent = v.providerNote; pn.style.display = "block"; } else { pn.style.display = "none"; }
+    var rf = document.getElementById("refresh"); if (rf) rf.removeAttribute("disabled");
+    renderDaily();
+    renderTokenBar();
+    renderTable();
   }
 
+  // ── Dwell popover (3s) ──
+  function projFromKey(key) { var l = (STATE.view && STATE.view.projects) || []; for (var i = 0; i < l.length; i++) if (l[i].path === key) return l[i]; return null; }
+  function cancelDwell() { if (STATE.dwellTimer) { clearTimeout(STATE.dwellTimer); STATE.dwellTimer = null; } hideDwell(); }
+  function hideDwell() { var d = document.getElementById("dwell"); if (d) d.style.display = "none"; STATE.dwellRow = null; }
+  function showDwell(row) {
+    var p = projFromKey(row.getAttribute("data-key")); if (!p) return;
+    var pd = periodOf(p);
+    var donut = donutSvg(pd.cats, "usd");   // wedges + legend always by dollars
+    if (!donut) return;
+    var legend = CATS.map(function (c) {
+      var u = (pd.cats[c.key] || {}).usd || 0;
+      return '<div class="lg"><span class="sw" style="background:' + c.color + '"></span>' +
+        '<span class="lb">' + c.label + '</span><span class="fill"></span><span class="vl">' + money2(u) + "</span></div>";
+    }).join("");
+    // Center of the donut = total spend (compact so it fits the punched-out hole).
+    var center = '<div class="dcenter"><div class="dv">$' + esc(TOKFMT.format(pd.cost)) + '</div><div class="du">usd</div></div>';
+    var d = document.getElementById("dwell");
+    d.innerHTML = '<div class="d-body"><div class="donutwrap">' + donut + center + '</div><div class="d-right"><div class="d-name">' + esc(p.name) + "</div>" + legend + "</div></div>";
+    d.style.display = "block";
+    var r = row.getBoundingClientRect();
+    var w = d.offsetWidth, h = d.offsetHeight;
+    var left = r.right - 16 - w; if (left < 8) left = 8;
+    var top = (r.bottom + h - 6 <= window.innerHeight - 8) ? (r.bottom - 6) : (r.top - h + 6);
+    if (top < 8) top = 8;
+    d.style.left = left + "px"; d.style.top = top + "px";
+    STATE.dwellRow = row.getAttribute("data-key");
+  }
+
+  // ── events ──
   document.addEventListener("click", function (e) {
     var t = e.target;
-    if (!t) return;
-    // clicking anywhere on a project row opens detail view
-    // (row children have no id, so this must run before the id checks)
+    var seg = t.closest ? t.closest("#period .s") : null;
+    if (seg) { STATE.period = seg.getAttribute("data-p"); STATE.page = 0; render(STATE.view); return; }
+    var th = t.closest ? t.closest(".thead .sortable") : null;
+    if (th) { var k = th.getAttribute("data-sort"); if (STATE.sortKey === k) STATE.sortDir = STATE.sortDir === "desc" ? "asc" : "desc"; else { STATE.sortKey = k; STATE.sortDir = "desc"; } STATE.page = 0; renderTable(); return; }
     var row = t.closest ? t.closest(".prow") : null;
-    if (row && row.getAttribute("data-key")) {
-      var v = STATE.view;
-      if (!v) return;
-      var list = v.projects || [];
-      for (var i = 0; i < list.length; i++) {
-        if (list[i].path === row.getAttribute("data-key")) {
-          vscode.postMessage({ type: "openProjectDetail", projectPath: list[i].path, projectName: list[i].name });
-          return;
-        }
-      }
-      return;
-    }
-    if (!t.id) return;
-    if (t.id === "refresh") post("reload");
-    else if (t.id === "sort-field") { STATE.sortKey = STATE.sortKey === "tokens" ? "usd" : STATE.sortKey === "usd" ? "recent" : "tokens"; STATE.page = 0; renderProjects(); }
-    else if (t.id === "sort-dir") { STATE.sortDir = STATE.sortDir === "desc" ? "asc" : "desc"; STATE.page = 0; renderProjects(); }
-    else if (t.id === "scope") { STATE.scope = STATE.scope === "month" ? "all" : "month"; STATE.page = 0; renderProjects(); }
-    else if (t.id === "pg-prev") { STATE.page -= 1; renderProjects(); }
-    else if (t.id === "pg-next") { STATE.page += 1; renderProjects(); }
+    if (row && row.getAttribute("data-key")) { var p = projFromKey(row.getAttribute("data-key")); if (p) vscode.postMessage({ type: "openProjectDetail", projectPath: p.path, projectName: p.name }); return; }
+    var b = t.id ? t : (t.closest ? t.closest("[id]") : null);
+    if (b && b.id === "refresh") { b.setAttribute("disabled", "true"); post("reload"); }
+    else if (b && b.id === "pg-prev") { if (STATE.page > 0) { STATE.page--; renderTable(); } }
+    else if (b && b.id === "pg-next") { STATE.page++; renderTable(); }
   });
-
-  document.addEventListener("input", function (e) {
-    const t = e.target;
-    if (t && t.id === "proj-search") { STATE.query = t.value || ""; STATE.page = 0; renderProjects(); }
+  document.addEventListener("mouseover", function (e) {
+    var row = e.target.closest ? e.target.closest(".prow") : null;
+    if (!row) { if (STATE.dwellRow || STATE.dwellTimer) cancelDwell(); return; }
+    var key = row.getAttribute("data-key");
+    if (key === STATE.dwellRow) return;           // already shown for this row
+    if (STATE.dwellTimer) clearTimeout(STATE.dwellTimer);
+    hideDwell();
+    STATE.dwellTimer = setTimeout(function () { STATE.dwellTimer = null; showDwell(row); }, 2000);
   });
-
-  document.addEventListener("mousemove", updateTip);
-  document.addEventListener("mouseleave", hideTip);
-  window.addEventListener("scroll", hideTip, true);
-
-  window.addEventListener("message", function (ev) {
-    const m = ev.data;
-    if (m && m.type === "budget") render(m);
+  document.addEventListener("mouseout", function (e) {
+    var to = e.relatedTarget, row = e.target.closest ? e.target.closest(".prow") : null;
+    if (row && (!to || !to.closest || !to.closest(".prow"))) cancelDwell();
   });
+  window.addEventListener("scroll", cancelDwell, true);
+  window.addEventListener("message", function (ev) { var m = ev.data; if (m && m.type === "budget") render(m); });
 
   post("ready");
 </script>

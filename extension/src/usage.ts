@@ -789,3 +789,68 @@ export function topProjectsByRange(
     .sort((a, b) => b.cost - a.cost)
     .slice(0, n);
 }
+
+export interface PeriodBreakdown {
+  cost: number;
+  tokens: number;
+  cats: {
+    cacheRead: { tokens: number; usd: number };
+    output: { tokens: number; usd: number };
+    cacheWrite: { tokens: number; usd: number };
+    input: { tokens: number; usd: number };
+  };
+}
+export interface ProjectPeriods {
+  today: PeriodBreakdown;
+  week: PeriodBreakdown;
+  month: PeriodBreakdown;
+  all: PeriodBreakdown;
+}
+function emptyPeriod(): PeriodBreakdown {
+  return {
+    cost: 0,
+    tokens: 0,
+    cats: {
+      cacheRead: { tokens: 0, usd: 0 },
+      output: { tokens: 0, usd: 0 },
+      cacheWrite: { tokens: 0, usd: 0 },
+      input: { tokens: 0, usd: 0 },
+    },
+  };
+}
+function addToPeriod(p: PeriodBreakdown, bd: Breakdown): void {
+  p.cats.cacheRead.tokens += bd.cacheReadTok; p.cats.cacheRead.usd += bd.cacheReadCost;
+  p.cats.output.tokens += bd.outTok; p.cats.output.usd += bd.outCost;
+  p.cats.cacheWrite.tokens += bd.cacheWriteTok; p.cats.cacheWrite.usd += bd.cacheWriteCost;
+  p.cats.input.tokens += bd.inTok; p.cats.input.usd += bd.inCost;
+  p.cost += bd.inCost + bd.outCost + bd.cacheReadCost + bd.cacheWriteCost;
+  p.tokens += bd.inTok + bd.outTok + bd.cacheReadTok + bd.cacheWriteTok;
+}
+
+/** Bucket a project's per-day Breakdown series into today / rolling-week /
+ *  this-month / all-time totals + the 4-category (cache-read / output / cache-
+ *  write / input) cost+token split for each period. Pure — the caller passes the
+ *  local day keys (todayKey, weekStartKey = today-6d, monthPrefix "YYYY-MM"), so
+ *  no clock is read here. Powers the Budget page's period filter, which re-scopes
+ *  each project's spend, bar, and breakdown pie. */
+export function projectPeriods(
+  dayDetail: Record<string, Breakdown>,
+  todayKey: string,
+  weekStartKey: string,
+  monthPrefix: string,
+): ProjectPeriods {
+  const out: ProjectPeriods = {
+    today: emptyPeriod(),
+    week: emptyPeriod(),
+    month: emptyPeriod(),
+    all: emptyPeriod(),
+  };
+  for (const day of Object.keys(dayDetail)) {
+    const bd = dayDetail[day];
+    addToPeriod(out.all, bd);
+    if (day === todayKey) addToPeriod(out.today, bd);
+    if (day >= weekStartKey) addToPeriod(out.week, bd); // fixed-width YYYY-MM-DD → lexical = chronological
+    if (day.startsWith(monthPrefix)) addToPeriod(out.month, bd);
+  }
+  return out;
+}

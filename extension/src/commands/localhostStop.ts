@@ -40,9 +40,78 @@ function killablePgids(project: string, projectsRoot: string): number[] {
   });
 }
 
+/** TERM every guardrail-approved pgid, wait a grace period, then force-KILL any
+ *  that survive. Shared by every stop path; `resurvey` re-lists so the second
+ *  pass only force-kills groups still holding a port. */
+async function termThenKill(
+  pgids: number[],
+  resurvey: () => number[],
+): Promise<void> {
+  for (const pgid of pgids) {
+    try {
+      cp.execSync(buildKillCmd(pgid, false), { timeout: 3000 });
+    } catch {
+      /* group may already be gone */
+    }
+  }
+  await sleep(2000);
+  for (const pgid of resurvey()) {
+    if (!pgids.includes(pgid)) continue;
+    try {
+      cp.execSync(buildKillCmd(pgid, true), { timeout: 3000 });
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+/** Kill a project's servers WITHOUT a native modal — the Localhosts panel
+ *  inline-confirms on its own button, so a second confirm would be redundant. */
+export async function stopGroupLocalhosts(project: string): Promise<void> {
+  const projectsRoot = getProjectsRoot();
+  if (!projectsRoot) return;
+  await termThenKill(killablePgids(project, projectsRoot), () =>
+    killablePgids(project, projectsRoot),
+  );
+}
+
+/** Kill the process group holding a single port (inline-confirmed client-side).
+ *  Note: kill is process-group scoped, so if two ports share one pgid this stops
+ *  both — that's the same safe mechanism the group stop uses. */
+export async function stopPortLocalhost(port: number): Promise<void> {
+  const projectsRoot = getProjectsRoot();
+  if (!projectsRoot) return;
+  let target: { pgid: number } | undefined;
+  for (const g of scanLocalhosts()) {
+    const e = g.entries.find((x) => x.port === port);
+    if (e) { target = e; break; }
+  }
+  if (!target) return;
+  const { cwd, comm } = leaderInfo(target.pgid);
+  if (!canKillGroup(target.pgid, cwd, comm, projectsRoot)) return;
+  const pgid = target.pgid;
+  await termThenKill([pgid], () =>
+    scanLocalhosts().flatMap((g) => g.entries.map((e) => e.pgid)),
+  );
+}
+
+/** Kill every listed server across all projects (inline-confirmed client-side). */
+export async function stopAllLocalhosts(): Promise<void> {
+  const projectsRoot = getProjectsRoot();
+  if (!projectsRoot) return;
+  const projects = scanLocalhosts().map((g) => g.project);
+  const pgids = [
+    ...new Set(projects.flatMap((p) => killablePgids(p, projectsRoot))),
+  ];
+  await termThenKill(pgids, () =>
+    projects.flatMap((p) => killablePgids(p, projectsRoot)),
+  );
+}
+
 /** Confirm, then TERM every process group of the project's servers; force-KILL
  *  survivors after a grace period. Bounded to the project by process group +
- *  cwd/comm guardrails — cannot reach VS Code / tmux / the shell. */
+ *  cwd/comm guardrails — cannot reach VS Code / tmux / the shell. Kept for
+ *  non-panel callers that want a native confirmation modal. */
 export async function stopProjectLocalhosts(project: string): Promise<void> {
   const projectsRoot = getProjectsRoot();
   if (!projectsRoot) return;
@@ -63,24 +132,9 @@ export async function stopProjectLocalhosts(project: string): Promise<void> {
   );
   if (choice !== "Stop all") return;
 
-  for (const pgid of killablePgids(project, projectsRoot)) {
-    try {
-      cp.execSync(buildKillCmd(pgid, false), { timeout: 3000 });
-    } catch {
-      /* group may already be gone */
-    }
-  }
-
-  await sleep(2000);
-
-  const survivors = killablePgids(project, projectsRoot);
-  for (const pgid of survivors) {
-    try {
-      cp.execSync(buildKillCmd(pgid, true), { timeout: 3000 });
-    } catch {
-      /* best effort */
-    }
-  }
+  await termThenKill(killablePgids(project, projectsRoot), () =>
+    killablePgids(project, projectsRoot),
+  );
 
   void vscode.window.showInformationMessage(`Mission Control: stopped ${project}.`);
 }

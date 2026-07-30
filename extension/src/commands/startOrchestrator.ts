@@ -35,6 +35,7 @@ import {
   type DrivenState,
   isProjectLive,
   isResumable,
+  nextSprintFromPlan,
   parseOrchesMeta,
   parsePlan,
   parseStateValue,
@@ -180,10 +181,16 @@ function readMeta(dir: string) {
   }
 }
 
-/** Read the planned/done sprint counts from docs/plan.md (null if no plan). */
-function readPlan(dir: string): { total: number; done: number } | null {
+/** Read the planned/done sprint counts + the next unchecked sprint from
+ *  docs/plan.md (null if no plan). One file read feeds both parsers. */
+function readPlan(
+  dir: string,
+): { total: number; done: number; next: { id: string; title: string } | null } | null {
   try {
-    return parsePlan(fs.readFileSync(path.join(dir, "docs", "plan.md"), "utf8"));
+    const raw = fs.readFileSync(path.join(dir, "docs", "plan.md"), "utf8");
+    const counts = parsePlan(raw);
+    if (!counts) return null;
+    return { ...counts, next: nextSprintFromPlan(raw) };
   } catch {
     return null;
   }
@@ -234,6 +241,8 @@ export function scanResumableProjects(): ResumableProject[] {
       plannedDone: plan?.done,
       metaTeam: meta?.team,
       lastRun: meta?.lastRun,
+      nextSprintId: plan?.next?.id,
+      nextSprintTitle: plan?.next?.title,
     });
   }
   return sortResumable(out);

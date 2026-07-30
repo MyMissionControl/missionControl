@@ -176,6 +176,9 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
         worktrees: p.openWorktrees,
         plannedTotal: p.plannedTotal,
         plannedDone: p.plannedDone,
+        nextSprintId: p.nextSprintId,
+        nextSprintTitle: p.nextSprintTitle,
+        lastRun: p.lastRun,
         doing: p.doing,
         // green row: is a session driving this project right now? (shared list + reused runAlive)
         driven,
@@ -544,6 +547,19 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         } catch {
           panel.webview.postMessage({ type: "doc_html", rel, error: "อ่านไฟล์ไม่ได้" });
         }
+        return;
+      }
+      case "open_in_editor": {
+        // Split-explorer "เปิดใน editor" → open the .md as a normal VS Code tab beside.
+        const p = _st.project;
+        const rel = typeof msg.rel === "string" ? msg.rel : "";
+        if (!p || !rel) return;
+        const abs = resolveProjectFile(p.path, rel); // guards traversal + .md-only
+        if (!abs) return;
+        void vscode.window.showTextDocument(vscode.Uri.file(abs), {
+          viewColumn: vscode.ViewColumn.Beside,
+          preview: true,
+        });
         return;
       }
       case "run_localhost": {
@@ -978,6 +994,127 @@ function renderShell(): string {
   .doc-body hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 12px 0; }
   button.disabled, button:disabled { opacity: 0.45; cursor: not-allowed; }
   button.disabled:hover, button:disabled:hover { background: transparent; }
+
+  /* ── Projects tab — Bento "Hero + Sprint Track" (scoped to .proj-track so the
+       teams/orch/detail screens that share .card keep their vscode-var styling) ── */
+  .proj-track { max-width: 980px; margin: 0 auto;
+    --accent:#2f9dc4; --accent2:#40c8ea; --accentSoft:rgba(47,157,196,.15); --accentGlow:rgba(64,200,234,.28);
+    --pcard:#161f28; --pborder:rgba(255,255,255,.08); --ptxt:#e7eef5; --pmuted:#8a97a4; --pfaint:#5c6773; --good:#3fd39a;
+    --pmono:'JetBrains Mono',var(--vscode-editor-font-family),ui-monospace,monospace; }
+  body.vscode-light .proj-track, body.vscode-high-contrast-light .proj-track {
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); --accentGlow:rgba(14,136,173,.18);
+    --pcard:#ffffff; --pborder:rgba(15,30,45,.12); --ptxt:#132029; --pmuted:#5a6b78; --pfaint:#94a1ad; --good:#2fa96a; }
+
+  /* Page header (§1) — Bento styling scoped to the projects topbar via :has(),
+     so the teams/orch/detail topbars that share .topbar/#title keep their look.
+     #newProjBtn/#reloadBtn/#editBtn/#archBtn only ever render on this screen. */
+  .topbar:has(#archBtn) { --accent:#2f9dc4; --accent2:#40c8ea; --accentGlow:rgba(64,200,234,.28); align-items: flex-start; }
+  body.vscode-light .topbar:has(#archBtn), body.vscode-high-contrast-light .topbar:has(#archBtn) {
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentGlow:rgba(14,136,173,.18); }
+  .topbar:has(#archBtn) h1 { font-size: 19px; font-weight: 700; }
+  .topbar:has(#archBtn) .sub { opacity: 1; margin-top: 7px; }
+  .hdr-legend { font-size: 12px; line-height: 1.6; color: var(--vscode-descriptionForeground, #8a97a4); }
+  .hdr-legend .d { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+  .hdr-legend .d.run { background: #3fd39a; box-shadow: 0 0 5px #3fd39a; }
+  .hdr-legend .d.wait { background: #e8a33d; }
+  .hdr-legend .sep { margin: 0 8px; opacity: .5; }
+  #newProjBtn { border: none; color: #fff; font-weight: 600; padding: 6px 14px; border-radius: 8px;
+    background: linear-gradient(180deg, var(--accent2, #40c8ea), var(--accent, #2f9dc4)); box-shadow: 0 2px 8px var(--accentGlow, rgba(64,200,234,.28)); }
+  #newProjBtn:hover { filter: brightness(1.06); background: linear-gradient(180deg, var(--accent2, #40c8ea), var(--accent, #2f9dc4)); }
+  #reloadBtn, #editBtn { border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 6px 12px; }
+  #reloadBtn:hover, #editBtn:hover { border-color: var(--accent, #2f9dc4); }
+  #archBtn { border: 1px solid transparent; opacity: .55; border-radius: 8px; padding: 6px 12px; }
+  #archBtn:hover { opacity: 1; border-color: var(--vscode-panel-border); background: transparent; }
+
+  /* ── Project Detail — Split Explorer (header scoped via :has(#dvBtn); body = .psplit) ── */
+  .topbar:has(#dvBtn) { --accent:#2f9dc4; --accent2:#40c8ea; --accentGlow:rgba(64,200,234,.28); align-items: flex-start; }
+  body.vscode-light .topbar:has(#dvBtn), body.vscode-high-contrast-light .topbar:has(#dvBtn) {
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentGlow:rgba(14,136,173,.18); }
+  .topbar:has(#dvBtn) h1 { font-size: 17px; font-weight: 600; font-family: 'JetBrains Mono', var(--vscode-editor-font-family), monospace; }
+  .dt-cont { border: none; color: #fff; font-weight: 700; padding: 6px 14px; border-radius: 8px;
+    background: linear-gradient(180deg, var(--accent2, #40c8ea), var(--accent, #2f9dc4)); box-shadow: 0 2px 8px var(--accentGlow, rgba(64,200,234,.28)); }
+  .dt-cont:hover { filter: brightness(1.06); background: linear-gradient(180deg, var(--accent2, #40c8ea), var(--accent, #2f9dc4)); }
+  .dt-back { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 6px 12px; }
+  .dt-back:hover { border-color: var(--accent, #2f9dc4); }
+  .dt-back .bk { width: 12px; height: 12px; }
+  #dvBtn, #ghBtn, #lhBtn { border-radius: 8px; padding: 6px 12px; }
+  #dvBtn:hover, #ghBtn:hover, #lhBtn:hover { border-color: var(--accent, #2f9dc4); }
+
+  .psplit { display: flex; gap: 14px; align-items: stretch; max-width: 1000px; margin: 0 auto;
+    height: calc(100vh - 150px); min-height: 420px;
+    --pcard:#161f28; --pborder:rgba(255,255,255,.08); --ptxt:#e7eef5; --pmuted:#8a97a4; --pfaint:#5c6773;
+    --accent:#2f9dc4; --accent2:#40c8ea; --accentSoft:rgba(47,157,196,.15);
+    --pmono:'JetBrains Mono', var(--vscode-editor-font-family), ui-monospace, monospace; }
+  body.vscode-light .psplit, body.vscode-high-contrast-light .psplit {
+    --pcard:#ffffff; --pborder:rgba(15,30,45,.12); --ptxt:#132029; --pmuted:#5a6b78; --pfaint:#94a1ad;
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); }
+  .psplit .tree { width: 252px; flex: none; overflow: auto; background: var(--pcard); border: 1px solid var(--pborder); border-radius: 12px; padding: 10px; }
+  .psplit .feye { font-family: var(--pmono); font-size: 9.5px; letter-spacing: 1.6px; font-weight: 600; color: var(--pfaint); padding: 4px 9px 9px; }
+  .psplit .trow { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 7px; cursor: pointer; color: var(--pmuted); }
+  .psplit .trow:hover { background: var(--accentSoft); color: var(--ptxt); }
+  .psplit .trow.sel { background: var(--accentSoft); color: var(--ptxt); box-shadow: inset 2px 0 0 var(--accent); }
+  .psplit .trow .tri { flex: none; width: 8px; font-size: 8px; text-align: center; color: var(--pfaint); transition: transform .2s; }
+  .psplit .trow .tri.open { transform: rotate(90deg); }
+  .psplit .trow .tri.hide { visibility: hidden; }
+  .psplit .trow .ti { width: 13px; height: 13px; flex: none; }
+  .psplit .trow.file .ti { color: var(--accent2); }
+  .psplit .trow .tname { font-family: var(--pmono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .psplit .tempty { color: var(--pfaint); font-size: 11.5px; padding: 12px 9px; }
+  .psplit .prev { flex: 1; min-width: 0; overflow: auto; background: var(--pcard); border: 1px solid var(--pborder); border-radius: 12px; }
+  .psplit .pbar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 11px 18px; background: var(--pcard); border-bottom: 1px solid var(--pborder); }
+  .psplit .pbar .ti { width: 13px; height: 13px; flex: none; color: var(--accent2); }
+  .psplit .pbar .pfname { font-family: var(--pmono); font-size: 11.5px; font-weight: 600; color: var(--ptxt); }
+  .psplit .pbar .pfill { flex: 1; }
+  .psplit .pbar .opened { font-family: var(--pmono); font-size: 10px; color: var(--pfaint); background: transparent; border: 1px solid var(--vscode-panel-border); border-radius: 5px; padding: 2px 7px; }
+  .psplit .pbar .opened:hover { color: var(--ptxt); border-color: var(--accent); }
+  .psplit .pbody { padding: 22px 26px 28px; }
+  .psplit .doc-empty { color: var(--pfaint); font-size: 12px; padding: 24px 4px; }
+
+  /* Resume hero */
+  .proj-track .card.hero { display: block; background: var(--accentSoft); border: 1px solid var(--accent);
+    border-radius: 14px; padding: 18px 20px; margin-bottom: 20px; cursor: default; }
+  .proj-track .card.hero:hover { background: var(--accentSoft); }
+  .proj-track .hero .h-eye { display: flex; align-items: center; gap: 9px; }
+  .proj-track .hero .h-eye .lbl { font-family: var(--pmono); font-size: 9.5px; letter-spacing: 1.8px; font-weight: 700; color: var(--accent2); text-transform: uppercase; }
+  .proj-track .hero .h-eye .star { margin-left: auto; }
+  .proj-track .runbadge { display: inline-flex; align-items: center; gap: 5px; font-family: var(--pmono); font-size: 9px; font-weight: 700;
+    padding: 2px 7px; border-radius: 5px; background: rgba(63,211,154,.14); color: var(--good); border: 1px solid rgba(63,211,154,.35); }
+  .proj-track .runbadge .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--good); box-shadow: 0 0 5px var(--good); }
+  .proj-track .hero .h-body { display: flex; align-items: flex-end; gap: 20px; margin-top: 12px; }
+  .proj-track .hero .h-left { flex: 1; min-width: 0; }
+  .proj-track .hero .h-name { font-family: var(--pmono); font-size: 19px; font-weight: 600; color: var(--ptxt); }
+  .proj-track .hero .h-meta { font-size: 12px; color: var(--pmuted); margin-top: 6px; }
+  .proj-track .hero .h-meta b { color: var(--ptxt); font-weight: 600; }
+  .proj-track .hero .h-bar { max-width: 420px; height: 6px; border-radius: 3px; background: var(--pborder); margin-top: 12px; overflow: hidden; }
+  .proj-track .hero .h-bar > span { display: block; height: 100%; background: linear-gradient(90deg,var(--accent),var(--accent2)); box-shadow: 0 0 8px var(--accentGlow); }
+  .proj-track .hero .h-cta { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .proj-track .resume { height: 36px; padding: 0 18px; border-radius: 9px; border: none; color: #fff; font-size: 13px; font-weight: 700;
+    background: linear-gradient(180deg,var(--accent2),var(--accent)); box-shadow: 0 2px 12px var(--accentGlow); cursor: pointer; white-space: nowrap; }
+  .proj-track .resume:hover { filter: brightness(1.06); }
+
+  /* Queue */
+  .proj-track .qeyebrow { font-family: var(--pmono); font-size: 10.5px; letter-spacing: 2px; font-weight: 600; color: var(--pfaint); text-transform: uppercase; margin-bottom: 10px; }
+  .proj-track .qlist { display: flex; flex-direction: column; gap: 8px; }
+  .proj-track .qlist .card { display: flex; flex-direction: column; gap: 0; align-items: stretch; margin-bottom: 0;
+    padding: 13px 16px; border-radius: 11px; background: var(--pcard); border: 1px solid var(--pborder); cursor: pointer; }
+  .proj-track .qlist .card:hover { background: var(--pcard); border-color: var(--accent); }
+  .proj-track .qlist .card.live { border-color: var(--good); }
+  .proj-track .rowmain { display: flex; align-items: center; gap: 16px; width: 100%; }
+  .proj-track .qrow .star { font-size: 14px; }
+  .proj-track .namecol { width: 230px; flex: none; min-width: 0; }
+  .proj-track .namecol.wide { width: auto; flex: 1; }
+  .proj-track .namecol .nm { font-family: var(--pmono); font-size: 12px; font-weight: 600; color: var(--ptxt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proj-track .namecol .nx { font-size: 10.5px; color: var(--pmuted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proj-track .railcol { flex: 1; min-width: 0; }
+  .proj-track .rail { display: flex; align-items: flex-end; gap: 3px; height: 16px; }
+  .proj-track .rail .sg { flex: 1; min-width: 0; border-radius: 2px; }
+  .proj-track .rail .sg.done { height: 10px; background: var(--accent); }
+  .proj-track .rail .sg.cur { height: 16px; background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
+  .proj-track .rail .sg.todo { height: 10px; background: var(--pborder); }
+  .proj-track .railcap { display: flex; justify-content: space-between; margin-top: 7px; font-family: var(--pmono); font-size: 9px; color: var(--pfaint); }
+  .proj-track .lastcol { width: 88px; flex: none; text-align: right; font-family: var(--pmono); font-size: 10px; color: var(--pfaint); }
+  .proj-track .gitcol { width: 104px; flex: none; text-align: center; }
+  .proj-track .rowacts { flex: none; display: inline-flex; align-items: center; }
 </style></head>
 <body>
   <div class="topbar">
@@ -1142,7 +1279,7 @@ function renderShell(): string {
     var ns=document.querySelectorAll('.spin'); for(var i=0;i<ns.length;i++) ns[i].textContent=f;
   }, 90);
 
-  function actionsHtml(canBack, showFetch, askable, showNew, showEdit, githubUrl){
+  function actionsHtml(canBack, showFetch, askable, showNew, showEdit, githubUrl, showArch, archLabel){
     // showNew = the "+ เริ่มโปรเจคใหม่" button (Projects screen only) → runs the
     // same team→orchestrator→launch flow with no project = a fresh build.
     // fetch = git-refresh of the PROJECTS screen only (dead-end elsewhere).
@@ -1151,11 +1288,11 @@ function renderShell(): string {
     // githubUrl (teams screen, resume only) → "เปิดใน GitHub" opens the repo in the browser.
     return (canBack ? '<button id="backBtn">← กลับ</button>' : '')
       + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">🔗 GitHub</button>' : '')
-      + (showNew ? '<button id="newProjBtn" title="เริ่ม build โปรเจคใหม่" style="border-color:#2ea043;color:#3fb950;">+ เริ่มโปรเจคใหม่</button>' : '')
+      + (showNew ? '<button id="newProjBtn" title="เริ่ม build โปรเจคใหม่">+ new project</button>' : '')
       + (askable ? '<button id="askBtn" title="เปิด = สัมภาษณ์ requirement ละเอียด (grilling) + รีวิวแผนก่อนลงมือ (scrutinize)" style="'+askBtnStyle()+'">'+askBtnLabel()+'</button>' : '')
       + (showFetch ? '<button id="reloadBtn">fetch</button>' : '')
       + (showEdit ? '<button id="editBtn" title="เปิดเพื่อลบโปรเจคที่ไม่ใช้">Edit</button>' : '')
-      + (showEdit ? '<button id="archBtn" title="ดู/ซ่อนโปรเจกต์ที่ลบไปแล้ว (อ่านอย่างเดียว)">ที่ลบไปแล้ว</button>' : '');
+      + (showArch ? '<button id="archBtn" title="สลับดูโปรเจกต์ปกติ / ที่ลบไปแล้ว">'+(archLabel||'deleted')+'</button>' : '');
   }
   function wireActions(canBack){
     if (canBack){ var b=el("backBtn"); if(b) b.addEventListener('click',function(){post('back');}); }
@@ -1197,154 +1334,158 @@ function renderShell(): string {
     return '';
   }
 
-  // ── Project Detail screen (markdown file-explorer) ───────────────────────
+  // ── Project Detail screen (Split Explorer: persistent tree + markdown preview) ──
   var _docCache = {};        // rel → rendered HTML (or error markup), cached per open
   var _previewRunning = false, _previewAvail = false;
-  var _detail = {};          // {title, subtitle, githubUrl} — kept so we can re-render the explorer header
-  var _tree = [];            // docs TreeNode[] (wiki/ · virtual sprint/ · plan.md)
-  var _readme = null;        // {rel,label} of the README shown as a dropdown, or null
-  var _navStack = [];        // folder names from docs root → current folder ([] = docs root)
-  var _viewingDoc = null;    // rel of the .md open as a full page, or null while in the explorer
+  var _detail = {};          // {title, subtitle, githubUrl, archived}
+  var _tree = [];            // TreeNode[] (docs-rooted; README prepended client-side)
+  var _readme = null;        // {rel,label} of the project README, or null
+  var _selected = null;      // rel of the .md shown in the right pane
+  var _expanded = {};        // folder rel -> is it expanded
 
-  // ── Icons (inline SVG so they render like the OS file-manager, no external assets) ──
-  var _icoFolder = '<svg class="fx-svg fx-svg-folder" viewBox="0 0 24 24" aria-hidden="true">'
-    + '<path fill="#c98a2b" d="M3 6.2c0-.8.7-1.5 1.5-1.5h4.3c.5 0 1 .2 1.3.6l1.1 1.4h7c.8 0 1.5.7 1.5 1.5V18c0 .8-.7 1.5-1.5 1.5h-15C3.7 19.5 3 18.8 3 18z"/>'
-    + '<path fill="#e8ab45" d="M3 9.2h18V18c0 .8-.7 1.5-1.5 1.5h-15C3.7 19.5 3 18.8 3 18z"/></svg>';
-  // the standard Markdown mark (rounded rect + "M" + down-arrow), in the text colour
-  var _icoMd = '<svg class="fx-svg fx-svg-md" viewBox="0 0 208 128" aria-hidden="true">'
-    + '<rect x="5" y="5" width="198" height="118" rx="10" ry="10" fill="none" stroke="currentColor" stroke-width="12"/>'
-    + '<path fill="currentColor" d="M30 98V30h20l20 25 20-25h20v68H90V59L70 84 50 59v39zm125 0l-30-33h20V30h20v35h20z"/></svg>';
-  // a "return / up a level" arrow for the back button labelled ".."
-  var _icoUp = '<svg class="fx-svg fx-svg-up" viewBox="0 0 24 24" aria-hidden="true">'
-    + '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
-    + ' d="M10 15 5 10l5-5M5 10h9a5 5 0 0 1 5 5v4"/></svg>';
+  // Inline stroke icons (emoji-free): folder = amber outline, doc = accent outline.
+  var _icoFolder = '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="#e8a33d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+  var _icoDoc = '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
+  var _bkArrow = '<svg class="bk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>';
 
-  function backBtnHtml(){ return '<button id="backBtn" class="iconbtn" title="ขึ้นบน / ย้อนกลับ">'+_icoUp+'<span>..</span></button>'; }
   function detailActionsHtml(githubUrl){
+    // Back always exits to the project list (to_projects) — the tree keeps parents
+    // reachable, so there is no per-level ".." control anymore.
+    var back = '<button id="backBtn" class="dt-back">'+_bkArrow+'Back</button>';
     if(_detail.archived){
-      return (_navStack.length ? backBtnHtml() : '')
-        + '<button id="closeBtn">✕ ปิด</button>'
-        + '<span class="archbadge" title="สำเนาสำรองของโปรเจกต์ที่ถูกลบ">อ่านอย่างเดียว (ลบไปแล้ว)</span>';
+      return back + '<span class="archbadge" title="สำเนาสำรองของโปรเจกต์ที่ถูกลบ">อ่านอย่างเดียว (ลบไปแล้ว)</span>';
     }
     var lh = _previewAvail
-      ? '<button id="lhBtn" title="รัน dev server แล้วเปิด browser (กดซ้ำ = หยุด)">'
-          + (_previewRunning ? '⏹ หยุด' : '🌐 localhost') + '</button>'
+      ? '<button id="lhBtn" title="รัน dev server แล้วเปิด browser (กดซ้ำ = หยุด)">'+(_previewRunning ? '⏹ หยุด' : '🌐 localhost')+'</button>'
       : '<button id="lhBtn" class="disabled" disabled title="โปรเจคนี้ไม่มี .orches-preview.sh — เปิด localhost ไม่ได้">🌐 localhost</button>';
-    // ".." shows only in a subfolder — at the docs root there's nothing above to go to.
-    return (_navStack.length ? backBtnHtml() : '')
-      + '<button id="closeBtn">✕ ปิด</button>'
+    return back
       + lh
-      + '<button id="contBtn" title="ไปเลือกทีม / เข้า session ที่ทำอยู่" style="border-color:#2ea043;color:#3fb950;">▶ ทำต่อ</button>'
-      + '<button id="dvBtn" title="ดูสถานะทุกโปรเจกต์ (table / kanban / timeline จากไฟล์ .md)">Data View</button>'
-      + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">🔗 GitHub</button>' : '');
+      + '<button id="contBtn" class="dt-cont" title="ไปเลือกทีม / เข้า session ที่ทำอยู่">▶ ทำต่อ</button>'
+      + '<button id="dvBtn" title="ดูสถานะทุกโปรเจกต์ (table / kanban / timeline)">Data View</button>'
+      + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">GitHub</button>' : '');
   }
   function wireDetailActions(){
-    // Explorer back (labelled ".."): only rendered inside a subfolder → up one level.
-    var b=el("backBtn"); if(b) b.addEventListener('click',function(){
-      if(_navStack.length){ _navStack.pop(); renderExplorer(); } });
-    var c=el("closeBtn"); if(c) c.addEventListener('click',function(){post('close');});
-    var lh=el("lhBtn"); if(lh && _previewAvail) lh.addEventListener('click',function(){
-      lh.disabled=true; lh.textContent='⏳ …'; post('run_localhost'); });
-    var ct=el("contBtn"); if(ct) ct.addEventListener('click',function(){post('continue_to_team');});
-    var dv=el("dvBtn"); if(dv) dv.addEventListener('click',function(){post('open_data_view');});
-    var gh=el("ghBtn"); if(gh) gh.addEventListener('click',function(){post('open_github');});
+    var b=el("backBtn"); if(b) b.addEventListener('click',function(){ post('to_projects'); });
+    var lh=el("lhBtn"); if(lh && _previewAvail) lh.addEventListener('click',function(){ lh.disabled=true; lh.textContent='⏳ …'; post('run_localhost'); });
+    var ct=el("contBtn"); if(ct) ct.addEventListener('click',function(){ post('continue_to_team'); });
+    var dv=el("dvBtn"); if(dv) dv.addEventListener('click',function(){ post('open_data_view'); });
+    var gh=el("ghBtn"); if(gh) gh.addEventListener('click',function(){ post('open_github'); });
   }
+
   function renderDetail(m){
     disarmAll();                       // leaving the projects screen → drop any armed git action
     _lastProjKey = null;               // invalidate skip-guard → a return to projects re-renders
-    _detail = { title:m.title, subtitle:m.subtitle, githubUrl:m.githubUrl };
-    _detail.archived = !!m.archived;
+    _detail = { title:m.title, subtitle:m.subtitle, githubUrl:m.githubUrl, archived: !!m.archived };
     _previewRunning = !!(m.preview && m.preview.running);
     _previewAvail   = !!(m.preview && m.preview.available);
-    _docCache = {};                    // fresh project → fresh cache
-    _tree = m.tree || [];
+    _docCache = {};
     _readme = m.readme || null;
-    _navStack = [];                    // always start at the docs root
-    _viewingDoc = null;
-    renderExplorer();
+    var base = m.tree || [];
+    // README lives outside the docs tree — surface it as a selectable root file so
+    // the default-selection fallback can reach it.
+    _tree = _readme ? [{ name: (_readme.rel.split('/').pop()||'README.md'), rel:_readme.rel, kind:'file' }].concat(base) : base;
+    _expanded = {};
+    if(hasDir(_tree, 'docs/wiki')) _expanded['docs/wiki'] = true;  // wiki open by default
+    _selected = defaultSel();
+    expandAncestors(_selected);
+    renderSplit();
+    if(_selected) loadDoc(_selected);
   }
-  // Walk _navStack into _tree → the child list of the folder we're currently in.
-  // A stale path (folder vanished between renders) clamps back to where it still resolves.
-  function currentFolder(){
-    var nodes = _tree;
-    for (var i=0;i<_navStack.length;i++){
-      var found=null;
-      for (var j=0;j<nodes.length;j++){ if(nodes[j].kind==='dir' && nodes[j].name===_navStack[i]){ found=nodes[j]; break; } }
-      if(!found){ _navStack = _navStack.slice(0,i); break; }
-      nodes = found.children||[];
+  function hasDir(nodes, rel){
+    for(var i=0;i<nodes.length;i++){ var n=nodes[i]; if(n.kind==='dir'){ if(n.rel===rel) return true; if(hasDir(n.children||[], rel)) return true; } }
+    return false;
+  }
+  function firstFile(nodes){
+    for(var i=0;i<nodes.length;i++){ var n=nodes[i]; if(n.kind==='file') return n.rel; if(n.kind==='dir'){ var r=firstFile(n.children||[]); if(r) return r; } }
+    return null;
+  }
+  function relExists(nodes, rel){
+    for(var i=0;i<nodes.length;i++){ var n=nodes[i]; if(n.rel===rel && n.kind==='file') return true; if(n.kind==='dir' && relExists(n.children||[], rel)) return true; }
+    return false;
+  }
+  // Default = plan.md (the file the user usually wants) → README → first .md.
+  function defaultSel(){
+    if(relExists(_tree,'docs/plan.md')) return 'docs/plan.md';
+    if(_readme && relExists(_tree,_readme.rel)) return _readme.rel;
+    return firstFile(_tree);
+  }
+  function expandAncestors(rel){
+    if(!rel) return;
+    (function walk(nodes){
+      for(var i=0;i<nodes.length;i++){ var n=nodes[i];
+        if(n.kind==='dir'){ if(rel===n.rel || rel.indexOf(n.rel+'/')===0) _expanded[n.rel]=true; walk(n.children||[]); } }
+    })(_tree);
+  }
+  function treeRowsHtml(nodes, depth){
+    var out='';
+    for(var i=0;i<nodes.length;i++){ var n=nodes[i];
+      var pad = 9 + depth*14;
+      if(n.kind==='dir'){
+        var open = !!_expanded[n.rel];
+        out += '<div class="trow" data-dir="'+esc(n.rel)+'" style="padding-left:'+pad+'px">'
+          + '<span class="tri'+(open?' open':'')+'">▶</span>'+_icoFolder
+          + '<span class="tname">'+esc(n.name)+'</span></div>';
+        if(open) out += treeRowsHtml(n.children||[], depth+1);
+      } else {
+        out += '<div class="trow file'+(_selected===n.rel?' sel':'')+'" data-file="'+esc(n.rel)+'" style="padding-left:'+pad+'px">'
+          + '<span class="tri hide">▶</span>'+_icoDoc
+          + '<span class="tname">'+esc(n.name)+'</span></div>';
+      }
     }
-    return nodes;
+    return out;
   }
-  // One grid tile: a big icon over a centred label. Folder → folder icon + trailing "/";
-  // .md → the Markdown mark. The label + "/" carry dir-vs-file on their own (emoji-free).
-  function explorerTile(n){
-    var isDir = n.kind==='dir';
-    return '<div class="fx-tile'+(isDir?' fx-dir':'')+'" data-kind="'+n.kind+'"'
-      +' data-name="'+esc(n.name)+'" data-rel="'+esc(n.rel)+'">'
-      +'<div class="fx-ic">'+(isDir?_icoFolder:_icoMd)+'</div>'
-      +'<div class="fx-label">'+esc(n.name)+(isDir?'/':'')+'</div></div>';
+  function selName(){
+    if(!_selected) return '';
+    var found='';
+    (function walk(nodes){ for(var i=0;i<nodes.length;i++){ var n=nodes[i]; if(n.rel===_selected && n.kind==='file'){ found=n.name; return; } if(n.kind==='dir') walk(n.children||[]); } })(_tree);
+    return found || (_selected.split('/').pop()||_selected);
   }
-  function readmeHtml(){
-    if(!_readme || _navStack.length) return '';   // README dropdown only at the docs root
-    return '<div class="rm"><button class="rm-head"><span class="rm-caret">▸</span> '
-      +esc(_readme.label||'README')+'</button>'
-      +'<div class="rm-body doc-body" style="display:none"></div></div>';
-  }
-  function renderExplorer(){
-    _viewingDoc = null;
+  function renderSplit(){
     el("title").textContent = _detail.title;
-    el("subtitle").textContent = _navStack.length ? ('docs/' + _navStack.join('/')) : _detail.subtitle;
+    el("subtitle").textContent = _detail.subtitle;
     el("actions").innerHTML = detailActionsHtml(_detail.githubUrl); wireDetailActions();
-    var nodes = currentFolder();
-    var tiles = nodes.map(explorerTile).join('');
-    var emptyMsg = _navStack.length ? 'โฟลเดอร์นี้ไม่มีไฟล์ .md' : 'โปรเจคนี้ยังไม่มี docs .md';
-    el("content").innerHTML = readmeHtml()
-      + '<div class="fx">' + (tiles || '<div class="empty">'+emptyMsg+'</div>') + '</div>';
-    var rm = el("content").querySelector('.rm-head');
-    if(rm) rm.addEventListener('click', toggleReadme);
-    el("content").querySelectorAll('.fx-tile').forEach(function(tile){
-      tile.addEventListener('click',function(){
-        if(tile.dataset.kind==='dir'){ _navStack.push(tile.dataset.name); renderExplorer(); }
-        else { openDocView(tile.dataset.rel, tile.dataset.name); }
-      });
+    var treeHtml = treeRowsHtml(_tree, 0) || '<div class="tempty">ไม่มีไฟล์ .md</div>';
+    var body = _selected
+      ? (_docCache[_selected]!==undefined ? _docCache[_selected] : '<div class="doc-empty">กำลังโหลด…</div>')
+      : '<div class="doc-empty">เลือกไฟล์จากด้านซ้าย</div>';
+    var bar = _selected
+      ? '<div class="pbar">'+_icoDoc+'<span class="pfname">'+esc(selName())+'</span><span class="pfill"></span><button class="opened" title="เปิดไฟล์นี้เป็นแท็บ editor">เปิดใน editor</button></div>'
+      : '';
+    el("content").innerHTML = '<div class="psplit">'
+      + '<div class="tree"><div class="feye">FILES</div>'+treeHtml+'</div>'
+      + '<div class="prev">'+bar+'<div class="pbody doc-body">'+body+'</div></div>'
+      + '</div>';
+    var tree = el("content").querySelector('.tree');
+    if(tree) tree.addEventListener('click', function(e){
+      var row = e.target.closest ? e.target.closest('.trow') : null; if(!row) return;
+      if(row.hasAttribute('data-dir')){ var r=row.getAttribute('data-dir'); _expanded[r]=!_expanded[r]; renderTreeOnly(); }
+      else if(row.hasAttribute('data-file')){ selectFile(row.getAttribute('data-file')); }
     });
+    var op = el("content").querySelector('.opened');
+    if(op) op.addEventListener('click', function(){ if(_selected) post('open_in_editor',{rel:_selected}); });
   }
-  // README as an inline dropdown (short → nicer to read in place than a full page).
-  function toggleReadme(){
-    var body=el("content").querySelector('.rm-body'), caret=el("content").querySelector('.rm-caret');
-    if(!body || !_readme) return;
-    if(body.style.display!=='none'){ body.style.display='none'; caret.textContent='▸'; return; }
-    body.style.display='block'; caret.textContent='▾';
-    var rel=_readme.rel;
-    if(_docCache[rel]!==undefined){ body.innerHTML=_docCache[rel]; return; }
-    body.innerHTML='<div class="doc-empty">กำลังโหลด…</div>';
-    post('open_doc',{rel:rel});
+  // Re-render only the tree (folder toggle / selection change) — leaves the right
+  // pane + its scroll position untouched. The click listener is on .tree (delegated).
+  function renderTreeOnly(){
+    var tree = el("content").querySelector('.tree'); if(!tree) return;
+    tree.innerHTML = '<div class="feye">FILES</div>' + (treeRowsHtml(_tree,0) || '<div class="tempty">ไม่มีไฟล์ .md</div>');
   }
-  // Open one .md as a full page over the explorer: its own header + ".." back button.
-  // Back returns to the explorer at the same folder (renderExplorer, wired here).
-  function openDocView(rel, name){
-    _viewingDoc = rel;
-    el("title").textContent = name;
-    el("subtitle").textContent = rel;
-    el("actions").innerHTML = backBtnHtml() + '<button id="closeBtn">✕ ปิด</button>';
-    el("backBtn").addEventListener('click',function(){ renderExplorer(); });
-    el("closeBtn").addEventListener('click',function(){ post('close'); });
-    var cached = _docCache[rel];
-    el("content").innerHTML = '<div class="doc-page doc-body">'
-      + (cached!==undefined ? cached : '<div class="doc-empty">กำลังโหลด…</div>') + '</div>';
-    if(cached===undefined) post('open_doc',{rel:rel});
+  function selectFile(rel){
+    if(_selected===rel) return;
+    _selected = rel;
+    renderTreeOnly();
+    var bar = el("content").querySelector('.pbar');
+    if(bar){ var f=bar.querySelector('.pfname'); if(f) f.textContent=selName(); }
+    else { renderSplit(); return; }   // pane had no file selected yet → full render
+    var body = el("content").querySelector('.pbody');
+    if(body){ body.innerHTML = _docCache[rel]!==undefined ? _docCache[rel] : '<div class="doc-empty">กำลังโหลด…</div>'; body.scrollTop=0; }
+    loadDoc(rel);
   }
+  function loadDoc(rel){ if(_docCache[rel]===undefined) post('open_doc',{rel:rel}); }
   function handleDocHtml(rel, html, error){
     var out = error ? '<div class="doc-empty">'+esc(error)+'</div>' : (html||'');
     _docCache[rel]=out;
-    if(_viewingDoc===rel){                 // full-page doc open → paint it
-      var page=el("content").querySelector('.doc-page');
-      if(page) page.innerHTML=out;
-      return;
-    }
-    // else it may be the README dropdown, expanded, in the explorer
-    var rb=el("content").querySelector('.rm-body');
-    if(rb && _readme && _readme.rel===rel && rb.style.display!=='none') rb.innerHTML=out;
+    if(_selected===rel){ var body=el("content").querySelector('.pbody'); if(body) body.innerHTML=out; }
   }
   function handlePreviewState(running){
     _previewRunning=!!running;
@@ -1365,40 +1506,28 @@ function renderShell(): string {
     var _key = JSON.stringify([m.title, m.subtitle, m.items]);
     if (_lastProjKey !== null && _key === _lastProjKey) return;
     _lastProjKey = _key;
-    el("title").textContent = m.title; el("subtitle").textContent = m.subtitle;
+    el("title").textContent = m.title;
+    // Header legend = the color-coded key (green = running, amber = pending) — shown
+    // when there are projects; the plain "no work" line otherwise.
+    el("subtitle").innerHTML = (m.items && m.items.length) ? headerLegend() : esc(m.subtitle);
     askMode=false; // Projects list เอง ไม่มีโหมดถาม (ยกไปหน้าเลือกทีมตอนเริ่มใหม่)
-    el("actions").innerHTML = actionsHtml(false, true, false, true, true); wireActions(false);
+    el("actions").innerHTML = actionsHtml(false, true, false, true, true, false, true, 'active'); wireActions(false);
     var items = m.items||[];
     // การ์ด project ที่หลุดจาก list (เสร็จ/หาย) ระหว่างที่ยัง arm ค้าง → เลิก arm+timer ทิ้ง (กันยิงตอนการ์ดไม่อยู่แล้ว)
     var _live={}; items.forEach(function(it){ _live[it.path]=1; });
     for(var _k in AUTO){ if(Object.prototype.hasOwnProperty.call(AUTO,_k) && !_live[_k]) disarmHard(_k); }
-    el("content").innerHTML = items.length ? items.map(function(it){
+    // Per-item controls — the SAME elements + class names the wiring loop below
+    // expects (.star/.cont/.cont.multi/.del/.git-act/.git-editor), just laid out
+    // Bento-style. Nothing about the git-arm / continue-run / delete behaviour
+    // changes; only the surrounding markup does.
+    function controls(it){
       var wt = it.worktrees||0, sp = it.sprints||0;
       var pt = it.plannedTotal||0, pd = it.plannedDone||0;
-      // "ค้าง" = sprint ที่ยังไม่เสร็จ (งานค้างทั้งหมด) — ONE number. plan.md exists →
-      // count from the plan (total - done); no plan → fall back to open agents/*
-      // worktrees. A planned-but-not-started sprint IS pending work too (just with
-      // 0 done), so it folds into "ค้าง" — no separate "เหลือ" chip.
       var pending = pt > 0 ? (pt - pd) : wt; if (pending < 0) pending = 0;
-      // "doing" wins: a worker worktree is LIVE right now → animated green
-      // spinner. Else pending>0 → static 🔨 ค้าง. Else nothing (clean/done).
-      var chip = it.doing
-        ? '<span class="chip doing"><span class="spin">⠋</span> กำลังทำ</span>'
-        : (pending > 0 ? '<span class="chip act">🔨 ค้าง '+pending+' sprint</span>' : '');
-      // Progress line: always "ทำไปแล้ว X sprint" — how many are DONE. With a plan
-      // that's the [x] count (pd); without a plan, the sprint-doc count (sp). How
-      // many remain is the "ค้าง" chip's job, not this line's.
       var done = pt > 0 ? pd : sp;
-      // done>0 → "ทำไปแล้ว X sprint" · done===0 → ยังไม่ทำอะไรเลย = "พร้อมเริ่ม"
-      var sub = done > 0 ? 'ทำไปแล้ว '+done+' sprint' : 'พร้อมเริ่ม';
-      // ปุ่มการ์ด: state resolved host-side → it.actions (resolveCardActions).
-      //  busy    = มี session ขับอยู่ (spinning = headless run เราเอง / driven = interactive) → ปุ่ม "กำลังทำ" เดิม
-      //  actions = idle/stale/error + ยังมีงานค้าง → 2 ปุ่มถาวร [ทำ 1 sprint][ทำ N sprint]
-      //  none    = ไม่มีงานค้าง → ไม่มีปุ่ม
       var run = it.run || { state: 'hidden' };
       var act = it.actions || { kind: 'none' };
-      var busy = act.kind === 'busy';  // = spinning || driven (เดิม) — delBtn/gitCell ยังใช้ตัวนี้
-      if (busy) sub = 'กำลังทำ';
+      var busy = act.kind === 'busy';
       var contBtn = '', multiBtn = '', crashChip = '', crashCls = '';
       if (busy) {
         contBtn = run.state === 'spinning'
@@ -1409,29 +1538,75 @@ function renderShell(): string {
         multiBtn = act.runNEnabled
           ? '<button class="cont multi" data-pending="'+pending+'" data-name="'+esc(it.name)+'" title="ทำหลาย sprint รวดเดียว (auto, background) — เลือกจำนวน">ทำ N sprint</button>'
           : '<button class="cont multi disabled" disabled title="เหลือ sprint เดียว — ทำได้ทีละ 1">ทำ N sprint</button>';
-        if (act.crash === 'stale') {
-          crashChip = '<span class="chip crash">รันไม่จบ · session ดับ</span>';
-          crashCls = ' crash';
-        } else if (act.crash === 'error') {
-          crashChip = '<span class="chip crash" title="error: '+esc(run.errorMsg||'?')+'">error: '+esc(run.errorMsg||'?')+'</span>';
-          crashCls = ' crash';
-        }
+        if (act.crash === 'stale') { crashChip = '<span class="chip crash">รันไม่จบ · session ดับ</span>'; crashCls = ' crash'; }
+        else if (act.crash === 'error') { crashChip = '<span class="chip crash" title="error: '+esc(run.errorMsg||'?')+'">error: '+esc(run.errorMsg||'?')+'</span>'; crashCls = ' crash'; }
       }
-      // ปุ่มลบ (โผล่เฉพาะ edit mode ผ่าน CSS) · busy (running/ถูกขับ) = กากบาทเทา กดไม่ได้
-      // (กันลบโฟลเดอร์ที่ session กำลังใช้อยู่ — host ก็ guard ซ้ำอีกชั้น)
       var delBtn = busy
         ? '<button class="del disabled" title="กำลังทำอยู่ — กด stop / ปิด session ก่อนถึงจะลบได้">ลบ</button>'
         : '<button class="del" data-name="'+esc(it.name)+'" title="ลบโปรเจคออกจากเครื่อง">ลบ</button>';
-      // busy = session กำลังขับโปรเจคนี้อยู่ → ซ่อนปุ่ม git ทั้งหมด (commit/push/pull/
-      // create&push) กัน commit/push ชนกับสิ่งที่ worker กำลังทำอยู่ (เข้าคู่กับ delBtn
-      // ที่ disable ไปแล้วด้านบน — host-side ก็ guard ซ้ำใน git_* handlers)
-      return '<div class="card'+(it.driven?' live':'')+crashCls+'" data-path="'+esc(it.path)+'">'
-        +'<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>'
-        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+crashChip+chip+'</span>'
-        +'<span class="csub">'+sub+'</span></button>'+(busy ? '' : gitEditor(it.git))+'</div>'
-        +contBtn+multiBtn+delBtn
-        +'<span class="git-cell">'+(busy ? '' : gitCell(it.git))+'</span></div>';
-    }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';
+      return { pt: pt, pd: pd, done: done, pending: pending, busy: busy, crashChip: crashChip, crashCls: crashCls,
+        contBtn: contBtn, multiBtn: multiBtn, delBtn: delBtn,
+        gitBadge: busy ? '' : gitCell(it.git), gitEd: busy ? '' : gitEditor(it.git) };
+    }
+    function relTime(ms){
+      if (!ms) return '';
+      var s = Math.floor((Date.now()-ms)/1000); if (s < 0) s = 0;
+      if (s < 60) return 'เมื่อครู่';
+      var mm = Math.floor(s/60); if (mm < 60) return mm+' นาทีที่แล้ว';
+      var h = Math.floor(mm/60); if (h < 24) return h+' ชม.ที่แล้ว';
+      var d = Math.floor(h/24); if (d < 30) return d+' วันก่อน';
+      var mo = Math.floor(d/30); if (mo < 12) return mo+' เดือนก่อน';
+      return Math.floor(mo/12)+' ปีก่อน';
+    }
+    function nextText(it){
+      var id = it.nextSprintId||'', t = it.nextSprintTitle||'';
+      if (id && t) return id+' · '+t; if (id) return id; if (t) return t; return 'พร้อมเริ่ม';
+    }
+    function railHtml(pd, pt){
+      var segs = '';
+      for (var i=0;i<pt;i++){ var cls = i<pd ? 'done' : (i===pd ? 'cur' : 'todo'); segs += '<span class="sg '+cls+'"></span>'; }
+      var pct = Math.round(pd/pt*100);
+      return '<div class="rail">'+segs+'</div><div class="railcap"><span>S1</span><span>'+pd+' / '+pt+' sprint · '+pct+'%</span><span>S'+pt+'</span></div>';
+    }
+    function runBadge(it){ return (it.driven||it.doing) ? '<span class="runbadge"><span class="dot"></span>RUN</span>' : ''; }
+    function headerLegend(){
+      return '<span class="hdr-legend"><span class="d run"></span>กำลังทำ = worker run อยู่ตอนนี้<span class="sep">·</span>'
+        +'<span class="d wait"></span>ค้าง = sprint ที่ยังไม่เสร็จ<span class="sep">·</span>ปุ่มขวา = สถานะ git</span>';
+    }
+    function heroHtml(it){
+      var c = controls(it);
+      var star = '<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>';
+      var meta = 'sprint ถัดไป: <b>'+esc(nextText(it))+'</b>'+(c.pending>0?' · ค้าง '+c.pending:'')+(it.lastRun?' · แก้ล่าสุด '+esc(relTime(it.lastRun)):'');
+      var bar = c.pt>0 ? '<div class="h-bar"><span style="width:'+Math.round(c.pd/c.pt*100)+'%"></span></div>' : '';
+      return '<div class="card hero'+(it.driven?' live':'')+c.crashCls+'" data-path="'+esc(it.path)+'">'
+        +'<div class="h-eye"><span class="lbl">ทำต่อจากล่าสุด</span>'+runBadge(it)+star+'</div>'
+        +'<div class="h-body"><div class="h-left"><div class="h-name">'+esc(it.name)+c.crashChip+'</div>'
+        +'<div class="h-meta">'+meta+'</div>'+bar+'</div>'
+        +'<div class="h-cta">'+c.gitBadge+c.contBtn+c.multiBtn+'<button class="resume" title="ทำต่อ / เข้า session">ทำต่อ →</button>'+c.delBtn+'</div></div>'
+        +c.gitEd+'</div>';
+    }
+    function rowHtml(it){
+      var c = controls(it);
+      var star = '<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>';
+      var rail = c.pt>0 ? railHtml(c.pd, c.pt)
+        : '<div class="railcap"><span>'+(c.done>0?('ทำไปแล้ว '+c.done+' sprint'):'พร้อมเริ่ม')+'</span><span>ไม่มี plan.md</span></div>';
+      var main = '<div class="rowmain">'+star
+        +'<div class="namecol"><div class="nm">'+esc(it.name)+runBadge(it)+c.crashChip+'</div><div class="nx">ถัดไป: '+esc(nextText(it))+'</div></div>'
+        +'<div class="railcol">'+rail+'</div>'
+        +'<div class="lastcol">'+esc(it.lastRun?relTime(it.lastRun):'')+'</div>'
+        +'<div class="gitcol">'+c.gitBadge+'</div>'
+        +'<div class="rowacts">'+c.contBtn+c.multiBtn+c.delBtn+'</div></div>';
+      return '<div class="card qrow'+(it.driven?' live':'')+c.crashCls+'" data-path="'+esc(it.path)+'">'+main+c.gitEd+'</div>';
+    }
+    if (!items.length) {
+      el("content").innerHTML = '<div class="proj-track"><div class="empty">'+esc(m.subtitle)+'</div></div>';
+    } else {
+      var hero = items[0], queue = items.slice(1);
+      var html = '<div class="proj-track">'+heroHtml(hero);
+      if (queue.length) html += '<div class="qeyebrow">คิวถัดไป</div><div class="qlist">'+queue.map(rowHtml).join('')+'</div>';
+      html += '</div>';
+      el("content").innerHTML = html;
+    }
     el("content").querySelectorAll('.card').forEach(function(card){
       var path=card.dataset.path;
       // Whole row selects the project — except clicks on the git button, its
@@ -1467,15 +1642,19 @@ function renderShell(): string {
   function renderArchived(m){
     _lastProjKey = null;                 // returning to live projects must re-render
     el("title").textContent = m.title; el("subtitle").textContent = m.subtitle;
-    el("actions").innerHTML = actionsHtml(false, false, false, false, true, false); wireActions(false);
+    el("actions").innerHTML = actionsHtml(false, false, false, false, false, false, true, 'deleted'); wireActions(false);
     var arb=el("archBtn"); if(arb) arb.classList.add('on');
     var items = m.items||[];
-    el("content").innerHTML = items.length ? items.map(function(it){
+    // Reuse the active view's Bento frame (.proj-track + queue rows). Deleted items
+    // only carry name + delete date, so each row is a name block (no rail/git/star).
+    if(!items.length){ el("content").innerHTML = '<div class="proj-track"><div class="empty">'+esc(m.subtitle)+'</div></div>'; return; }
+    var rows = items.map(function(it){
       var when = it.deletedAt ? String(it.deletedAt).slice(0,10) : '';
-      return '<div class="card" data-path="'+esc(it.path)+'">'
-        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+'</span>'
-        +'<span class="csub">ลบไปแล้วเมื่อ '+esc(when)+'</span></button></div></div>';
-    }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';
+      return '<div class="card qrow" data-path="'+esc(it.path)+'">'
+        +'<div class="rowmain"><div class="namecol wide"><div class="nm">'+esc(it.name)+'</div>'
+        +'<div class="nx">ลบไปแล้วเมื่อ '+esc(when)+'</div></div></div></div>';
+    }).join('');
+    el("content").innerHTML = '<div class="proj-track"><div class="qeyebrow">ลบไปแล้ว</div><div class="qlist">'+rows+'</div></div>';
     el("content").querySelectorAll('.card').forEach(function(card){
       var path=card.dataset.path;
       card.addEventListener('click',function(){ post('pick_archived',{path:path}); });

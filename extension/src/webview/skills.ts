@@ -8,11 +8,10 @@ import * as vscode from "vscode";
 // Frontend-only build: skills are read straight off disk from
 // ~/.claude/skills/<name>/SKILL.md — no backend involved. Each skill is a
 // directory containing a SKILL.md whose YAML frontmatter carries `name` and
-// `description`. The panel shows them as an accordion with just two buckets —
-// "system" (every non-uploaded skill, whatever [tag] it self-declares) and
-// "uploaded" (dropped in via the uploader). Each bucket is a full-width bar,
-// collapsed by default; clicking it reveals a 4-column grid of its skills
-// (paginated 50 at a time). A card's real [tag] still shows on hover.
+// `description`. The panel groups them into three buckets — "system" (every
+// non-uploaded, non-generated skill), "generated" (auto-created,
+// installer:auto-skill) and "uploaded" (dropped in via the uploader). Uploaded
+// + generated skills carry an on/off toggle; system skills are always active.
 // Overridable for tests (MC_SKILLS_DIR); defaults to the real global skills dir.
 // Read per-call (not a module const) so a test can point it at a temp dir even
 // after the module is already imported/cached.
@@ -74,6 +73,12 @@ export function openSkillsPanel(
   panel.webview.postMessage({ type: "render_list", skills });
 
   panel.webview.onDidReceiveMessage((msg) => {
+    if (msg?.type === "ready") {
+      // Client finished wiring — (re)send the list so the first paint never
+      // races the message listener's registration.
+      panel.webview.postMessage({ type: "render_list", skills });
+      return;
+    }
     if (msg?.type === "close") {
       panel.dispose();
       return;
@@ -397,372 +402,394 @@ export function toggleSkill(
 
 // ── Webview shell ────────────────────────────────────────────────────────────
 //
+// Bento redesign: a persistent filter rail (ALL / SYSTEM / GENERATED / UPLOADED)
+// plus a paginated 3-column card grid (15 per page). No accordion. Every count
+// (header pill + each rail tile sub-line) is derived live from the skill list so
+// a toggle updates them instantly.
+//
 // IMPORTANT: the client <script> below lives inside this template literal, so
 // any backslash here is consumed by the template (e.g. a `\/` in a regex would
 // collapse to `//` and comment out the rest of a line). Keep the client script
 // backslash-free — the only regexes used (escapeHtml) contain none.
 
 function renderShell(): string {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
+  return `<!DOCTYPE html><html lang="th"><head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
-  html, body { height: 100%; margin: 0; padding: 0; }
-  body {
-    font-family: var(--vscode-font-family);
-    color: var(--vscode-foreground);
-    background: var(--vscode-editor-background);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
+  :root, :root[data-theme="dark"] {
+    --bg:#0d1117; --panel:#11171d; --editor:#0f151b; --card:#161f28;
+    --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.13);
+    --txt:#e7eef5; --muted:#8a97a4; --faint:#5c6773;
+    --accent:#2f9dc4; --accent2:#40c8ea; --accentSoft:rgba(47,157,196,.15); --accentGlow:rgba(64,200,234,.28);
+    --dot:rgba(255,255,255,.028); --primaryGrad:linear-gradient(180deg,#33a6cf,#1f7ea3);
   }
-  .topbar {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 16px; border-bottom: 1px solid var(--vscode-panel-border);
+  :root[data-theme="light"] {
+    --bg:#e9edf1; --panel:#f9fbfc; --editor:#ffffff; --card:#ffffff;
+    --border:rgba(15,30,45,.10); --border2:rgba(15,30,45,.17);
+    --txt:#132029; --muted:#5a6b78; --faint:#94a1ad;
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); --accentGlow:rgba(14,136,173,.18);
+    --dot:rgba(15,30,45,.035); --primaryGrad:linear-gradient(180deg,#13a0c9,#0e88ad);
   }
-  .topbar h1 { font-size: 14px; margin: 0; font-weight: 600; }
-  .topbar .count { font-size: 11px; opacity: 0.6; margin-left: 8px; font-weight: 400; }
-  .topbar .actions { display: flex; gap: 6px; }
-  .topbar button {
-    background: transparent; color: var(--vscode-foreground);
-    border: 1px solid var(--vscode-panel-border); padding: 4px 10px;
-    border-radius: 3px; font-size: 11px; cursor: pointer;
-  }
-  .topbar button:hover { background: var(--vscode-list-hoverBackground); }
+  :root { --pad:20px; --gap:14px; --radius:14px; --fs:13.5px;
+    --uifont:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --mono:'JetBrains Mono',var(--vscode-editor-font-family),ui-monospace,monospace; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { font-family: var(--uifont); font-size: var(--fs); color: var(--txt);
+    background: var(--editor); background-image: radial-gradient(var(--dot) 1px, transparent 1px);
+    background-size: 24px 24px; margin: 0; padding: var(--pad);
+    display: flex; flex-direction: column; overflow: hidden; }
+  .wrap { max-width: 1060px; width: 100%; margin: 0 auto; flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
-  .content { flex: 1; overflow-y: auto; padding: 12px 18px 28px; box-sizing: border-box; }
+  /* Header */
+  .head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  .head h1 { font-size: 19px; font-weight: 700; margin: 0; }
+  .pill { font-family: var(--mono); font-size: 11px; border-radius: 999px; padding: 3px 10px;
+    background: var(--card); border: 1px solid var(--border); color: var(--muted); }
+  .pill .tot { color: var(--faint); }
+  .head .spacer { flex: 1; }
+  .search { display: flex; align-items: center; gap: 6px; width: 210px; height: 30px; padding: 0 10px;
+    border-radius: 7px; background: var(--card); border: 1px solid var(--border); }
+  .search svg { width: 12px; height: 12px; color: var(--faint); flex-shrink: 0; }
+  .search input { flex: 1; min-width: 0; border: none; background: transparent; color: var(--txt); font-size: 11.5px; outline: none; font-family: var(--uifont); }
+  .search input::placeholder { color: var(--faint); }
+  .btn { height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border-radius: 7px;
+    font-size: 11.5px; font-weight: 600; cursor: pointer; font-family: var(--uifont); white-space: nowrap; }
+  .btn svg { width: 13px; height: 13px; }
+  .btn.sec { background: var(--card); border: 1px solid var(--border2); color: var(--muted); }
+  .btn.sec:hover { border-color: var(--accent); color: var(--txt); }
+  .btn.pri { border: none; background: var(--primaryGrad); color: #fff; box-shadow: 0 2px 8px var(--accentGlow); }
+  .btn.pri:hover { filter: brightness(1.06); }
+  .btn[disabled] { opacity: .5; cursor: default; }
 
-  /* Uploader — always visible above the category list. */
-  .uploader { margin-bottom: 10px; }
-  .dz {
-    border: 1.5px dashed var(--vscode-panel-border);
-    border-radius: 8px; padding: 18px 16px; text-align: center; cursor: pointer;
-    background: var(--vscode-editor-inactiveSelectionBackground);
-    transition: background 0.1s, border-color 0.1s;
-  }
-  .dz:hover { background: var(--vscode-list-hoverBackground); }
-  .dz.drag { border-color: #f778ba; background: var(--vscode-list-hoverBackground); }
-  .dz .dz-icon { font-size: 20px; opacity: 0.7; line-height: 1; }
-  .dz .dz-title { font-size: 13px; font-weight: 700; margin-top: 6px; }
-  .dz .dz-sub { font-size: 11px; opacity: 0.6; margin-top: 4px; }
-  .upmsg { font-size: 11px; margin-top: 7px; min-height: 14px; }
-  .upmsg.ok { color: #3fb950; }
-  .upmsg.err { color: #f85149; }
-  .upmsg.busy { opacity: 0.75; }
+  /* Body: rail + grid */
+  .body { flex: 1; display: flex; gap: var(--gap); min-height: 0; }
+  .rail { width: 184px; flex: none; display: flex; flex-direction: column; gap: 6px; }
+  .tile { display: flex; align-items: center; gap: 10px; padding: 11px 12px; border-radius: 10px;
+    cursor: pointer; background: var(--card); border: 1px solid var(--border); color: var(--muted); }
+  .tile:hover { border-color: var(--accent); }
+  .tile.active { background: var(--accentSoft); border-color: var(--accent); color: var(--txt); }
+  .tile .cbar { width: 3px; align-self: stretch; border-radius: 2px; background: var(--tc, var(--accent2)); flex-shrink: 0; }
+  .tile .tb { flex: 1; min-width: 0; }
+  .tile .tl { font-family: var(--mono); font-size: 11px; letter-spacing: 1.4px; font-weight: 600; }
+  .tile .ts { font-family: var(--mono); font-size: 10px; color: var(--faint); margin-top: 3px; }
+  .tile .tc { font-family: var(--mono); font-size: 15px; font-weight: 600; flex-shrink: 0; }
 
-  /* Category accordion: each category is ONE bordered box (accent on the left)
-     that wraps its header bar AND — when expanded — the grid of its skills. */
-  .section {
-    margin-top: 8px;
-    border: 1px solid var(--vscode-panel-border);
-    border-left: 4px solid var(--c, #8b949e);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  .cat-bar {
-    display: flex; align-items: center; gap: 9px; width: 100%;
-    padding: 10px 12px; box-sizing: border-box; text-align: left;
-    background: var(--vscode-editor-inactiveSelectionBackground);
-    color: var(--vscode-foreground);
-    border: 0; cursor: pointer; font: inherit;
-    transition: background 0.1s;
-  }
-  .cat-bar:hover { background: var(--vscode-list-hoverBackground); }
-  .cat-bar .chev {
-    display: inline-block; font-size: 11px; opacity: 0.8;
-    transition: transform 0.12s; transform: rotate(0deg);
-  }
-  .cat-bar .chev.open { transform: rotate(90deg); }
-  .cat-bar .clabel {
-    font-size: 12px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.09em; color: var(--c, #8b949e);
-  }
-  .cat-bar .cn { font-size: 11px; opacity: 0.55; }
+  .grid-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .grid-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .grid-head .gl { font-family: var(--mono); font-size: 10.5px; letter-spacing: 2px; font-weight: 600; color: var(--faint); }
+  .grid-head .rng { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+  .grid-head .spacer { flex: 1; }
+  .pager { display: flex; align-items: center; gap: 7px; }
+  .pager .pg { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 7px; background: var(--card); border: 1px solid var(--border2); color: var(--txt); cursor: pointer; }
+  .pager .pg svg { width: 13px; height: 13px; }
+  .pager .pg:hover:not([disabled]) { border-color: var(--accent); }
+  .pager .pg[disabled] { color: var(--faint); opacity: .4; cursor: default; }
+  .pager .pi { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 34px; text-align: center; }
 
-  .cat-body { padding: 10px 12px 12px; border-top: 1px solid var(--vscode-panel-border); }
-  .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-  .card {
-    min-height: 40px; display: flex; align-items: center;
-    padding: 8px 10px; border-radius: 6px; cursor: pointer;
-    background: var(--vscode-editor-inactiveSelectionBackground);
-    border: 1px solid var(--vscode-panel-border);
-    border-left: 3px solid var(--c, #8b949e);
-    box-sizing: border-box; transition: background 0.1s;
-  }
-  .card:hover { background: var(--vscode-list-hoverBackground); }
-  .card.off { opacity: 0.5; }
-  .card.off .cname { text-decoration: line-through; }
-  .card .cname {
-    flex: 1 1 auto; min-width: 0;
-    font-size: 12px; font-weight: 600; line-height: 1.3; word-break: break-word;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-  }
-  /* On/off switch — rendered on uploaded + generated skills. */
-  .tog {
-    flex: none; margin-left: 8px; font: inherit; font-size: 10px; font-weight: 700;
-    text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 8px;
-    border-radius: 10px; cursor: pointer; border: 1px solid var(--vscode-panel-border);
-    background: transparent; color: var(--vscode-descriptionForeground, #8b949e);
-  }
-  .tog.on { background: #3fb95022; color: #3fb950; border-color: #3fb95055; }
-  .tog:hover { filter: brightness(1.15); }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; align-content: start;
+    flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px; }
+  @media (max-width: 780px) { .grid { grid-template-columns: repeat(2, 1fr); } }
 
-  .pager { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 10px 0 2px; font-size: 11px; }
-  .pager button {
-    background: transparent; color: var(--vscode-foreground);
-    border: 1px solid var(--vscode-panel-border); padding: 3px 10px;
-    border-radius: 3px; font-size: 11px; cursor: pointer;
-  }
-  .pager button:hover:not([disabled]) { background: var(--vscode-list-hoverBackground); }
-  .pager button[disabled] { opacity: 0.4; cursor: default; }
-  .pager .rng { opacity: 0.6; }
+  .scard { position: relative; padding: 13px 13px 13px 16px; border-radius: 11px; background: var(--card);
+    border: 1px solid var(--border); overflow: hidden; cursor: pointer; }
+  .scard:hover { border-color: var(--accent); }
+  .scard.off { opacity: .5; }
+  .scard .cbar { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--sc, var(--accent2)); }
+  .scard .top { display: flex; align-items: flex-start; gap: 8px; }
+  .scard .ctext { flex: 1; min-width: 0; }
+  .scard .cname { font-family: var(--mono); font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .scard .ccat { font-family: var(--mono); font-size: 9px; letter-spacing: 1.2px; color: var(--faint); margin-top: 4px; }
+  .scard .cdesc { font-size: 10.5px; color: var(--muted); line-height: 1.55; margin-top: 9px; }
 
-  .empty { opacity: 0.6; font-size: 13px; padding: 24px 0; }
+  /* On/off switch (generated + uploaded) */
+  .sw { flex: none; position: relative; width: 32px; height: 18px; border-radius: 9px; cursor: pointer;
+    background: var(--border); border: 1px solid var(--border2); transition: .18s; padding: 0; }
+  .sw .knob { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
+    background: var(--faint); transition: .18s; }
+  .sw.on { background: #5ecf8f; border-color: rgba(94,207,143,.5); }
+  .sw.on .knob { left: 16px; background: #0e2019; }
 
-  /* Floating description pane — pops up next to the hovered card. */
-  #hovercard {
-    position: fixed; display: none; z-index: 50; width: 340px; max-height: 60vh;
-    overflow: hidden;
-    background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
-    border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border));
-    border-radius: 6px; padding: 12px 14px; box-shadow: 0 6px 22px rgba(0,0,0,0.45);
-    pointer-events: none;
-  }
-  #hovercard .hc-name { font-weight: 700; font-size: 13px; margin-bottom: 7px; display: flex; align-items: center; gap: 7px; }
-  #hovercard .hc-desc { font-size: 12px; line-height: 1.55; opacity: 0.92; }
-  .chip {
-    display: inline-block; font-size: 10px; padding: 1px 7px; border-radius: 8px;
-    font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
-  }
+  /* Built-in badge (system) */
+  .badge { flex: none; display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 9px;
+    letter-spacing: .5px; color: var(--faint); border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px; }
+  .badge svg { width: 9px; height: 9px; }
+
+  .empty { color: var(--faint); font-size: 13px; padding: 30px 4px; }
+
+  /* Browse-skills modal */
+  .scrim { position: fixed; inset: 0; background: rgba(3,8,12,.62); display: flex; align-items: center; justify-content: center;
+    padding: 34px; z-index: 60; }
+  .scrim[hidden] { display: none; }
+  .dialog { width: min(560px, 100%); max-height: 100%; display: flex; flex-direction: column; border-radius: 15px;
+    background: var(--panel); border: 1px solid var(--border2); box-shadow: 0 30px 70px rgba(0,0,0,.55); overflow: hidden; }
+  .dhead { display: flex; align-items: center; padding: 16px 18px; border-bottom: 1px solid var(--border); }
+  .dhead .dt { font-size: 15px; font-weight: 700; }
+  .dhead .spacer { flex: 1; }
+  .dclose { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px;
+    background: transparent; border: 1px solid var(--border2); color: var(--muted); cursor: pointer; }
+  .dclose:hover { border-color: var(--accent); color: var(--txt); }
+  .dclose svg { width: 13px; height: 13px; }
+  .dbody { padding: 14px 18px 18px; overflow-y: auto; }
+  .localrow { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 10px;
+    border: 1px dashed var(--accent); background: var(--accentSoft); cursor: pointer; }
+  .localrow:hover { filter: brightness(1.1); }
+  .localrow svg.folder { width: 17px; height: 17px; color: var(--accent2); flex-shrink: 0; }
+  .localrow .lt { flex: 1; min-width: 0; }
+  .localrow .l1 { font-size: 12.5px; font-weight: 700; }
+  .localrow .l2 { font-size: 10.5px; color: var(--muted); margin-top: 3px; }
+  .localrow .kc { font-family: var(--mono); font-size: 10px; color: var(--faint); border: 1px solid var(--border2); border-radius: 5px; padding: 2px 6px; }
+
+  /* Toast */
+  #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 70; display: none;
+    font-size: 12px; padding: 9px 16px; border-radius: 9px; background: var(--panel); border: 1px solid var(--border2);
+    box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+  #toast.ok { color: #5ecf8f; } #toast.err { color: #f4796b; }
 </style>
 </head>
 <body>
-  <div class="topbar">
-    <h1>Skills <span class="count" id="count"></span></h1>
-    <div class="actions">
-      <button onclick="reload()">Reload</button>
-      <button onclick="close_()">Close</button>
-    </div>
+<div class="wrap">
+  <div class="head">
+    <h1>Skill Library</h1>
+    <span class="pill" id="pill"></span>
+    <span class="spacer"></span>
+    <span class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4"/></svg><input id="q" type="text" placeholder="ค้นหา skill…" /></span>
+    <button class="btn sec" id="reload"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg>Reload</button>
+    <button class="btn pri" id="upload"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M12 3v13M7 8l5-5 5 5"/></svg>Upload Skill</button>
   </div>
-  <div class="content" id="content">
-    <div class="uploader">
-      <div class="dz" id="dropzone" role="button" tabindex="0" title="Upload a skill packaged as a .zip">
-        <div class="dz-icon">&#8679;</div>
-        <div class="dz-title">Drop or select a ZIP file to upload a new skill</div>
-        <div class="dz-sub">Click to browse &mdash; or drag &amp; drop a .zip. It lands under the &ldquo;uploaded&rdquo; category.</div>
-        <input type="file" id="fileInput" accept=".zip" style="display:none">
+
+  <div class="body">
+    <div class="rail" id="rail"></div>
+    <div class="grid-col">
+      <div class="grid-head">
+        <span class="gl" id="grid-label">ALL SKILLS</span>
+        <span class="rng" id="grid-range"></span>
+        <span class="spacer"></span>
+        <div class="pager" id="pager" hidden>
+          <button class="pg" id="pg-prev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <span class="pi" id="pg-info"></span>
+          <button class="pg" id="pg-next"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
+        </div>
       </div>
-      <div class="upmsg" id="uploadMsg"></div>
+      <div class="grid" id="grid"></div>
     </div>
-    <div id="sections"><div class="empty">Loading&hellip;</div></div>
   </div>
-  <div id="hovercard"></div>
+</div>
+
+<div class="scrim" id="scrim" hidden>
+  <div class="dialog">
+    <div class="dhead"><span class="dt">Browse skills</span><span class="spacer"></span><button class="dclose" id="dclose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+    <div class="dbody">
+      <div class="localrow" id="localrow">
+        <svg class="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg>
+        <div class="lt"><div class="l1">เลือก skill จากเครื่อง</div><div class="l2">เปิด file browser ของระบบ</div></div>
+        <span class="kc">Ctrl O</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept=".zip" style="display:none" />
+<div id="toast"></div>
+
 <script>
   const vscode = acquireVsCodeApi();
-  let skills = [];
-  const PAGE_SIZE = 50;
-  const expanded = {};   // category -> is it open
-  const pageByCat = {};  // category -> current 1-based page
+  (function () { var b = document.body.classList;
+    document.documentElement.dataset.theme = (b.contains("vscode-light") || b.contains("vscode-high-contrast-light")) ? "light" : "dark"; })();
 
-  // The accordion buckets (system + generated + uploaded); ORDER drives the
-  // section bars. The per-tag colors below are still used by the hover chip,
-  // which shows each skill's real [tag] even though the bars collapse it.
-  const ORDER = ['system', 'generated', 'uploaded'];
-  const COLORS = {
-    system: '#4ea1ff', generated: '#e3b341', uploaded: '#f778ba',
-    core: '#4ea1ff', standard: '#3fb950', lab: '#bc8cff',
-    zombie: '#f0883e', other: '#8b949e',
-  };
-  function color(cat) { return COLORS[cat] || '#8b949e'; }
+  var PAGE_SIZE = 15;
+  var STATE = { skills: [], filter: "all", page: 0, query: "" };
+  var CATS = [
+    { key: "all", label: "ALL SKILLS", color: "var(--accent2)" },
+    { key: "system", label: "SYSTEM", color: "#4f9cf9" },
+    { key: "generated", label: "GENERATED", color: "#e8a33d" },
+    { key: "uploaded", label: "UPLOADED", color: "#e879a8" }
+  ];
+  function catMeta(k) { for (var i = 0; i < CATS.length; i++) if (CATS[i].key === k) return CATS[i]; return CATS[0]; }
+  function catColor(g) { return catMeta(g === "system" || g === "generated" || g === "uploaded" ? g : "all").color; }
 
-  function escapeHtml(s) {
-    return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
-  function find(name) { return skills.find(s => s.name === name); }
 
-  function renderList(list) {
-    skills = list;
-    document.getElementById('count').textContent = list.length ? '(' + list.length + ')' : '';
-    const sroot = document.getElementById('sections');
-    if (!list.length) {
-      sroot.innerHTML = '<div class="empty">No skills found in ~/.claude/skills/.</div>';
-      return;
+  // A system skill is always on; toggleable skills follow their enabled flag.
+  function isOn(s) { return (s.group === "system") ? true : !!s.enabled; }
+  // In the ALL view, order by group (system → generated → uploaded), then
+  // alphabetically within each group. A single-category filter is already one
+  // group, so its list stays plain alphabetical (as the server sent it).
+  var GROUP_RANK = { system: 0, generated: 1, uploaded: 2 };
+  function listFor(cat) {
+    if (cat !== "all") return STATE.skills.filter(function (s) { return (s.group || "system") === cat; });
+    return STATE.skills.slice().sort(function (a, b) {
+      var ra = GROUP_RANK[a.group || "system"], rb = GROUP_RANK[b.group || "system"];
+      if (ra == null) ra = 9; if (rb == null) rb = 9;
+      if (ra !== rb) return ra - rb;
+      return a.name.localeCompare(b.name);
+    });
+  }
+  function counts(cat) {
+    var l = listFor(cat), on = 0;
+    for (var i = 0; i < l.length; i++) if (isOn(l[i])) on++;
+    return { total: l.length, on: on };
+  }
+
+  function filtered() {
+    var l = listFor(STATE.filter);
+    var q = STATE.query.trim().toLowerCase();
+    if (q) l = l.filter(function (s) {
+      return s.name.toLowerCase().indexOf(q) !== -1 || String(s.description || "").toLowerCase().indexOf(q) !== -1;
+    });
+    return l;
+  }
+
+  function renderPill() {
+    var c = counts("all");
+    document.getElementById("pill").innerHTML = c.on + ' <span class="tot">/ ' + c.total + " on</span>";
+  }
+  function renderRail() {
+    var html = CATS.map(function (c) {
+      var n = counts(c.key);
+      var sub = c.key === "system" ? "always on" : (n.on + " / " + n.total + " on");
+      var active = STATE.filter === c.key ? " active" : "";
+      return '<div class="tile' + active + '" data-filter="' + c.key + '" style="--tc:' + c.color + '">' +
+        '<span class="cbar"></span>' +
+        '<div class="tb"><div class="tl">' + c.label + '</div><div class="ts">' + sub + "</div></div>" +
+        '<div class="tc">' + n.total + "</div></div>";
+    }).join("");
+    document.getElementById("rail").innerHTML = html;
+  }
+
+  function skillCard(s) {
+    var col = catColor(s.group);
+    var toggleable = s.uploaded || s.group === "generated";
+    var off = toggleable && !s.enabled;
+    var right = toggleable
+      ? '<button class="sw ' + (s.enabled ? "on" : "") + '" data-tog="' + esc(s.name) + '" title="' + (s.enabled ? "ปิด skill นี้" : "เปิด skill นี้") + '"><span class="knob"></span></button>'
+      : '<span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>BUILT-IN</span>';
+    var cat = (s.group || "system").toUpperCase();
+    var desc = s.description ? esc(s.description) : "(ไม่มีคำอธิบาย)";
+    return '<div class="scard' + (off ? " off" : "") + '" data-name="' + esc(s.name) + '" style="--sc:' + col + '">' +
+      '<span class="cbar"></span>' +
+      '<div class="top"><div class="ctext"><div class="cname" title="' + esc(s.name) + '">' + esc(s.name) + "</div>" +
+      '<div class="ccat">' + cat + "</div></div>" + right + "</div>" +
+      '<div class="cdesc">' + desc + "</div></div>";
+  }
+
+  function render() {
+    renderPill();
+    renderRail();
+    var list = filtered();
+    var total = list.length;
+    var pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (STATE.page >= pages) STATE.page = pages - 1;
+    if (STATE.page < 0) STATE.page = 0;
+    var start = STATE.page * PAGE_SIZE;
+    var slice = list.slice(start, start + PAGE_SIZE);
+
+    document.getElementById("grid-label").textContent = catMeta(STATE.filter).label;
+    document.getElementById("grid-range").textContent = total ? ("— " + (start + 1) + "–" + (start + slice.length) + " จาก " + total) : "";
+
+    var grid = document.getElementById("grid");
+    if (!total) {
+      grid.innerHTML = '<div class="empty">' + (STATE.query ? "ไม่พบ skill ที่ตรงกับคำค้น" : "ไม่พบ skill ในหมวดนี้") + "</div>";
+    } else {
+      grid.innerHTML = slice.map(skillCard).join("");
     }
-    // Bucket into the accordion groups (system / generated / uploaded).
-    const map = {};
-    for (const s of list) { const k = s.group || 'system'; (map[k] = map[k] || []).push(s); }
-    // Always show the canonical buckets even when empty (stable list); unknown
-    // extra groups only appear when they actually have skills.
-    const extras = Object.keys(map).filter(k => ORDER.indexOf(k) < 0).sort();
-    const cats = ORDER.concat(extras);
-    sroot.innerHTML = cats.map(cat => section(cat, map[cat] || [])).join('');
-    wire(sroot);
-  }
 
-  function section(cat, items) {
-    const open = !!expanded[cat];
-    const col = color(cat);
-    const total = items.length;
-    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-    let page = pageByCat[cat] || 1;
-    if (page > pages) page = pages;
-    if (page < 1) page = 1;
-    pageByCat[cat] = page;
-
-    const head = '<button class="cat-bar" data-cat="' + escapeHtml(cat) + '">'
-      + '<span class="chev' + (open ? ' open' : '') + '">&#9654;</span>'
-      + '<span class="clabel">' + escapeHtml(cat) + '</span>'
-      + '<span class="cn">' + total + '</span></button>';
-    if (!open) return '<div class="section" style="--c:' + col + '">' + head + '</div>';
-    if (total === 0) return '<div class="section" style="--c:' + col + '">' + head
-      + '<div class="cat-body"><div class="empty" style="padding:6px 2px;font-size:12px">No skills in this category yet.</div></div></div>';
-
-    const start = (page - 1) * PAGE_SIZE;
-    const slice = items.slice(start, start + PAGE_SIZE);
-    const cards = slice.map(s => {
-      // Uploaded + generated skills carry an on/off switch; system skills never do.
-      const toggleable = s.uploaded || s.group === 'generated';
-      const isOff = toggleable && !s.enabled;
-      const tog = toggleable
-        ? '<button class="tog ' + (s.enabled ? 'on' : 'off') + '" data-tog="' + escapeHtml(s.name)
-          + '" title="' + (s.enabled ? 'Disable this skill' : 'Enable this skill') + '">'
-          + (s.enabled ? 'on' : 'off') + '</button>'
-        : '';
-      return '<div class="card' + (isOff ? ' off' : '') + '" data-name="' + escapeHtml(s.name)
-        + '" style="--c:' + col + '">'
-        + '<div class="cname">' + escapeHtml(s.name) + '</div>' + tog + '</div>';
-    }).join('');
-
-    let pager = '';
-    if (pages > 1) {
-      const from = start + 1;
-      const to = start + slice.length;
-      pager = '<div class="pager">'
-        + '<button class="pg" data-cat="' + escapeHtml(cat) + '" data-pg="' + (page - 1) + '"' + (page <= 1 ? ' disabled' : '') + '>Prev</button>'
-        + '<span class="rng">' + from + '&ndash;' + to + ' of ' + total + '</span>'
-        + '<button class="pg" data-cat="' + escapeHtml(cat) + '" data-pg="' + (page + 1) + '"' + (page >= pages ? ' disabled' : '') + '>Next</button>'
-        + '</div>';
+    var pager = document.getElementById("pager");
+    if (pages <= 1) { pager.setAttribute("hidden", ""); }
+    else {
+      pager.removeAttribute("hidden");
+      document.getElementById("pg-info").textContent = (STATE.page + 1) + " / " + pages;
+      var prev = document.getElementById("pg-prev"), next = document.getElementById("pg-next");
+      if (STATE.page <= 0) prev.setAttribute("disabled", ""); else prev.removeAttribute("disabled");
+      if (STATE.page >= pages - 1) next.setAttribute("disabled", ""); else next.removeAttribute("disabled");
     }
-    return '<div class="section">' + head
-      + '<div class="cat-body"><div class="grid">' + cards + '</div>' + pager + '</div></div>';
   }
 
-  function wire(sroot) {
-    sroot.querySelectorAll('.cat-bar').forEach(el => {
-      el.addEventListener('click', () => {
-        const cat = el.getAttribute('data-cat');
-        expanded[cat] = !expanded[cat];
-        renderList(skills);
-      });
-    });
-    sroot.querySelectorAll('.pg').forEach(el => {
-      el.addEventListener('click', () => {
-        if (el.hasAttribute('disabled')) return;
-        const cat = el.getAttribute('data-cat');
-        pageByCat[cat] = parseInt(el.getAttribute('data-pg'), 10) || 1;
-        renderList(skills);
-      });
-    });
-    sroot.querySelectorAll('.tog').forEach(el => {
-      el.addEventListener('click', (ev) => {
-        ev.stopPropagation();       // don't also open the skill file
-        hideCard();
-        vscode.postMessage({ type: 'toggle_skill', name: el.getAttribute('data-tog') });
-      });
-    });
-    sroot.querySelectorAll('.card').forEach(el => {
-      const name = el.getAttribute('data-name');
-      el.addEventListener('mouseenter', () => showCard(name, el));
-      el.addEventListener('mouseleave', hideCard);
-      el.addEventListener('click', () => vscode.postMessage({ type: 'open_skill', name: name }));
-    });
+  // ── Upload / modal ──
+  var fileInput = document.getElementById("fileInput");
+  function openModal() { document.getElementById("scrim").removeAttribute("hidden"); }
+  function closeModal() { document.getElementById("scrim").setAttribute("hidden", ""); }
+  function toast(text, kind) {
+    var t = document.getElementById("toast");
+    t.textContent = text; t.className = kind || "";
+    t.style.display = "block";
+    if (t._h) clearTimeout(t._h);
+    t._h = setTimeout(function () { t.style.display = "none"; }, 3200);
   }
-
-  const hc = document.getElementById('hovercard');
-  function showCard(name, anchor) {
-    const s = find(name);
-    if (!s) return;
-    const col = color(s.category || 'other');
-    const chip = '<span class="chip" style="background:' + col + '22;color:' + col + '">'
-      + escapeHtml(s.category || 'other') + '</span>';
-    hc.innerHTML = '<div class="hc-name">' + escapeHtml(s.name) + chip + '</div>'
-      + '<div class="hc-desc">' + escapeHtml(s.description || '(no description)') + '</div>';
-    hc.style.display = 'block';
-    // Position: prefer below-left of the card, flip/clamp to stay on screen.
-    const r = anchor.getBoundingClientRect();
-    const cw = hc.offsetWidth, ch = hc.offsetHeight, pad = 8;
-    let left = r.left;
-    let top = r.bottom + 6;
-    if (left + cw > window.innerWidth - pad) left = window.innerWidth - cw - pad;
-    if (left < pad) left = pad;
-    if (top + ch > window.innerHeight - pad) top = r.top - ch - 6; // flip above
-    if (top < pad) top = pad;
-    hc.style.left = left + 'px';
-    hc.style.top = top + 'px';
-  }
-  function hideCard() { hc.style.display = 'none'; }
-
-  // Uploader wiring — the dropzone is static in the HTML, so wire it once here.
-  const dz = document.getElementById('dropzone');
-  const fileInput = document.getElementById('fileInput');
-  const upMsg = document.getElementById('uploadMsg');
-  function setUp(text, kind) { upMsg.textContent = text; upMsg.className = 'upmsg' + (kind ? ' ' + kind : ''); }
-
-  function toB64(bufArr) {
-    const bytes = new Uint8Array(bufArr);
-    let bin = '';
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-    }
+  function toB64(buf) {
+    var bytes = new Uint8Array(buf), bin = "", chunk = 0x8000;
+    for (var i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
     return btoa(bin);
   }
   async function handleFile(file) {
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.zip')) { setUp('Only .zip files are supported.', 'err'); return; }
-    if (file.size > 25 * 1024 * 1024) { setUp('File too large (max 25 MB).', 'err'); return; }
-    setUp('Uploading ' + file.name + ' …', 'busy');
+    if (!file.name.toLowerCase().endsWith(".zip")) { toast("รองรับเฉพาะไฟล์ .zip", "err"); return; }
+    if (file.size > 25 * 1024 * 1024) { toast("ไฟล์ใหญ่เกิน (สูงสุด 25 MB)", "err"); return; }
+    closeModal();
+    toast("กำลังอัปโหลด " + file.name + " …", "");
     try {
-      const buf = await file.arrayBuffer();
-      vscode.postMessage({ type: 'upload_skill', filename: file.name, dataB64: toB64(buf) });
-    } catch (e) {
-      setUp('Could not read file: ' + (e && e.message ? e.message : e), 'err');
-    }
+      var buf = await file.arrayBuffer();
+      vscode.postMessage({ type: "upload_skill", filename: file.name, dataB64: toB64(buf) });
+    } catch (e) { toast("อ่านไฟล์ไม่ได้: " + (e && e.message ? e.message : e), "err"); }
   }
 
-  dz.addEventListener('click', () => fileInput.click());
-  dz.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
-  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
-  dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
-  dz.addEventListener('drop', e => {
+  // ── Events (delegated) ──
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    var tile = t.closest ? t.closest(".tile") : null;
+    if (tile) { STATE.filter = tile.getAttribute("data-filter"); STATE.page = 0; render(); return; }
+
+    var tog = t.closest ? t.closest(".sw") : null;
+    if (tog) { e.stopPropagation(); vscode.postMessage({ type: "toggle_skill", name: tog.getAttribute("data-tog") }); return; }
+
+    var card = t.closest ? t.closest(".scard") : null;
+    if (card) { vscode.postMessage({ type: "open_skill", name: card.getAttribute("data-name") }); return; }
+
+    var id = (t.closest ? t.closest("[id]") : null);
+    id = id ? id.id : "";
+    if (id === "reload") { vscode.postMessage({ type: "reload" }); }
+    else if (id === "upload") { openModal(); }
+    else if (id === "dclose" || id === "scrim") { closeModal(); }
+    else if (id === "localrow") { fileInput.click(); }
+    else if (id === "pg-prev") { if (STATE.page > 0) { STATE.page--; render(); document.getElementById("grid").scrollTop = 0; } }
+    else if (id === "pg-next") { STATE.page++; render(); document.getElementById("grid").scrollTop = 0; }
+  });
+  document.addEventListener("input", function (e) {
+    if (e.target && e.target.id === "q") { STATE.query = e.target.value || ""; STATE.page = 0; render(); }
+  });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeModal(); });
+  fileInput.addEventListener("change", function () {
+    var f = fileInput.files && fileInput.files[0];
+    if (f) handleFile(f);
+    fileInput.value = "";
+  });
+
+  // Drag-and-drop anywhere on the window drops straight in (no dialog), with the
+  // rail drop target highlighting while a file is over the window.
+  window.addEventListener("dragover", function (e) { e.preventDefault(); var d = document.getElementById("drop"); if (d) d.classList.add("drag"); });
+  window.addEventListener("dragleave", function (e) { if (e.relatedTarget === null) { var d = document.getElementById("drop"); if (d) d.classList.remove("drag"); } });
+  window.addEventListener("drop", function (e) {
     e.preventDefault();
-    dz.classList.remove('drag');
-    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    var d = document.getElementById("drop"); if (d) d.classList.remove("drag");
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
     if (f) handleFile(f);
   });
-  fileInput.addEventListener('change', () => {
-    const f = fileInput.files && fileInput.files[0];
-    if (f) handleFile(f);
-    fileInput.value = '';
+
+  window.addEventListener("message", function (ev) {
+    var m = ev.data;
+    if (!m || typeof m.type !== "string") return;
+    if (m.type === "render_list") { STATE.skills = m.skills || []; render(); }
+    else if (m.type === "upload_ok") { STATE.filter = "uploaded"; STATE.page = 0; render(); toast("อัปโหลด " + m.name + " แล้ว", "ok"); }
+    else if (m.type === "upload_error") { toast(m.message || "อัปโหลดไม่สำเร็จ", "err"); }
   });
 
-  function reload() { vscode.postMessage({ type: 'reload' }); }
-  function close_() { vscode.postMessage({ type: 'close' }); }
-
-  // A scroll moves the anchor out from under the pane — just hide it.
-  document.getElementById('content').addEventListener('scroll', hideCard);
-
-  window.addEventListener('message', (event) => {
-    const msg = event.data;
-    if (!msg || typeof msg.type !== 'string') return;
-    if (msg.type === 'render_list') renderList(msg.skills || []);
-    else if (msg.type === 'upload_ok') { expanded['uploaded'] = true; renderList(skills); setUp('Uploaded ' + msg.name + ' ✓', 'ok'); }
-    else if (msg.type === 'upload_error') setUp(msg.message || 'Upload failed.', 'err');
-  });
+  vscode.postMessage({ type: "ready" });
 </script>
-</body>
-</html>`;
+</body></html>`;
 }

@@ -23,6 +23,8 @@ export interface ResumableProject {
   metaTeam?: string; // team from .orches-meta.json (default pick)
   lastRun?: number; // lastRun from .orches-meta.json (sort key)
   doing?: boolean; // a worker worktree of this project has a LIVE tmux pane right now
+  nextSprintId?: string; // first unchecked plan sprint, e.g. "S19" ("" if unlabeled)
+  nextSprintTitle?: string; // its short title, e.g. "payment retry"
 }
 
 /** Parse `docs/plan.md` — the checklist the orchestrator writes at plan-time and
@@ -40,6 +42,22 @@ export function parsePlan(raw: string): { total: number; done: number } | null {
     if (m[1] !== " ") done++;
   }
   return total > 0 ? { total, done } : null;
+}
+
+/** The next sprint to do = the first UNCHECKED `- [ ] Sprint N — title` line in
+ *  docs/plan.md. Returns its id ("S<N>", or "" when the line isn't "Sprint N…")
+ *  and short title; null when the plan has no unchecked line (all done / no plan).
+ *  This powers the "sprint ถัดไป: S19 · payment retry" string on the Projects tab. */
+export function nextSprintFromPlan(raw: string): { id: string; title: string } | null {
+  for (const line of raw.split(/\r?\n/)) {
+    const m = /^\s*[-*]\s*\[ \]\s*(.+?)\s*$/.exec(line); // unchecked items only
+    if (!m) continue;
+    const text = m[1].trim();
+    const sm = /^sprint\s*(\d+)\s*(?:[—:.·-]+\s*)?(.*)$/i.exec(text);
+    if (sm) return { id: "S" + sm[1], title: sm[2].trim() || text };
+    return { id: "", title: text };
+  }
+  return null;
 }
 
 /** Parse `.orches-meta.json`. Tolerant: bad JSON / wrong shape → null. */

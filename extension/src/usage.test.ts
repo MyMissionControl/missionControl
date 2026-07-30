@@ -1,6 +1,37 @@
 import { describe, expect, test } from "bun:test";
 
-import { addBreakdown, emptyBreakdown, priceLine, topProjectsByRange } from "./usage";
+import { addBreakdown, emptyBreakdown, priceLine, topProjectsByRange, projectPeriods } from "./usage";
+
+describe("projectPeriods", () => {
+  const bd = (inTok: number, outTok: number, crTok: number, cwTok: number, inC: number, outC: number, crC: number, cwC: number) => ({
+    inTok, outTok, cacheReadTok: crTok, cacheWriteTok: cwTok,
+    inCost: inC, outCost: outC, cacheReadCost: crC, cacheWriteCost: cwC,
+  });
+  test("buckets days into today / week / month / all with cat + cost sums", () => {
+    const dayDetail = {
+      "2026-07-24": bd(1, 2, 3, 4, 0.1, 0.2, 0.3, 0.4), // today
+      "2026-07-20": bd(1, 1, 1, 1, 1, 1, 1, 1),          // in week (>= 07-18) + month
+      "2026-07-10": bd(2, 2, 2, 2, 2, 2, 2, 2),          // month only
+      "2026-06-30": bd(5, 5, 5, 5, 5, 5, 5, 5),          // all only
+    };
+    const p = projectPeriods(dayDetail, "2026-07-24", "2026-07-18", "2026-07");
+    expect(p.today.cost).toBeCloseTo(1.0, 9);
+    expect(p.today.tokens).toBe(10);
+    expect(p.today.cats.cacheRead.usd).toBeCloseTo(0.3, 9);
+    expect(p.week.cost).toBeCloseTo(5.0, 9);
+    expect(p.week.tokens).toBe(14);
+    expect(p.month.cost).toBeCloseTo(13.0, 9);
+    expect(p.all.cost).toBeCloseTo(33.0, 9);
+    expect(p.all.cats.input.tokens).toBe(9);
+    expect(p.all.cats.output.usd).toBeCloseTo(0.2 + 1 + 2 + 5, 9);
+  });
+  test("empty day detail → all-zero periods", () => {
+    const p = projectPeriods({}, "2026-07-24", "2026-07-18", "2026-07");
+    expect(p.all.cost).toBe(0);
+    expect(p.today.tokens).toBe(0);
+    expect(p.month.cats.cacheWrite.usd).toBe(0);
+  });
+});
 
 describe("priceLine", () => {
   test("opus split + cost (no 5m/1h)", () => {

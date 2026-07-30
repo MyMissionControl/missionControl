@@ -166,3 +166,124 @@ export function scanLocalhosts(): ProjectGroup[] {
   if (!projectsRoot) return [];
   return groupListeners(collectRaw(), projectsRoot);
 }
+
+// ── Enriched scan (for the Localhosts panel: kind badge, command, RAM, uptime) ─
+
+/** Data-color category the strip is painted with. null = couldn't classify;
+ *  the panel then omits the badge rather than inventing a generic one. */
+export type Kind = "web" | "api" | "db" | "docs";
+
+export type PortInfo = {
+  port: number;
+  pid: number;
+  pgid: number;
+  kind: Kind | null;
+  cmd: string; // owning command, prettified (e.g. "uvicorn app:api")
+  memMB: number; // resident set size at scan time, in MB
+  uptime: string; // human elapsed time (e.g. "3h 12m")
+};
+export type EnrichedGroup = { project: string; path: string; ports: PortInfo[] };
+
+/** Classify a listener into a data-color kind from its command + args + port.
+ *  Order matters (db/docs before the broad web/api); a bare `node` with a vite
+ *  arg lands as web because the web test also reads `args`. Returns null when
+ *  nothing matches so the caller can drop the badge. */
+export function classifyKind(comm: string, args: string, port: number): Kind | null {
+  const s = ((comm || "") + " " + (args || "")).toLowerCase();
+  if (/postgres|mysqld|mariadb|\bredis|\bmongod?\b|cockroach/.test(s)) return "db";
+  if (/storybook|docusaurus|vitepress|mkdocs|mintlify/.test(s)) return "docs";
+  if (/\bvite\b|next-server|\bnext\b|nuxt|astro|webpack|remix|react-scripts|@angular|ng serve/.test(s)) return "web";
+  if (/uvicorn|gunicorn|hypercorn|fastify|express|flask|django|\brails\b|\bpuma\b|\bnode\b|\bbun\b|\bdeno\b/.test(s)) return "api";
+  if ([5432, 5433, 3306, 6379, 27017].includes(port)) return "db";
+  if ([3000, 5173, 4321, 8080].includes(port)) return "web";
+  if ([8000, 8001, 4000, 5000, 3001].includes(port)) return "api";
+  return null;
+}
+
+/** Prettify a full command line for display: replace each path-like token with
+ *  its basename so "/home/u/.local/bin/uvicorn app:api" → "uvicorn app:api" and
+ *  "/usr/bin/node …/.bin/vite --host" → "node vite --host". Falls back to comm
+ *  when args are empty. */
+export function prettyCmd(args: string, comm: string): string {
+  const a = (args || "").trim();
+  if (!a) return (comm || "").trim();
+  const toks = a.split(/\s+/).filter(Boolean).map((t) => (t.includes("/") ? t.split("/").pop() || t : t));
+  const s = toks.join(" ").trim();
+  return s || (comm || "").trim();
+}
+
+/** Human-readable elapsed time from whole seconds (ps etimes). */
+export function formatUptime(secs: number): string {
+  if (!Number.isFinite(secs) || secs < 0) return "";
+  let s = Math.floor(secs);
+  const d = Math.floor(s / 86400); s -= d * 86400;
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60); s -= m * 60;
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m`;
+  return `${s}s`;
+}
+
+/** Parse `ps -o pid=,rss=,etimes=,args=` → Map<pid,{rssKB,etimes,args}>.
+ *  args is the remainder of the line (may contain spaces). */
+export function parsePsFull(out: string): Map<number, { rssKB: number; etimes: number; args: string }> {
+  const m = new Map<number, { rssKB: number; etimes: number; args: string }>();
+  for (const line of out.split("\n")) {
+    const mm = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*\S)\s*$/.exec(line);
+    if (!mm) continue;
+    m.set(Number(mm[1]), { rssKB: Number(mm[2]), etimes: Number(mm[3]), args: mm[4].trim() });
+  }
+  return m;
+}
+
+function psFullRaw(pids: number[]): string {
+  const uniq = [...new Set(pids)];
+  if (!uniq.length) return "";
+  try {
+    return cp.execSync(`ps -o pid=,rss=,etimes=,args= -p ${uniq.join(",")}`, {
+      encoding: "utf8",
+      timeout: 4000,
+    });
+  } catch {
+    return "";
+  }
+}
+
+/** Enriched scan for the panel: listeners grouped by project, each port carrying
+ *  its kind, prettified command, current RAM (MB) and uptime. Empty array when
+ *  the projects root or ss is unavailable. */
+export function scanLocalhostsEnriched(): EnrichedGroup[] {
+  const projectsRoot = getProjectsRoot();
+  if (!projectsRoot) return [];
+  const raws = collectRaw();
+  const info = parsePsFull(psFullRaw(raws.map((r) => r.pid)));
+  const home = os.homedir();
+  const byProject = new Map<string, PortInfo[]>();
+  for (const r of raws) {
+    const project = projectFromCwd(r.cwd, projectsRoot);
+    if (!project) continue;
+    const f = info.get(r.pid);
+    const args = f?.args ?? "";
+    const list = byProject.get(project) ?? [];
+    list.push({
+      port: r.port,
+      pid: r.pid,
+      pgid: r.pgid,
+      kind: classifyKind(r.comm, args, r.port),
+      cmd: prettyCmd(args, r.comm),
+      memMB: f ? Math.round(f.rssKB / 1024) : 0,
+      uptime: f ? formatUptime(f.etimes) : "",
+    });
+    byProject.set(project, list);
+  }
+  const groups: EnrichedGroup[] = [];
+  for (const [project, ports] of byProject) {
+    ports.sort((a, b) => a.port - b.port);
+    const full = projectsRoot.replace(/\/+$/, "") + "/" + project;
+    const path = full.startsWith(home) ? "~" + full.slice(home.length) : full;
+    groups.push({ project, path, ports });
+  }
+  groups.sort((a, b) => a.project.localeCompare(b.project));
+  return groups;
+}
