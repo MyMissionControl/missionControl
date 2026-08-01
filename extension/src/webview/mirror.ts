@@ -718,6 +718,15 @@ function renderHtml(webview: vscode.Webview, mediaRoot: vscode.Uri, session: str
   .tool pre { margin: 4px 0 0; background: var(--vscode-textCodeBlock-background,#0000001a); padding: 8px 10px; border-radius: 6px; overflow: auto; max-height: 300px; font-size: 12px; }
   .think { align-self: flex-start; opacity: .6; font-style: italic; font-size: 12px; }
   .think summary { cursor: pointer; list-style: none; }
+  /* AskUserQuestion card — must stand out so the human notices Claude is waiting on them */
+  .askcard { border: 1px solid var(--vscode-focusBorder, #e3a13a); border-left: 3px solid var(--vscode-focusBorder, #e3a13a); background: var(--vscode-editorWidget-background); }
+  .askhdr { font-weight: 600; color: var(--vscode-focusBorder, #e3a13a); font-size: 12px; margin-bottom: 6px; }
+  .askq { margin: 8px 0 2px; }
+  .askqh { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: .8; }
+  .askqt { font-weight: 600; margin: 2px 0; }
+  .askopts { margin: 4px 0 0; padding-left: 22px; }
+  .askopts li { margin: 3px 0; }
+  .askdesc { opacity: .75; }
   .composer { flex: 0 0 auto; display: flex; gap: 6px; align-items: flex-end; padding: 6px 10px;
     background: var(--vscode-editorWidget-background); border-top: 1px solid var(--vscode-panel-border); }
   .composer textarea { flex: 1; resize: none; min-height: 32px; max-height: 30vh; padding: 6px 9px;

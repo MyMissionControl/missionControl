@@ -220,6 +220,23 @@
         node = document.createElement("details");
         node.className = "think";
         node.innerHTML = "<summary>thinking…</summary><div>" + mdLite(b.text) + "</div>";
+      } else if (b.kind === "tool_use" && b.ask && b.ask.length) {
+        // AskUserQuestion → a PROMINENT (never-collapsed) question card. Without this the
+        // question hides inside the generic "tool: AskUserQuestion" chip below → the human
+        // can't see what Claude is asking, can't answer, and thinks the session hung.
+        node = document.createElement("div");
+        node.className = "msg assistant askcard";
+        var h = '<div class="askhdr">Claude กำลังถาม — ตอบโดยพิมพ์ด้านล่างแล้ว Send</div>';
+        b.ask.forEach(function (q) {
+          h += '<div class="askq">';
+          if (q.header) h += '<div class="askqh">' + esc(stripEmoji(q.header)) + (q.multiSelect ? " (เลือกได้หลายข้อ)" : "") + "</div>";
+          h += '<div class="askqt">' + esc(stripEmoji(q.question)) + "</div><ol class=\"askopts\">";
+          (q.options || []).forEach(function (o) {
+            h += "<li><b>" + esc(stripEmoji(o.label)) + "</b>" + (o.description ? ' — <span class="askdesc">' + esc(stripEmoji(o.description)) + "</span>" : "") + "</li>";
+          });
+          h += "</ol></div>";
+        });
+        node.innerHTML = h;
       } else if (b.kind === "tool_use") {
         node = document.createElement("details");
         node.className = "tool";

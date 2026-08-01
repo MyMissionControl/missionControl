@@ -12,12 +12,50 @@
 
 export type BlockKind = "text" | "thinking" | "tool_use" | "tool_result" | "image";
 
+export interface AskOption {
+  label: string;
+  description?: string;
+}
+export interface AskQuestion {
+  question: string;
+  header?: string;
+  multiSelect?: boolean;
+  options: AskOption[];
+}
+
 export interface ChatBlock {
   kind: BlockKind;
   text?: string; // text / thinking / tool_result content
   name?: string; // tool_use tool name
   input?: unknown; // tool_use raw input
   isError?: boolean; // tool_result error flag
+  /** Present only on an `AskUserQuestion` tool_use — the questions Claude is asking
+   *  the human, normalized for prominent rendering (chat.js shows a question card
+   *  instead of a collapsed tool chip, so the human actually sees + can answer it). */
+  ask?: AskQuestion[];
+}
+
+/** Normalize an `AskUserQuestion` tool_use `input` into renderable questions, or
+ *  undefined when the input is malformed / has no answerable question. Pure +
+ *  defensive: transcripts are untrusted, a bad shape must degrade to "no card"
+ *  (the raw tool chip still renders), never throw. */
+export function parseAskUserQuestion(input: unknown): AskQuestion[] | undefined {
+  const qs = (input as any)?.questions;
+  if (!Array.isArray(qs)) return undefined;
+  const out: AskQuestion[] = [];
+  for (const q of qs) {
+    if (!q || typeof q.question !== "string" || !q.question.trim()) continue;
+    const opts: AskOption[] = [];
+    if (Array.isArray(q.options)) {
+      for (const o of q.options) {
+        if (o && typeof o.label === "string" && o.label.trim())
+          opts.push({ label: o.label, description: typeof o.description === "string" ? o.description : undefined });
+      }
+    }
+    if (!opts.length) continue; // a question with no selectable option isn't answerable here
+    out.push({ question: q.question, header: typeof q.header === "string" ? q.header : undefined, multiSelect: !!q.multiSelect, options: opts });
+  }
+  return out.length ? out : undefined;
 }
 
 export interface ChatMsg {
@@ -86,7 +124,10 @@ export function parseEntry(o: any): ChatMsg | null {
       } else if (b.type === "thinking") {
         if (typeof b.thinking === "string" && b.thinking.trim()) blocks.push({ kind: "thinking", text: b.thinking });
       } else if (b.type === "tool_use") {
-        blocks.push({ kind: "tool_use", name: typeof b.name === "string" ? b.name : "tool", input: b.input });
+        const name = typeof b.name === "string" ? b.name : "tool";
+        const block: ChatBlock = { kind: "tool_use", name, input: b.input };
+        if (name === "AskUserQuestion") block.ask = parseAskUserQuestion(b.input);
+        blocks.push(block);
       } else if (b.type === "tool_result") {
         blocks.push({ kind: "tool_result", text: resultText(b.content), isError: !!b.is_error });
       } else if (b.type === "image") {
