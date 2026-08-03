@@ -214,7 +214,8 @@ test("buildTmuxLaunchCommand: workers → detached create, layout, then attach",
   ]);
   expect(cmd.startsWith("tmux new-session -A -d -s '09-foreman' -n 'foreman-oracle' '")).toBe(true);
   expect(cmd).toContain("init '09-foreman' 'foreman-oracle' 'bob' 'john'"); // layout wired in
-  expect(cmd.trimEnd().endsWith("tmux attach -t '=09-foreman' ; }")).toBe(true);
+  // trailing `true;` is deliberate (teams.ts:296) — keeps the `&& { … }` group exiting 0
+  expect(cmd.trimEnd().endsWith("tmux attach -t '=09-foreman' ; true; }")).toBe(true);
 });
 
 test("buildTmuxLaunchCommand: no workers → detached+attach, no layout", () => {
