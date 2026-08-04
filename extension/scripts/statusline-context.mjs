@@ -27,7 +27,7 @@
 // Self-contained: no deps, no imports from the extension build, never throws to
 // the UI. Block chars █░ render fine in terminals (NOT emoji).
 
-import { readFileSync, writeFileSync, realpathSync, openSync, fstatSync, readSync, closeSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, realpathSync, openSync, fstatSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,10 +88,18 @@ export function parseLastAutoCompactPreTokens(jsonl) {
 
 /** The denominator that makes 100% == the real compact point, most-authoritative
  *  first: the live trigger read from THIS session's transcript, else the globally
- *  cached last-known trigger, else the reverse-engineered window−reserve formula. */
-export function pickTrigger(liveTrigger, cachedTrigger, effectiveWindow) {
+ *  cached last-known trigger, else the reverse-engineered window−reserve formula.
+ *
+ *  `tokens` (current context size) is used to DISPROVE a stale cache: sailing past
+ *  a trigger without Claude compacting means that number is wrong — it was learned
+ *  on a different model/window and never expired. Measured 2026-08-04: a cache of
+ *  147,686 from 11 days earlier pinned three live sessions (220k/163k/138k, zero
+ *  auto-compacts) at a fake 100%. Treating "past it" as "near full" inverts the
+ *  meaning of the gauge, so we drop the cache and fall back to the formula instead.
+ *  A LIVE trigger is exempt — it comes from this session's own transcript. */
+export function pickTrigger(liveTrigger, cachedTrigger, effectiveWindow, tokens = 0) {
   if (typeof liveTrigger === "number" && liveTrigger > 0) return liveTrigger;
-  if (typeof cachedTrigger === "number" && cachedTrigger > 0) return cachedTrigger;
+  if (typeof cachedTrigger === "number" && cachedTrigger > 0 && !(tokens > cachedTrigger)) return cachedTrigger;
   return autoCompactTrigger(effectiveWindow);
 }
 
@@ -212,6 +220,15 @@ function writeTriggerCache(n) {
   }
 }
 
+/** Drop a disproved trigger cache. Best-effort — never break the status line. */
+function clearTriggerCache() {
+  try {
+    unlinkSync(TRIGGER_CACHE);
+  } catch {
+    /* already gone / not writable — the pickTrigger guard still ignores it */
+  }
+}
+
 /** Build the status line from Claude's stdin JSON object. */
 export function computeLine(input) {
   const cw = (input && input.context_window) || {};
@@ -225,7 +242,12 @@ export function computeLine(input) {
   // session's transcript. Cache it for fresh panes; formula only as last resort.
   const live = readAutoTriggerFromTranscript(input && input.transcript_path);
   if (live) writeTriggerCache(live);
-  const trigger = pickTrigger(live, live ? null : readTriggerCache(), effective);
+  const cached = live ? null : readTriggerCache();
+  // A cache this session has already passed is disproved — delete it so every OTHER
+  // pane stops inheriting the same wrong denominator (it re-learns on the next real
+  // auto-compact). Best-effort: a failed unlink just means we ignore it locally.
+  if (cached !== null && tokens > cached) clearTriggerCache();
+  const trigger = pickTrigger(live, cached, effective, tokens);
 
   return renderBar(contextPct(tokens, trigger));
 }

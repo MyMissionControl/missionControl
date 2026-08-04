@@ -114,6 +114,30 @@ test("pickTrigger prefers the live transcript trigger over cache and formula", (
 
 test("pickTrigger falls back to the cached learned trigger when no live one this session", () => {
   expect(pickTrigger(null, 267000, 700000)).toBe(267000);
+  expect(pickTrigger(null, 267000, 700000, 200000)).toBe(267000); // still below it -> trust it
+  expect(pickTrigger(null, 267000, 700000, 267000)).toBe(267000); // exactly at it = 100%, valid
+});
+
+// ⛔ บั๊กจริง (2026-08-04, run agentskill-marketplace-newflow4): cache
+//    ~/.claude/.mc-ctx-trigger = 147686 เขียนไว้ 11 วันก่อน (คนละ model/window) แล้ว
+//    session 3 ตัววิ่งอยู่ที่ 220,075 / 163,185 / 138,436 โดย **ไม่มี auto-compact เลย**
+//    -> cache ชนะ formula เสมอ, 220075/147686 = 149% -> clamp เหลือ 100% ทั้งสามแท่ง
+//    บาร์เลยโชว์ "ตันแล้ว" ทั้งที่ยังเหลือที่จริงอีกเยอะ = ตัวเลขที่ทำให้ตัดสินใจผิด
+//    (ผมเกือบสั่งแทรกกลางรันเพราะเชื่อเลขนี้)
+// กติกาที่ถูก: token ที่แล่นผ่าน trigger ไปโดยไม่ compact = **หลักฐานว่า trigger นั้นผิด**
+//    ไม่ใช่หลักฐานว่าใกล้ตัน -> ทิ้ง cache แล้วตกไปใช้ formula บน window จริง
+test("pickTrigger ทิ้ง cached trigger ที่ session นี้แล่นผ่านไปแล้ว (พิสูจน์แล้วว่าผิด)", () => {
+  // เคสจริงที่เจอ: cache 147,686 · ctx 220,075 · window 700k -> ต้องไปใช้ formula 667,000
+  expect(pickTrigger(null, 147686, 700000, 220075)).toBe(667000);
+  // เกินไปแค่ 1 token ก็ถือว่าโป๊ะแล้ว (ถ้ามันจริง Claude ต้อง compact ไปแล้ว)
+  expect(pickTrigger(null, 147686, 700000, 147687)).toBe(667000);
+  // ⛔ live trigger ต้องไม่ถูกกฎนี้แตะ — มันมาจาก transcript ของ session นี้เอง = ของจริง
+  //    (ช่วงสั้น ๆ หลัง compact tokens อาจยังสูงกว่า preTokens ที่บันทึก)
+  expect(pickTrigger(267186, 147686, 700000, 300000)).toBe(267186);
+});
+
+test("pickTrigger: ไม่ส่ง tokens มา = พฤติกรรมเดิมทุกอย่าง (caller เก่าไม่พัง)", () => {
+  expect(pickTrigger(null, 147686, 700000)).toBe(147686);
 });
 
 test("pickTrigger falls back to the formula (window − reserve) only when nothing is learned", () => {
