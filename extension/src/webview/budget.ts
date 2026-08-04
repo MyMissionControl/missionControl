@@ -300,9 +300,13 @@ function renderShell(): string {
   .refresh svg { width: 13px; height: 13px; }
   .refresh[disabled] { opacity: .5; cursor: default; }
 
-  /* Stat cards */
+  /* Refresh bar (above the cards) */
+  .refreshbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+
+  /* Stat cards — click one to pick the period */
   .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); margin-bottom: var(--secgap); }
-  .tile { padding: var(--cardpad); border-radius: var(--radius); background: var(--card); border: 1px solid var(--border); }
+  .tile { padding: var(--cardpad); border-radius: var(--radius); background: var(--card); border: 1px solid var(--border); cursor: pointer; transition: border-color .12s; }
+  .tile:hover { border-color: var(--accent); }
   .tile.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .tile .k { font-size: 11.5px; color: var(--muted); }
   .tile .v { font-family: var(--mono); font-size: 20px; font-weight: 600; margin-top: 6px; }
@@ -392,16 +396,9 @@ function renderShell(): string {
       <div class="hero"><span class="cur">$</span><span class="amt" id="hero-amt">—</span></div>
       <div class="hero-sub" id="hero-sub">ยอดใช้จ่ายเดือนนี้ (คำนวณจาก transcript ในเครื่อง)</div>
     </div>
-    <div class="hright">
-      <div class="seg" id="period">
-        <span class="s" data-p="today">วันนี้</span>
-        <span class="s" data-p="week">สัปดาห์นี้</span>
-        <span class="s active" data-p="month">เดือนนี้</span>
-      </div>
-      <button class="refresh" id="refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg>รีเฟรช</button>
-    </div>
   </div>
 
+  <div class="refreshbar"><button class="refresh" id="refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg>รีเฟรช</button></div>
   <div class="tiles" id="tiles"></div>
   <div class="notice" id="provider-note" style="display:none"></div>
 
@@ -449,9 +446,9 @@ function renderShell(): string {
   function fmtTokens(n) { return TOKFMT.format(n || 0); }
   function post(type) { vscode.postMessage({ type: type }); }
 
-  var PAGE_SIZE = 6;
+  var PAGE_SIZE = 10;
   var STATE = { view: null, period: "month", sortKey: "cost", sortDir: "desc", page: 0, dwellRow: null, dwellTimer: null };
-  var PERIOD_WORD = { today: "วันนี้", week: "สัปดาห์นี้", month: "เดือนนี้" };
+  var PERIOD_WORD = { today: "วันนี้", week: "7 วันล่าสุด", month: "เดือนนี้", all: "ทั้งหมด" };
   // Fixed categorical colors (outside the teal accent palette) — identical in dark + light.
   var CATS = [
     { key: "cacheRead", color: "#4f9cf9", label: "Cache read" },
@@ -467,7 +464,7 @@ function renderShell(): string {
   }
   function heroFmt() {
     var v = STATE.view; if (!v) return "$0.00";
-    return { today: v.todayFmt, week: v.last7Fmt, month: v.monthFmt }[STATE.period] || v.monthFmt;
+    return { today: v.todayFmt, week: v.last7Fmt, month: v.monthFmt, all: v.allTimeFmt }[STATE.period] || v.monthFmt;
   }
 
   // ── donut pie: wedges by USD, start 12 o'clock clockwise, center punched out ──
@@ -512,21 +509,18 @@ function renderShell(): string {
     var decPart = dot >= 0 ? body.slice(dot) : "";
     document.getElementById("hero-amt").innerHTML = esc(intPart) + '<span class="dec">' + esc(decPart) + "</span>";
     document.getElementById("hero-sub").textContent = "ยอดใช้จ่าย" + PERIOD_WORD[STATE.period] + " (คำนวณจาก transcript ในเครื่อง)";
-    // segment active state
-    var segs = document.querySelectorAll("#period .s");
-    for (var i = 0; i < segs.length; i++) segs[i].classList[segs[i].getAttribute("data-p") === STATE.period ? "add" : "remove"]("active");
   }
 
   function renderTiles() {
     var v = STATE.view;
     var tiles = [
-      { k: "เดือนนี้", v: v.monthFmt, p: "month" },
       { k: "วันนี้", v: v.todayFmt, p: "today" },
       { k: "7 วันล่าสุด", v: v.last7Fmt, p: "week" },
+      { k: "เดือนนี้", v: v.monthFmt, p: "month" },
       { k: "ทั้งหมด", v: v.allTimeFmt, p: "all" }
     ];
     document.getElementById("tiles").innerHTML = tiles.map(function (t) {
-      return '<div class="tile' + (t.p === STATE.period ? " active" : "") + '"><div class="k">' + esc(t.k) + '</div><div class="v">' + esc(t.v) + "</div></div>";
+      return '<div class="tile' + (t.p === STATE.period ? " active" : "") + '" data-p="' + t.p + '"><div class="k">' + esc(t.k) + '</div><div class="v">' + esc(t.v) + "</div></div>";
     }).join("");
   }
 
@@ -654,8 +648,8 @@ function renderShell(): string {
   // ── events ──
   document.addEventListener("click", function (e) {
     var t = e.target;
-    var seg = t.closest ? t.closest("#period .s") : null;
-    if (seg) { STATE.period = seg.getAttribute("data-p"); STATE.page = 0; render(STATE.view); return; }
+    var tile = t.closest ? t.closest(".tile[data-p]") : null;
+    if (tile) { STATE.period = tile.getAttribute("data-p"); STATE.page = 0; render(STATE.view); return; }
     var th = t.closest ? t.closest(".thead .sortable") : null;
     if (th) { var k = th.getAttribute("data-sort"); if (STATE.sortKey === k) STATE.sortDir = STATE.sortDir === "desc" ? "asc" : "desc"; else { STATE.sortKey = k; STATE.sortDir = "desc"; } STATE.page = 0; renderTable(); return; }
     var row = t.closest ? t.closest(".prow") : null;
