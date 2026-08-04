@@ -139,9 +139,22 @@ export function isSafeSessionName(name: string): boolean {
  *  isSafeSessionName first; the name is single-quoted. The `=` prefix forces
  *  an EXACT session-name match — without it tmux falls back to prefix/fnmatch
  *  matching, so if the named session died you could silently attach to (or,
- *  in the kill path, destroy) a different session sharing the prefix. */
-export function buildAttachCommand(name: string): string {
-  return `tmux attach -t '=${name}'`;
+ *  in the kill path, destroy) a different session sharing the prefix.
+ *
+ *  With `window` given, the target becomes `=<name>:<idx>` so the attach lands on
+ *  THAT window (proved live on tmux 3.4: active window flipped 0 -> 2). Anything
+ *  that is not a non-negative integer is dropped rather than interpolated — the
+ *  index reaches here from a webview message. */
+export function buildAttachCommand(name: string, window?: number): string {
+  const w = isWindowIndex(window) ? `:${window}` : "";
+  return `tmux attach -t '=${name}${w}'`;
+}
+
+/** A tmux window index safe to interpolate into a target: non-negative integer,
+ *  bounded (tmux never has 10k windows, and a bound keeps a junk message from
+ *  building an absurd target string). */
+export function isWindowIndex(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 && v < 10000;
 }
 
 /** Oracle names from ~/.maw/oracles.json content. Tolerant: junk → []. */

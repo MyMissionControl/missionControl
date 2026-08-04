@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 
 import {
   buildAttachCommand,
+  isWindowIndex,
   isSafeSessionName,
   parseTmuxSessions,
   parseOraclesJson,
@@ -112,6 +113,32 @@ test("buildAttachCommand single-quotes the name with exact-match prefix", () => 
   // "=" forces exact target matching — plain names prefix-match in tmux, which
   // can attach/kill a different session once the exact one is gone.
   expect(buildAttachCommand("carbon")).toBe("tmux attach -t '=carbon'");
+});
+
+test("buildAttachCommand targets a window when one is given", () => {
+  // Clicking the "1:john claude" row must land on THAT window, not window 0.
+  // Verified live on tmux 3.4: `attach -t '=09-foreman:2'` flipped the active
+  // window 0 -> 2 (the `=sess:idx` form works even though bare `=sess` fails
+  // for some other tmux subcommands).
+  expect(buildAttachCommand("09-foreman", 1)).toBe("tmux attach -t '=09-foreman:1'");
+  expect(buildAttachCommand("09-foreman", 0)).toBe("tmux attach -t '=09-foreman:0'");
+});
+
+test("buildAttachCommand drops a junk window instead of interpolating it", () => {
+  // The index arrives in a webview message, so it is untrusted input.
+  for (const junk of [-1, 1.5, NaN, "1", "0; rm -rf ~", null, undefined, {}] as unknown[]) {
+    expect(buildAttachCommand("carbon", junk as number)).toBe("tmux attach -t '=carbon'");
+  }
+});
+
+test("isWindowIndex accepts only bounded non-negative integers", () => {
+  expect(isWindowIndex(0)).toBe(true);
+  expect(isWindowIndex(42)).toBe(true);
+  expect(isWindowIndex(-1)).toBe(false);
+  expect(isWindowIndex(1.5)).toBe(false);
+  expect(isWindowIndex(10000)).toBe(false);
+  expect(isWindowIndex("2")).toBe(false);
+  expect(isWindowIndex(undefined)).toBe(false);
 });
 
 test("parseOraclesJson returns oracle names, tolerant of junk", () => {

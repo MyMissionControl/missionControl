@@ -35,6 +35,7 @@ import {
   type TmuxWindow,
   buildAttachCommand,
   isSafeSessionName,
+  isWindowIndex,
   parseTmuxSessions,
   parseTmuxWindows,
   sessionIsIdle,
@@ -235,7 +236,17 @@ export function openDashboardPanel(
         const label = typeof msg.label === "string" ? msg.label : "";
         // Defense in depth: only attach to a name we actually listed, and that
         // passes the shell-safety whitelist.
-        if (!_lastSessionNames.has(name) || !isSafeSessionName(name)) return;
+        if (!isSafeSessionName(name)) return; // never build a shell command from it
+        if (!_lastSessionNames.has(name)) {
+          // ⛔ เดิม return เงียบ ๆ = แยกไม่ออกจาก "ปุ่มเสีย" (อาการที่ user เจอซ้ำ ๆ)
+          //    เกิดได้จริงเมื่อ session ตายระหว่าง poll กับตอนกด → บอกแล้วรีเฟรชแถวให้
+          void vscode.window.showWarningMessage(`tmux session '${name}' ไม่อยู่ในรายการแล้ว — รีเฟรชรายการให้แล้ว`);
+          await pushSessions(panel);
+          return;
+        }
+        // Optional: which window row was clicked ("1:john claude"). Absent = the whole
+        // session (old behaviour). Junk is dropped, never interpolated into the target.
+        const win = isWindowIndex(msg.window) ? msg.window : undefined;
 
         // A terminal we already hold for this session, or an orchestrator tab
         // already pointed at it (opened by the "⏮ ทำต่อ" button /
@@ -266,6 +277,15 @@ export function openDashboardPanel(
           return;
         }
         if (action === "focus") {
+          // ⛔ แท็บที่เกาะอยู่แล้วโชว์หน้าต่างเดิม → กด "1:john" แล้วจะไม่มีอะไรเปลี่ยน
+          //    (กดแล้วเหมือนไม่ทำงาน = อาการเดียวกับบั๊กเดิม) · สั่ง tmux สลับหน้าต่างก่อน show
+          if (win !== undefined) {
+            await new Promise<void>((resolve) => {
+              cp.execFile("tmux", ["select-window", "-t", `=${name}:${win}`], { timeout: 2000 }, () =>
+                resolve(),
+              );
+            });
+          }
           reusable!.show(false);
           return;
         }
@@ -291,7 +311,7 @@ export function openDashboardPanel(
           term.show(false);
         }
 
-        const command = buildAttachCommand(name);
+        const command = buildAttachCommand(name, win);
         let launched = false;
         const launch = () => {
           if (launched || term.exitStatus !== undefined) return;
@@ -1002,7 +1022,10 @@ function renderHtml(): string {
   .sdot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); box-shadow: 0 0 8px var(--accent2); flex-shrink: 0; }
   .sdot.on { background: var(--good); box-shadow: 0 0 8px var(--good); }
   .smeta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-  .sname { font-size: 12.5px; font-weight: 600; color: var(--txt); }
+  /* ชื่อ = ปุ่มเข้า session (ไม่ใช่แค่ข้อความ) → ต้อง hover ให้เห็นว่ากดได้ · align-self:start
+     กันแถบ hover ยืดเต็มความกว้างคอลัมน์ flex */
+  .sname { font-size: 12.5px; font-weight: 600; color: var(--txt); cursor: pointer; align-self: flex-start; }
+  .sname:hover { text-decoration: underline; text-decoration-color: var(--accent2); }
   .ssub { font-family: var(--mono); font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .skill { flex-shrink: 0; background: transparent; border: none; color: var(--muted); opacity: .4;
     cursor: pointer; font-size: 12px; line-height: 1; padding: 3px 6px; border-radius: 5px; }
@@ -1018,6 +1041,10 @@ function renderHtml(): string {
   .srow.open .swins { display: block; }
   .swin { font-family: var(--mono); font-size: 10.5px; color: var(--muted); padding: 2px 0; }
   .swin .wchev { color: var(--accent2); margin-right: 6px; }
+  /* ⛔ แถวหน้าต่างเคยมี ▸ ให้เห็นแต่ "กดไม่ได้จริง" (ไม่มี handler เลย) = คนกดแล้วนึกว่าแอปค้าง
+     คลิกได้แล้ว → ต้องมี cursor+hover บอกด้วย ไม่งั้นก็ยังไม่มีใครรู้ว่ากดได้ */
+  .swin[data-win] { cursor: pointer; border-radius: 4px; padding: 2px 4px; margin-left: -4px; }
+  .swin[data-win]:hover { color: var(--fg); background: rgba(255,255,255,.06); }
   .swin.empty { color: var(--faint); }
   .sessions-empty { color: var(--faint); font-size: 12px; padding: 6px 2px; }
 
@@ -1212,7 +1239,7 @@ function renderHtml(): string {
       return '<div class="srow" data-name="' + escapeHtml(s.name) + '" data-label="' + escapeHtml(s.label || '') + '">'
         + '<div class="srow-head">'
         +   '<span class="sdot' + (s.attached ? ' on' : '') + '"></span>'
-        +   '<span class="smeta"><span class="sname">' + escapeHtml(s.label || s.name) + '</span>'
+        +   '<span class="smeta"><span class="sname" title="เปิด/เข้าไปดู session นี้">' + escapeHtml(s.label || s.name) + '</span>'
         +     '<span class="ssub">' + escapeHtml(meta) + '</span></span>'
         +   '<button class="skill" title="Kill session" data-kill="' + escapeHtml(s.name) + '">✕</button>'
         +   '<span class="schev">' + CHEVRON + '</span>'
@@ -1224,6 +1251,11 @@ function renderHtml(): string {
     root.querySelectorAll('.srow').forEach((row) => {
       row.querySelector('.srow-head').addEventListener('click', (e) => {
         if (e.target.closest('.skill')) return; // kill handled separately
+        // กดที่ "ชื่อ session" = เข้าไปดูเลย (สิ่งที่คนคาดว่าจะเกิด) · ที่ว่างอื่น/chevron = กาง
+        if (e.target.closest('.sname')) {
+          vscode.postMessage({ type: 'attach_session', name: row.dataset.name, label: row.dataset.label });
+          return;
+        }
         toggleSess(row);
       });
       var prev = row.querySelector('.spreview');
@@ -1263,8 +1295,20 @@ function renderHtml(): string {
       return;
     }
     wins.innerHTML = windows.map((w) =>
-      '<div class="swin"><span class="wchev">▸</span>' + escapeHtml(w.index + ':' + w.name + ' ' + w.cmd) + '</div>'
+      '<div class="swin" data-win="' + w.index + '" title="เปิดหน้าต่างนี้ในเทอร์มินัล">'
+      + '<span class="wchev">▸</span>' + escapeHtml(w.index + ':' + w.name + ' ' + w.cmd) + '</div>'
     ).join('');
+    // แถวหน้าต่าง = ทางเข้าที่คนคาดว่าจะกดได้ (กด "1:john" แล้วอยากเห็น pane ของ john)
+    // ส่ง window ไปด้วย host จะ attach แล้วเลือกหน้าต่างนั้นให้
+    wins.querySelectorAll('.swin[data-win]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({
+          type: 'attach_session', name: name,
+          label: (row.dataset.label || ''), window: Number(el.dataset.win),
+        });
+      });
+    });
   }
 
   function run(command) { vscode.postMessage({ type: "run", command }); }
