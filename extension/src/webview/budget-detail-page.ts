@@ -119,23 +119,14 @@ function renderDetailShell(): string {
   .sc.active { color: var(--txt); background: var(--accentSoft); border-color: var(--accent); }
   #calBtn { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; }
   #calBtn svg { width: 13px; height: 13px; }
-  .calpanel { padding: 14px; margin-bottom: var(--secgap); max-width: 340px; }
-  .calhead { display: flex; align-items: center; justify-content: center; gap: 14px; margin-bottom: 12px; }
-  .calhead .caltitle { font-family: var(--mono); font-size: 12.5px; font-weight: 700; min-width: 150px; text-align: center; }
-  .calnav { width: 28px; height: 28px; border-radius: 7px; background: var(--card); border: 1px solid var(--border2); color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; font-family: var(--uifont); }
-  .calnav:hover { border-color: var(--accent); color: var(--txt); }
-  .calgrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
-  .calgrid .dow { text-align: center; font-family: var(--mono); font-size: 9px; letter-spacing: .5px; color: var(--faint); padding: 3px 0; }
-  .calgrid .cd { position: relative; height: 30px; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11.5px; color: var(--muted); border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
-  .calgrid .cd.blank { cursor: default; }
-  .calgrid .cd:not(.blank):hover { border-color: var(--accent); color: var(--txt); }
-  .calgrid .cd.has::after { content: ""; position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); width: 4px; height: 4px; border-radius: 50%; background: var(--accent2); }
-  .calgrid .cd.in { background: var(--accentSoft); color: var(--txt); border-radius: 0; }
-  .calgrid .cd.s { background: var(--accent); color: #fff; border-top-left-radius: 7px; border-bottom-left-radius: 7px; }
-  .calgrid .cd.e { background: var(--accent); color: #fff; border-top-right-radius: 7px; border-bottom-right-radius: 7px; }
-  .calgrid .cd.s.has::after, .calgrid .cd.e.has::after { background: #fff; }
-  .calgrid .cd.today { font-weight: 700; box-shadow: inset 0 0 0 1px var(--border2); }
-  .calfoot { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .calpanel { padding: 16px 18px; margin-bottom: var(--secgap); }
+  .caldates { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px 30px; margin-bottom: 4px; }
+  .calrow { display: flex; align-items: center; gap: 8px; }
+  .calrow .cllbl { width: 42px; flex: none; font-family: var(--mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--faint); }
+  .csel { flex: 1; min-width: 0; height: 30px; padding: 0 8px; border-radius: 8px; background: var(--card); border: 1px solid var(--border2); color: var(--txt); font-family: var(--mono); font-size: 11.5px; cursor: pointer; }
+  .csel:focus { outline: none; border-color: var(--accent); }
+  .csel.y { flex: 1.3; } .csel.m { flex: 1.1; } .csel.d { flex: 0.9; }
+  .calfoot { display: flex; align-items: center; gap: 10px; margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 11px; color: var(--muted); }
   .calfoot .cclr { margin-left: auto; height: 26px; padding: 0 11px; border-radius: 7px; background: var(--card); border: 1px solid var(--border2); color: var(--muted); cursor: pointer; font-size: 11px; font-family: var(--uifont); }
   .calfoot .cclr:hover { border-color: var(--accent); color: var(--txt); }
 
@@ -232,12 +223,10 @@ function renderDetailShell(): string {
   </div>
 
   <div class="pc calpanel" id="calPanel" style="display:none">
-    <div class="calhead">
-      <button class="calnav" id="calPrev">‹</button>
-      <span class="caltitle" id="calTitle">—</span>
-      <button class="calnav" id="calNext">›</button>
+    <div class="caldates">
+      <div class="calrow"><span class="cllbl">Start</span><select class="csel y" id="sY"></select><select class="csel m" id="sM"></select><select class="csel d" id="sD"></select></div>
+      <div class="calrow"><span class="cllbl">End</span><select class="csel y" id="eY"></select><select class="csel m" id="eM"></select><select class="csel d" id="eD"></select></div>
     </div>
-    <div class="calgrid" id="calGrid"></div>
     <div class="calfoot"><span id="calFoot"></span><button class="cclr" id="calClear">Clear</button></div>
   </div>
 
@@ -290,10 +279,15 @@ function renderDetailShell(): string {
   function emptyCats() { return { cacheRead: { tokens: 0, usd: 0 }, cacheWrite: { tokens: 0, usd: 0 }, output: { tokens: 0, usd: 0 }, input: { tokens: 0, usd: 0 } }; }
   function addCats(dst, src) { CATS.forEach(function (c) { var s = src[c.key] || { tokens: 0, usd: 0 }; dst[c.key].tokens += s.tokens || 0; dst[c.key].usd += s.usd || 0; }); }
 
-  var STATE = { scope: { level: "week" }, data: null,
-    cal: { open: false, viewY: (new Date()).getFullYear(), viewM: (new Date()).getMonth(), selStart: null, selEnd: null } };
+  var STATE = { scope: { level: "week" }, data: null, cal: { open: false, s: "", e: "" } };
   function ymd(d) { return d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate()); }
   function shortD(s) { var p = String(s).split("-"); return (+p[2]) + " " + MONTHS[(+p[1]) - 1]; }
+  // "20 Jul – 28 Jul" within one year, "1 Jan 2024 – 31 Dec 2026" when the years differ.
+  function rangeLabel(from, to) {
+    var fp = from.split("-"), tp = to.split("-"), diffY = fp[0] !== tp[0];
+    function one(p) { return (+p[2]) + " " + MONTHS[(+p[1]) - 1] + (diffY ? " " + p[0] : ""); }
+    return one(fp) + " – " + one(tp);
+  }
 
   // Total cost of a candidate scope, straight from the hourly buckets.
   function costForScope(sc) {
@@ -346,15 +340,26 @@ function renderDetailShell(): string {
       title = "Daily · " + days[0].getDate() + " – " + days[7].getDate() + " " + MONTHS[days[7].getMonth()] + " " + y;
       days.forEach(function (d) { var dk = ymd(d); var bw = sumPrefix(dk + " "); buckets.push({ label: d.getDate() + " " + MONTHS[d.getMonth()], cost: bw.cost, cats: bw.cats, drill: bw.cost > 0 ? { level: "day", day: dk } : null }); });
     } else if (sc.level === "range") {
-      unit = "day";
       var fd = new Date(sc.from + "T00:00:00"), td = new Date(sc.to + "T00:00:00");
       if (fd > td) { var tmp = fd; fd = td; td = tmp; }
-      title = "Daily · " + shortD(ymd(fd)) + " – " + shortD(ymd(td));
-      var cur = new Date(fd), guard = 0;
-      while (cur <= td && guard < 800) {
-        var dk = ymd(cur); var br = sumPrefix(dk + " ");
-        buckets.push({ label: cur.getDate() + " " + MONTHS[cur.getMonth()], cost: br.cost, cats: br.cats, drill: br.cost > 0 ? { level: "day", day: dk } : null });
-        cur.setDate(cur.getDate() + 1); guard++;
+      var spanDays = Math.round((td - fd) / 86400000) + 1;
+      if (spanDays <= 62) { // short range → one bar per day
+        unit = "day"; title = "Daily · " + rangeLabel(ymd(fd), ymd(td));
+        var cur = new Date(fd);
+        while (cur <= td) {
+          var dk = ymd(cur); var br = sumPrefix(dk + " ");
+          buckets.push({ label: cur.getDate() + " " + MONTHS[cur.getMonth()], cost: br.cost, cats: br.cats, drill: br.cost > 0 ? { level: "day", day: dk } : null });
+          cur.setDate(cur.getDate() + 1);
+        }
+      } else { // long / multi-year range → one bar per month (drill into the month for days)
+        unit = "month"; title = "Monthly · " + rangeLabel(ymd(fd), ymd(td));
+        var mcur = new Date(fd.getFullYear(), fd.getMonth(), 1);
+        var mend = new Date(td.getFullYear(), td.getMonth(), 1), mg = 0;
+        while (mcur <= mend && mg < 600) {
+          var mk = mcur.getFullYear() + "-" + p2(mcur.getMonth() + 1); var bm = sumPrefix(mk + "-");
+          buckets.push({ label: MONTHS[mcur.getMonth()] + " " + String(mcur.getFullYear()).slice(2), cost: bm.cost, cats: bm.cats, drill: bm.cost > 0 ? { level: "month", month: mk } : null });
+          mcur.setMonth(mcur.getMonth() + 1); mg++;
+        }
       }
     } else { // day
       unit = "hour"; var dp = sc.day.split("-");
@@ -367,7 +372,7 @@ function renderDetailShell(): string {
   function crumbLabel(sc) {
     var now = new Date();
     var out = [{ set: { level: "year" }, txt: String(now.getFullYear()), cur: sc.level === "year" }];
-    if (sc.level === "range") { out.push({ set: null, txt: shortD(sc.from) + " – " + shortD(sc.to), cur: true }); return out; }
+    if (sc.level === "range") { out.push({ set: null, txt: rangeLabel(sc.from, sc.to), cur: true }); return out; }
     if (sc.level === "week") out.push({ set: { level: "week" }, txt: "This week", cur: true });
     if (sc.level === "month" || (sc.level === "day" && sc.month)) {
       var mk = sc.month || (sc.day ? sc.day.slice(0, 7) : "");
@@ -509,11 +514,7 @@ function renderDetailShell(): string {
     var t = e.target;
     if (t.closest && t.closest("#back")) { post("close"); return; }
     if (t.closest && t.closest("#calBtn")) { STATE.cal.open ? (STATE.cal.open = false) : openCalendar(); renderCal(); return; }
-    if (t.closest && t.closest("#calPrev")) { var c1 = STATE.cal; if (--c1.viewM < 0) { c1.viewM = 11; c1.viewY--; } renderCal(); return; }
-    if (t.closest && t.closest("#calNext")) { var c2 = STATE.cal; if (++c2.viewM > 11) { c2.viewM = 0; c2.viewY++; } renderCal(); return; }
     if (t.closest && t.closest("#calClear")) { clearCalSel(); setScopeShortcut("week"); return; }
-    var cd = t.closest ? t.closest(".cd[data-day]") : null;
-    if (cd) { pickDay(cd.getAttribute("data-day")); return; }
     var sc = t.closest ? t.closest("#shortcuts .sc") : null;
     if (sc && sc.hasAttribute("data-sc")) { setScopeShortcut(sc.getAttribute("data-sc")); return; }
     var cr = t.closest ? t.closest(".cr[data-crumb]") : null;
@@ -532,50 +533,69 @@ function renderDetailShell(): string {
   }
   function post(type) { vscode.postMessage({ type: type }); }
 
-  // ── inline range calendar: click a day for the start, click again for the end ──
-  var DOW = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
-  function clearCalSel() { STATE.cal.selStart = null; STATE.cal.selEnd = null; }
-  function openCalendar() {
-    var cal = STATE.cal, sc = STATE.scope;
-    // aim the month view at wherever we currently are
-    if (sc.level === "range") { var fp = sc.from.split("-"); cal.viewY = +fp[0]; cal.viewM = +fp[1] - 1; }
-    else if (sc.level === "day") { var dp = sc.day.split("-"); cal.viewY = +dp[0]; cal.viewM = +dp[1] - 1; }
-    else if (sc.level === "month") { var mp = sc.month.split("-"); cal.viewY = +mp[0]; cal.viewM = +mp[1] - 1; }
-    cal.open = true; renderCal();
+  // ── range picker: separate Year / Month / Day dropdowns for start and end ──
+  function clearCalSel() { STATE.cal.s = ""; STATE.cal.e = ""; }
+  function calParts(str) { if (!str) return { y: "", m: "", d: "" }; var p = str.split("-"); return { y: p[0], m: String(+p[1]), d: String(+p[2]) }; }
+  function calJoin(y, m, d) { return (y && m && d) ? y + "-" + p2(+m) + "-" + p2(+d) : ""; }
+  function dimOf(y, m) { return (y && m) ? new Date(+y, +m, 0).getDate() : 31; }
+  // Years that appear in this project's data, current year always included, plus a 2-year floor.
+  function yearsRange() {
+    var now = new Date().getFullYear(), min = now, h = STATE.data ? STATE.data.hourly : {};
+    for (var k in h) { var y = +k.slice(0, 4); if (y && y < min) min = y; }
+    min = Math.min(min, now - 2);
+    var out = []; for (var y2 = now; y2 >= min; y2--) out.push(y2);
+    return out;
   }
-  function pickDay(ds) {
-    var cal = STATE.cal;
-    if (!cal.selStart || cal.selEnd) { cal.selStart = ds; cal.selEnd = null; }   // begin a fresh selection
-    else if (ds < cal.selStart) { cal.selStart = ds; cal.selEnd = null; }         // earlier click → new start
-    else { cal.selEnd = ds; STATE.scope = { level: "range", from: cal.selStart, to: cal.selEnd }; }
-    render();
+  function optList(vals, sel, labels) {
+    var o = '<option value="">—</option>';
+    for (var i = 0; i < vals.length; i++) { var v = vals[i], lab = labels ? labels[i] : v; o += '<option value="' + v + '"' + (String(v) === String(sel) ? " selected" : "") + ">" + lab + "</option>"; }
+    return o;
+  }
+  var MNUM = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+  function fillCal() {
+    [["s", STATE.cal.s], ["e", STATE.cal.e]].forEach(function (pair) {
+      var p = pair[0], parts = calParts(pair[1]);
+      var dim = dimOf(parts.y, parts.m), dsel = (parts.d && +parts.d > dim) ? String(dim) : parts.d;
+      var days = []; for (var d = 1; d <= dim; d++) days.push(d);
+      document.getElementById(p + "Y").innerHTML = optList(yearsRange(), parts.y);
+      document.getElementById(p + "M").innerHTML = optList(MNUM, parts.m, MONTHS);
+      document.getElementById(p + "D").innerHTML = optList(days, dsel);
+    });
+  }
+  function openCalendar() {
+    var sc = STATE.scope;
+    if (sc.level === "range") { STATE.cal.s = sc.from; STATE.cal.e = sc.to; }
+    else if (sc.level === "day") { STATE.cal.s = sc.day; STATE.cal.e = sc.day; }
+    else { var md = mostRecentDay(); STATE.cal.s = md || ""; STATE.cal.e = md || ""; }
+    STATE.cal.open = true; renderCal();
+  }
+  // Read the six selects back, re-clamp day counts, and apply the range once both ends are complete.
+  function onCalChange() {
+    ["s", "e"].forEach(function (p) {
+      STATE.cal[p] = calJoin(document.getElementById(p + "Y").value, document.getElementById(p + "M").value, document.getElementById(p + "D").value);
+    });
+    fillCal();
+    var s = STATE.cal.s, e = STATE.cal.e;
+    if (s && e) { var from = s, to = e; if (from > to) { from = e; to = s; } STATE.scope = { level: "range", from: from, to: to }; render(); }
+    else { document.getElementById("calFoot").textContent = (s || e) ? ((s ? shortD(s) : "…") + " – " + (e ? shortD(e) : "…")) : "Pick a start and end date"; renderCal(); }
   }
   function renderCal() {
     var cal = STATE.cal, sc = STATE.scope;
     var txt = document.getElementById("calBtnTxt");
-    if (txt) txt.textContent = sc.level === "range" ? shortD(sc.from) + " – " + shortD(sc.to) : "Custom range";
+    if (txt) txt.textContent = sc.level === "range" ? rangeLabel(sc.from, sc.to) : "Custom range";
     var btn = document.getElementById("calBtn");
     if (btn) btn.classList[sc.level === "range" ? "add" : "remove"]("active");
     var panel = document.getElementById("calPanel");
     if (panel) panel.style.display = cal.open ? "block" : "none";
     if (!cal.open) return;
-    document.getElementById("calTitle").textContent = MONTHS[cal.viewM] + " " + cal.viewY;
-    var first = new Date(cal.viewY, cal.viewM, 1).getDay();
-    var dim = new Date(cal.viewY, cal.viewM + 1, 0).getDate();
-    var today = ymd(new Date()), s = cal.selStart, e = cal.selEnd;
-    var html = DOW.map(function (d) { return '<div class="dow">' + d + "</div>"; }).join("");
-    for (var i = 0; i < first; i++) html += '<div class="cd blank"></div>';
-    for (var d = 1; d <= dim; d++) {
-      var ds = cal.viewY + "-" + p2(cal.viewM + 1) + "-" + p2(d), cls = "cd";
-      if (sumPrefix(ds + " ").cost >= 0.005) cls += " has";
-      if (s && e) { if (ds === s) cls += " s"; if (ds === e) cls += " e"; if (ds > s && ds < e) cls += " in"; }
-      else if (s && ds === s) cls += " s e";
-      if (ds === today) cls += " today";
-      html += '<div class="' + cls + '" data-day="' + ds + '">' + d + "</div>";
-    }
-    document.getElementById("calGrid").innerHTML = html;
-    document.getElementById("calFoot").textContent = s ? (shortD(s) + (e ? " – " + shortD(e) : " – …")) : "Click a day to set the start, then click again for the end";
+    fillCal();
+    var s = cal.s, e = cal.e;
+    document.getElementById("calFoot").textContent = (s || e) ? ((s ? shortD(s) : "…") + " – " + (e ? shortD(e) : "…")) : "Pick a start and end date";
   }
+  document.addEventListener("change", function (e) {
+    var t = e.target;
+    if (t && t.classList && t.classList.contains("csel")) onCalChange();
+  });
 
   window.addEventListener("message", function (ev) {
     var m = ev.data; if (!m || m.type !== "usage") return;
