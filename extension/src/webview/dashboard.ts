@@ -38,6 +38,8 @@ import {
   parseTmuxSessions,
   parseTmuxWindows,
   sessionIsIdle,
+  sessionClients,
+  pickAttachAction,
   parseOraclesJson,
   projectFromPaths,
   loneOracleName,
@@ -235,40 +237,59 @@ export function openDashboardPanel(
         // passes the shell-safety whitelist.
         if (!_lastSessionNames.has(name) || !isSafeSessionName(name)) return;
 
-        const existing = _sessionTerminals.get(name);
-        if (existing && existing.exitStatus === undefined) {
-          existing.show(false); // reuse — focus the already-open terminal
-          return;
-        }
-
-        // Also reveal an orchestrator tab already attached to this session
-        // (opened by the "⏮ ทำต่อ" button / launchOrchestrator, which tracks its
-        // terminals in a separate map). Match its naming: `orchestrator: <orch>`
-        // for a base session `NN-<orch>`, or `… · <session>` for a twin. This
-        // focuses the existing tab instead of spawning a duplicate `tmux attach`
-        // (a 2nd client would also flip the session dot green→grey).
+        // A terminal we already hold for this session, or an orchestrator tab
+        // already pointed at it (opened by the "⏮ ทำต่อ" button /
+        // launchOrchestrator, which tracks its terminals in a separate map).
+        // Match its naming: `orchestrator: <orch>` for a base session
+        // `NN-<orch>`, or `… · <session>` for a twin.
         const orchStem = name.replace(/^\d+-/, "");
-        const orchTerm = vscode.window.terminals.find(
-          (t) =>
-            t.exitStatus === undefined &&
-            (t.name === `orchestrator: ${orchStem}` || t.name.endsWith(` · ${name}`)),
-        );
-        if (orchTerm) {
-          orchTerm.show(false);
+        const reusable =
+          (() => {
+            const t = _sessionTerminals.get(name);
+            return t && t.exitStatus === undefined ? t : undefined;
+          })() ??
+          vscode.window.terminals.find(
+            (t) =>
+              t.exitStatus === undefined &&
+              (t.name === `orchestrator: ${orchStem}` || t.name.endsWith(` · ${name}`)),
+          );
+
+        // ⛔ "terminal ยังไม่ตาย" ไม่ใช่คำถามที่ถูก — `tmux attach` จบไปได้โดยที่แท็บยัง
+        //    เปิดอยู่เป็นเชลล์เปล่า แล้วโค้ดเดิม show() แท็บซากนั้นแล้ว return =
+        //    กดจาก dashboard ไม่มีอะไรขึ้นตลอดกาล (เจอจริง run newflow4 2026-08-04:
+        //    session_attached ไหล 1 -> 0 กลางรัน) · ถามให้ถูกคือ "เดี๋ยวนี้มี client
+        //    เกาะ session อยู่ไหม" แล้วยิง attach ซ้ำลงแท็บเดิมเมื่อไม่มี.
+        const action = pickAttachAction(!!reusable, sessionClients(await listTmuxSessions(), name));
+        if (action === "gone") {
+          void vscode.window.showWarningMessage(`tmux session '${name}' ปิดไปแล้ว`);
+          await pushSessions(panel); // drop the stale row instead of leaving a dead button
+          return;
+        }
+        if (action === "focus") {
+          reusable!.show(false);
           return;
         }
 
-        // Title the tab with the project (the part before " / <team>" in the
-        // label), e.g. "agentskill-marketplace-v9", instead of the raw pin
-        // "tmux: 09-foreman-2". Unlabeled sessions keep the old "tmux: <name>".
-        const proj = label.split(" / ")[0].trim();
-        const term = vscode.window.createTerminal({
-          name: proj || "tmux: " + name,
-          location: vscode.TerminalLocation.Editor,
-        });
-        _sessionTerminals.set(name, term);
-        trackClaudeTerminal(term, name); // context pill follows this attached REPL
-        term.show(false);
+        let term: vscode.Terminal;
+        if (action === "reattach") {
+          // Typing into the husk is safe here: a tab still RUNNING `tmux attach`
+          // would mean clients > 0, which routes to "focus" above — so reaching
+          // this branch means that shell is back at a prompt.
+          term = reusable!;
+          term.show(false);
+        } else {
+          // Title the tab with the project (the part before " / <team>" in the
+          // label), e.g. "agentskill-marketplace-v9", instead of the raw pin
+          // "tmux: 09-foreman-2". Unlabeled sessions keep the old "tmux: <name>".
+          const proj = label.split(" / ")[0].trim();
+          term = vscode.window.createTerminal({
+            name: proj || "tmux: " + name,
+            location: vscode.TerminalLocation.Editor,
+          });
+          _sessionTerminals.set(name, term);
+          trackClaudeTerminal(term, name); // context pill follows this attached REPL
+          term.show(false);
+        }
 
         const command = buildAttachCommand(name);
         let launched = false;

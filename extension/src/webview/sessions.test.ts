@@ -15,6 +15,8 @@ import {
   teamFromOrchesLabel,
   parseTmuxWindows,
   sessionIsIdle,
+  sessionClients,
+  pickAttachAction,
 } from "./sessions";
 
 test("parseTmuxWindows: parses index/name/cmd, preserves spaces in cmd", () => {
@@ -76,17 +78,18 @@ test("parseTmuxSessions parses tab-separated session lines (with orches label + 
     "soulbrew\t1\t0\tbash\tsci-calc / brew\tfrontend\t/home/u/sb\n" +
     "twin\t1\t2\tclaude\t\t\t/home/u/tw"; // 2 clients attached (session_attached is a COUNT), blank window name
   expect(parseTmuxSessions(raw)).toEqual([
-    { name: "carbon", windows: 2, attached: true, cmd: "claude", windowName: "main", cwd: "/home/u/bob" },
+    { name: "carbon", windows: 2, attached: true, clients: 1, cmd: "claude", windowName: "main", cwd: "/home/u/bob" },
     {
       name: "soulbrew",
       windows: 1,
       attached: false,
+      clients: 0,
       cmd: "bash",
       orchesLabel: "sci-calc / brew",
       windowName: "frontend",
       cwd: "/home/u/sb",
     },
-    { name: "twin", windows: 1, attached: true, cmd: "claude", cwd: "/home/u/tw" },
+    { name: "twin", windows: 1, attached: true, clients: 2, cmd: "claude", cwd: "/home/u/tw" },
   ]);
 });
 
@@ -193,4 +196,57 @@ test("teamFromOrchesLabel: recovers team from '<project> / <team>', else undefin
   expect(teamFromOrchesLabel(undefined, "rpn")).toBeUndefined();
   expect(teamFromOrchesLabel("rpn / ", "rpn")).toBeUndefined(); // blank team
   expect(teamFromOrchesLabel("  rpn / brew  ", "rpn")).toBe("brew"); // tolerant of stray ws
+});
+
+// ── click→attach: reuse an open tab ONLY while it is still attached to tmux ────
+// ⛔ บั๊กจริง (run agentskill-marketplace-newflow4, 2026-08-04): เงื่อนไข reuse เดิม
+//    เช็คแค่ `terminal.exitStatus === undefined` = "แท็บยังไม่ตาย" ซึ่งไม่ใช่คำถามที่ถูก —
+//    เมื่อ `tmux attach` ในแท็บนั้นจบไป (detach / session ตายแล้วเปิดใหม่ / กด prefix-d)
+//    แท็บยังเปิดอยู่เป็นเชลล์เปล่า → คลิกครั้งต่อไปแค่ show() แท็บซาก แล้ว return
+//    **ไม่ยิง attach ใหม่อีกเลย** = "กดแล้วไม่มีอะไรขึ้น" ตลอดกาล
+//    ของจริงที่วัดได้: session_attached 1 -> 0 ระหว่างรัน แล้วกดจาก dashboard ไม่ขึ้น
+//    คำถามที่ถูกคือ "ตอนนี้มี client เกาะ session อยู่ไหม" → clients > 0 = focus พอ,
+//    clients == 0 = แท็บเป็นซาก ต้องยิง attach ซ้ำ, ไม่มีแท็บ = สร้างใหม่
+test("parseTmuxSessions: clients = จำนวน client จริง (ไม่ใช่แค่ boolean)", () => {
+  const raw = [
+    "a\t1\t0\tclaude\t\tw\t/p", // detached
+    "b\t2\t1\tclaude\t\tw\t/p", // 1 client
+    "c\t1\t2\tbash\t\tw\t/p", // 2 clients (dashboard + orchestrator tab)
+  ].join("\n");
+  const s = parseTmuxSessions(raw);
+  expect(s.map((x) => x.clients)).toEqual([0, 1, 2]);
+  expect(s.map((x) => x.attached)).toEqual([false, true, true]); // เดิมยังต้องถูก
+});
+
+test("parseTmuxSessions: clients ที่อ่านไม่ออก → 0 (ไม่ใช่ NaN)", () => {
+  expect(parseTmuxSessions("a\t1\t\tclaude\t\tw\t/p")[0].clients).toBe(0);
+  expect(parseTmuxSessions("a\t1\tzz\tclaude\t\tw\t/p")[0].clients).toBe(0);
+});
+
+test("sessionClients: หาจำนวน client ตามชื่อ, ไม่เจอ = -1 (session ตายแล้ว)", () => {
+  const list = [
+    { name: "09-foreman", clients: 0 },
+    { name: "carbon", clients: 2 },
+  ];
+  expect(sessionClients(list, "09-foreman")).toBe(0);
+  expect(sessionClients(list, "carbon")).toBe(2);
+  expect(sessionClients(list, "gone")).toBe(-1);
+  expect(sessionClients([], "09-foreman")).toBe(-1);
+  // ⛔ ต้องเทียบชื่อแบบตรงตัว — tmux prefix-match เคยทำให้ kill ผิด session มาแล้ว
+  expect(sessionClients(list, "09-forem")).toBe(-1);
+});
+
+test("pickAttachAction: reuse ได้เฉพาะตอนยัง attach อยู่จริง", () => {
+  // ไม่มีแท็บ = เปิดใหม่
+  expect(pickAttachAction(false, 1)).toBe("create");
+  expect(pickAttachAction(false, 0)).toBe("create");
+  // มีแท็บ + ยังมี client เกาะ = โฟกัสแท็บนั้นพอ (ห้ามยิง attach ซ้ำ — client ที่ 2
+  // จะทำ tmux ย่อ window ตามจอที่เล็กกว่า + จุดสถานะกระพริบ)
+  expect(pickAttachAction(true, 1)).toBe("focus");
+  expect(pickAttachAction(true, 3)).toBe("focus");
+  // มีแท็บ แต่ไม่มี client = แท็บซาก -> ต้อง attach ใหม่ (นี่คือบั๊กที่แก้)
+  expect(pickAttachAction(true, 0)).toBe("reattach");
+  // session ไม่อยู่ในลิสต์แล้ว = ตายไปแล้ว -> ห้าม attach (จะขึ้น can't find session)
+  expect(pickAttachAction(true, -1)).toBe("gone");
+  expect(pickAttachAction(false, -1)).toBe("gone");
 });

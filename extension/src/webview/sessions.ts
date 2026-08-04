@@ -7,6 +7,7 @@ export interface TmuxSession {
   name: string;
   windows: number;
   attached: boolean;
+  clients: number; // session_attached as a COUNT — 0 = nothing is displaying it
   cmd: string; // active pane's current command (claude / maw / bash …)
   cwd: string; // active pane's current path
   orchesLabel?: string; // tmux user-option @orches_label (authoritative display label)
@@ -61,6 +62,7 @@ export function parseTmuxSessions(raw: string): TmuxSession[] {
       // session_attached is a COUNT of clients (0, 1, 2, …) — attached when > 0.
       // (=== "1" was wrong: a 2nd client, e.g. dashboard + orchestrator tab, made it "2".)
       attached: !!parts[2] && parts[2] !== "0",
+      clients: Number.parseInt(parts[2], 10) || 0,
       cmd: parts[3] ?? "",
       orchesLabel: parts[4] || undefined,
       windowName: parts[5] || undefined,
@@ -68,6 +70,32 @@ export function parseTmuxSessions(raw: string): TmuxSession[] {
     });
   }
   return out;
+}
+
+/** Live client count for `name` out of a fresh `listTmuxSessions()`, or -1 when
+ *  the session is not there any more. Exact-name compare on purpose: tmux
+ *  prefix-matches targets, which has already killed the wrong session once. */
+export function sessionClients(sessions: Pick<TmuxSession, "name" | "clients">[], name: string): number {
+  const hit = sessions.find((s) => s.name === name);
+  return hit ? hit.clients : -1;
+}
+
+/** What a click on a session row should DO. `hasLiveTerminal` = we still hold a
+ *  terminal for this session whose shell has not exited; `clients` comes from
+ *  sessionClients (-1 = session gone).
+ *
+ *  ⛔ Why this exists: reuse used to be gated on "the terminal is alive", but a
+ *  terminal outlives the `tmux attach` running INSIDE it. Once that attach ends
+ *  (detach, prefix-d, session restarted) the tab sits at a bare prompt, and the
+ *  old code focused that husk and returned — so the click did nothing, forever.
+ *  The right question is whether anything is attached to the session RIGHT NOW. */
+export type AttachAction = "focus" | "reattach" | "create" | "gone";
+export function pickAttachAction(hasLiveTerminal: boolean, clients: number): AttachAction {
+  if (clients < 0) return "gone"; // session died since we listed it — attaching would just error
+  if (!hasLiveTerminal) return "create";
+  // Something is already displaying it: focus that tab. A 2nd client would make
+  // tmux shrink the window to the smaller viewport and flip the status dot.
+  return clients > 0 ? "focus" : "reattach";
 }
 
 export interface TmuxWindow {
