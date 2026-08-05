@@ -54,23 +54,18 @@ function shSingleQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
-/** Appended to the kickoff when the "โหมดถาม" toggle is on. The literal word
- *  "โหมดถาม" here is the trigger the /orches-drive skill scans for to switch on
- *  ask mode: Step 1 runs the `grilling` interview, Step 3 runs the `scrutinize`
- *  plan review. Keep "โหมดถาม" in this string or the skill won't detect it. */
-const ASK_MODE_KICKOFF =
-  "[โหมดถาม เปิด] Step 1: สัมภาษณ์ requirement ให้ชัดด้วยสกิล grilling (ถามทีละคำถาม รอคำตอบก่อนถามต่อ)." +
-  " Step 3: ก่อนแจกงาน worker รีวิวแผน sprint ด้วยสกิล scrutinize (ถาม intent/ทางที่ง่ายกว่า + verdict).";
-
 /** The kickoff prompt injected into the woken orchestrator so it immediately
  *  runs the /orches-drive loop (NOT the bootstrap) with its team context —
- *  turning the fast code-wake into the full /orches flow. `askMode` appends the
- *  โหมดถาม trigger (grilling interview + scrutinize plan review). */
+ *  turning the fast code-wake into the full /orches flow.
+ *
+ *  ⛔ เคยมีพารามิเตอร์ `askMode` ที่ต่อท้าย trigger "โหมดถาม" (grilling + scrutinize)
+ *  ถอดออก 2026-08-05 ตามที่ user สั่ง: ทั้งฟีเจอร์ไม่เคยถูกใช้เลย และฝั่ง /orches-drive
+ *  ก็ถอดสายออกหมดแล้ว → ส่ง trigger ไปก็ไม่มีใครอ่าน (สกิล grilling/scrutinize ยังอยู่
+ *  ในเครื่อง เก็บไว้ implement ที่อื่นในอนาคต) */
 export function buildKickoffPrompt(
   team: string,
   orchestrator: string,
   workers: string[],
-  askMode = false,
 ): string {
   const w = workers.length
     ? workers.join(", ")
@@ -85,7 +80,6 @@ export function buildKickoffPrompt(
       ` เพราะตัวงานที่ dispatch พิน absolute worktree path ของ project อยู่แล้ว.`,
     `อย่ารัน /orches (นั่นคือ bootstrap เลือกทีม/ปลุก — คุณผ่านมาแล้ว) และอย่า dispatch งานให้ตัวเอง.`,
   ];
-  if (askMode) lines.push(ASK_MODE_KICKOFF);
   return lines.join(" ");
 }
 
@@ -100,7 +94,6 @@ export function buildResumeKickoff(
   team: string,
   orchestrator: string,
   workers: string[],
-  askMode = false,
 ): string {
   const w = workers.length
     ? workers.join(", ")
@@ -115,9 +108,6 @@ export function buildResumeKickoff(
     `จากนั้นวน /orches-drive ปกติ: แจกงาน worker → poll .orches-done → verify → git merge เข้า main → capture memory. อย่า dispatch งานให้ตัวเอง.`,
     `อย่ารัน /orches (bootstrap — คุณผ่านมาแล้ว).`,
   ];
-  // RESUME ข้าม Step 0-1 (ไม่สัมภาษณ์ใหม่) → grilling ไม่ทำงาน; แต่ trigger นี้ยังเปิด
-  // scrutinize ที่ plan gate ตอนเสนอ sprint ถัดไป.
-  if (askMode) lines.push(ASK_MODE_KICKOFF);
   return lines.join(" ");
 }
 

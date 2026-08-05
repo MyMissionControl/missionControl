@@ -635,10 +635,9 @@ export async function launchOrchestrator(opts: {
   team: OracleTeam;
   mode: "new" | "resume";
   project?: ResumableProject;
-  askMode?: boolean;
   projectName?: string;
 }): Promise<{ error?: string; cancelled?: boolean; session?: string; terminal?: vscode.Terminal }> {
-  const { orch, team, mode, project, askMode = false, projectName } = opts;
+  const { orch, team, mode, project, projectName } = opts;
   if (!isSafeOracleName(orch)) return { error: `ชื่อ orchestrator ไม่ปลอดภัย: ${orch}` };
   if (mode === "resume" && !project) return { error: "resume แต่ไม่มี project" };
 
@@ -678,8 +677,8 @@ export async function launchOrchestrator(opts: {
     .filter(isSafeOracleName); // same whitelist as the orchestrator name — keeps unsafe roster entries out of the dispatch list AND the pane-layout shell args
   let kickoff =
     mode === "resume" && project
-      ? buildResumeKickoff(project.name, project.path, team.name, orch, workers, askMode)
-      : buildKickoffPrompt(team.name, orch, workers, askMode);
+      ? buildResumeKickoff(project.name, project.path, team.name, orch, workers)
+      : buildKickoffPrompt(team.name, orch, workers);
   if (mode === "new" && projectName && projectName.trim())
     kickoff += `\n\nโปรเจคชื่อ '${projectName.trim()}' — ใช้ชื่อนี้เป๊ะเป็นชื่อ project/repo (ผ่านการเช็คว่างแล้ว) · ⛔ ห้ามตั้งชื่อใหม่/ห้าม bump -vN เอง`;
 
@@ -796,23 +795,11 @@ export async function startOrchestratorCommand(_context: vscode.ExtensionContext
   }
   if (!orch) return;
 
-  // 3) โหมดสัมภาษณ์: ปกติ vs โหมดถาม (grilling + scrutinize). Default = ปกติ.
-  const askPick = await vscode.window.showQuickPick(
-    [
-      { label: "ปกติ", description: "discuss requirement แบบเดิม", ask: false },
-      {
-        label: "🔎 โหมดถาม",
-        description: "สัมภาษณ์ requirement ละเอียด (grilling) + รีวิวแผนก่อนลงมือ (scrutinize)",
-        ask: true,
-      },
-    ],
-    { title: `${orch} — โหมดสัมภาษณ์ requirement?`, placeHolder: "โหมดถาม = ถามละเอียดขึ้นก่อนย่อยงาน" },
-  );
-  if (!askPick) return;
-
-  // 4) wake + attach (fresh build kickoff). Resume flow goes through the
+  // 3) wake + attach (fresh build kickoff). Resume flow goes through the
   //    dashboard screens (launchOrchestrator with mode:"resume").
-  const r = await launchOrchestrator({ orch, team, mode: "new", askMode: askPick.ask });
+  //    ⛔ เคยมีขั้นถาม "ปกติ vs โหมดถาม" (grilling + scrutinize) คั่นตรงนี้ — ถอดออก 2026-08-05
+  //    (user สั่ง: ไม่เคยได้ใช้เลย) · ถอดทั้งขั้น ไม่ใช่เหลือ QuickPick ที่มีตัวเลือกเดียวให้กดผ่าน
+  const r = await launchOrchestrator({ orch, team, mode: "new" });
   if (r.cancelled) return;
   if (r.error) {
     vscode.window.showErrorMessage(`Mission Control: ${r.error}`);

@@ -56,7 +56,6 @@ interface WizState {
   projects: ResumableProject[];
   project?: ResumableProject; // set → resume that project; unset → fresh build
   team?: OracleTeam;
-  askMode?: boolean; // "โหมดถาม" toggle — grilling interview + scrutinize plan review
   newName?: string; // ชื่อ project ที่ user ตั้งใน name-popup (mode "new") → ส่งเข้า kickoff
   archivedView?: boolean; // showing the deleted-projects list instead of live projects
   archived?: boolean; // currently viewing a deleted project's docs (read-only)
@@ -324,8 +323,6 @@ async function pushTeamsScreen(panel: vscode.WebviewPanel) {
     subtitle: _st?.project ? `project: ${_st.project.name}` : "เลือก oracle-team",
     canBack: true, // มาจากหน้า Projects เสมอ → กลับได้ตลอด
     githubUrl, // null → the client hides the GitHub button
-    // โหมดถาม toggle เฉพาะ build ใหม่ (ยังไม่ได้เลือก project) — resume ยังไม่รองรับ
-    askable: !_st?.project,
     items: ordered.map((t) => ({
       name: t.name,
       isDefault: t.name === def,
@@ -372,18 +369,16 @@ function pushOrchScreen(panel: vscode.WebviewPanel, team: OracleTeam) {
     type: "screen_orch",
     title: `${team.name} — เลือก orchestrator`,
     subtitle: "ทีมนี้มี orchestrator หลายตัว",
-    askable: !_st?.project,
     items: team.orchestrators.map((o) => ({ name: o })),
   });
 }
 
 /** Team chosen → 1 orchestrator auto-launches; >1 asks; 0 guides. */
-function pickTeam(panel: vscode.WebviewPanel, name: string, askMode = false) {
+function pickTeam(panel: vscode.WebviewPanel, name: string) {
   if (!_st) return;
   const team = listOrchestratorTeams().find((t) => t.name === name);
   if (!team) return;
   _st.team = team;
-  _st.askMode = askMode; // remember for the orch-picker screen (its post re-sends too)
   if (!team.orchestrators.length) {
     vscode.window.showWarningMessage(
       `Orchestrator: ทีม '${team.name}' ไม่มี member role:orchestrator — เพิ่มก่อนในหน้า Teams`,
@@ -391,7 +386,7 @@ function pickTeam(panel: vscode.WebviewPanel, name: string, askMode = false) {
     return;
   }
   if (team.orchestrators.length === 1) {
-    void doLaunch(panel, team.orchestrators[0], askMode);
+    void doLaunch(panel, team.orchestrators[0]);
   } else {
     pushOrchScreen(panel, team);
   }
@@ -406,7 +401,7 @@ function openChatDeferred(ctx: vscode.ExtensionContext, sess: string): void {
   setTimeout(() => void openMirrorPanel(ctx, sess), 800);
 }
 
-async function doLaunch(panel: vscode.WebviewPanel, orch: string, askMode = false) {
+async function doLaunch(panel: vscode.WebviewPanel, orch: string) {
   if (!_st?.team) return;
   const r = await launchOrchestrator({
     orch,
@@ -414,7 +409,6 @@ async function doLaunch(panel: vscode.WebviewPanel, orch: string, askMode = fals
     // project picked → resume it; none → fresh build
     mode: _st.project ? "resume" : "new",
     project: _st.project,
-    askMode,
     projectName: _st.newName,
   });
   if (r.cancelled) return; // user backed out of the twin/inject choice — keep the wizard
@@ -644,17 +638,10 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         return;
       }
       case "pick_team":
-        if (typeof msg.name === "string") pickTeam(panel, msg.name, msg.askMode === true);
+        if (typeof msg.name === "string") pickTeam(panel, msg.name);
         return;
       case "pick_orch":
-        // Trust the CURRENT toggle when the client sends it — OR-ing with the
-        // stale team-pick value made ON→OFF at this step impossible.
-        if (typeof msg.name === "string")
-          void doLaunch(
-            panel,
-            msg.name,
-            typeof msg.askMode === "boolean" ? msg.askMode : _st.askMode === true,
-          );
+        if (typeof msg.name === "string") void doLaunch(panel, msg.name);
         return;
       case "back":
         // From the team picker: back to Detail when resuming a project (project set),
@@ -1265,12 +1252,9 @@ function renderShell(): string {
     if(e.key==='Enter'){ e.preventDefault(); nmConfirm(); }
     else if(e.key==='Escape'){ e.preventDefault(); closeNameModal(); } });
 
-  // "โหมดถาม" toggle — persists across screen re-renders (this script runs once).
-  // On: the launch post carries askMode:true → kickoff gets the grilling+scrutinize trigger.
-  var askMode=false;
-  function askBtnStyle(){ return askMode
-    ? 'background:rgba(63,185,80,0.18);color:#56d364;border-color:#3fb950;' : ''; }
-  function askBtnLabel(){ return '🔎 โหมดถาม: '+(askMode?'เปิด ✓':'ปิด'); }
+  // ⛔ เคยมีปุ่ม toggle "โหมดถาม" ตรงนี้ (ส่ง askMode:true ไปกับ launch → kickoff ได้ trigger
+  //    grilling+scrutinize) — ถอดออก 2026-08-05 ตามที่ user สั่ง: ไม่เคยได้ใช้เลย และฝั่งสกิล
+  //    /orches-drive ก็ถอดสายออกหมดแล้ว (สกิลยังอยู่ในเครื่อง เก็บไว้ implement ที่อื่น)
 
   // Text-animate the "doing" spinner(s): one shared ticker cycles a braille glyph
   // through every .spin on screen (re-queried each tick so it survives re-render).
@@ -1279,17 +1263,15 @@ function renderShell(): string {
     var ns=document.querySelectorAll('.spin'); for(var i=0;i<ns.length;i++) ns[i].textContent=f;
   }, 90);
 
-  function actionsHtml(canBack, showFetch, askable, showNew, showEdit, githubUrl, showArch, archLabel){
+  function actionsHtml(canBack, showFetch, showNew, showEdit, githubUrl, showArch, archLabel){
     // showNew = the "+ เริ่มโปรเจคใหม่" button (Projects screen only) → runs the
     // same team→orchestrator→launch flow with no project = a fresh build.
     // fetch = git-refresh of the PROJECTS screen only (dead-end elsewhere).
-    // askBtn only for a new build (askable) — resume ยังไม่รองรับโหมดถาม.
     // showEdit = "Edit" toggle (Projects screen only) → เผยปุ่มลบต่อการ์ด.
     // githubUrl (teams screen, resume only) → "เปิดใน GitHub" opens the repo in the browser.
     return (canBack ? '<button id="backBtn">← กลับ</button>' : '')
       + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">🔗 GitHub</button>' : '')
       + (showNew ? '<button id="newProjBtn" title="เริ่ม build โปรเจคใหม่">+ new project</button>' : '')
-      + (askable ? '<button id="askBtn" title="เปิด = สัมภาษณ์ requirement ละเอียด (grilling) + รีวิวแผนก่อนลงมือ (scrutinize)" style="'+askBtnStyle()+'">'+askBtnLabel()+'</button>' : '')
       + (showFetch ? '<button id="reloadBtn">fetch</button>' : '')
       + (showEdit ? '<button id="editBtn" title="เปิดเพื่อลบโปรเจคที่ไม่ใช้">Edit</button>' : '')
       + (showArch ? '<button id="archBtn" title="สลับดูโปรเจกต์ปกติ / ที่ลบไปแล้ว">'+(archLabel||'deleted')+'</button>' : '');
@@ -1298,8 +1280,6 @@ function renderShell(): string {
     if (canBack){ var b=el("backBtn"); if(b) b.addEventListener('click',function(){post('back');}); }
     var gh=el("ghBtn"); if(gh) gh.addEventListener('click',function(){post('open_github');});
     var nb=el("newProjBtn"); if(nb) nb.addEventListener('click',function(){post('start_new');});
-    var ab=el("askBtn"); if(ab) ab.addEventListener('click',function(){
-      askMode=!askMode; ab.textContent=askBtnLabel(); ab.style.cssText=askBtnStyle(); });
     var rb=el("reloadBtn"); if(rb) rb.addEventListener('click',function(){post('git_refresh');});
     var eb=el("editBtn"); if(eb) eb.addEventListener('click',function(){
       var c=el("content"); var on=c.classList.toggle('edit'); eb.classList.toggle('on', on); });
@@ -1510,8 +1490,7 @@ function renderShell(): string {
     // Header legend = the color-coded key (green = running, amber = pending) — shown
     // when there are projects; the plain "no work" line otherwise.
     el("subtitle").innerHTML = (m.items && m.items.length) ? headerLegend() : esc(m.subtitle);
-    askMode=false; // Projects list เอง ไม่มีโหมดถาม (ยกไปหน้าเลือกทีมตอนเริ่มใหม่)
-    el("actions").innerHTML = actionsHtml(false, true, false, true, true, false, true, 'active'); wireActions(false);
+    el("actions").innerHTML = actionsHtml(false, true, true, true, false, true, 'active'); wireActions(false);
     var items = m.items||[];
     // การ์ด project ที่หลุดจาก list (เสร็จ/หาย) ระหว่างที่ยัง arm ค้าง → เลิก arm+timer ทิ้ง (กันยิงตอนการ์ดไม่อยู่แล้ว)
     var _live={}; items.forEach(function(it){ _live[it.path]=1; });
@@ -1642,7 +1621,7 @@ function renderShell(): string {
   function renderArchived(m){
     _lastProjKey = null;                 // returning to live projects must re-render
     el("title").textContent = m.title; el("subtitle").textContent = m.subtitle;
-    el("actions").innerHTML = actionsHtml(false, false, false, false, false, false, true, 'deleted'); wireActions(false);
+    el("actions").innerHTML = actionsHtml(false, false, false, false, false, true, 'deleted'); wireActions(false);
     var arb=el("archBtn"); if(arb) arb.classList.add('on');
     var items = m.items||[];
     // Reuse the active view's Bento frame (.proj-track + queue rows). Deleted items
@@ -1774,8 +1753,7 @@ function renderShell(): string {
 
   function renderTeams(m){ disarmAll(); _lastProjKey=null;  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด (+invalidate skip-guard)
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
-    var askable=m.askable===true; if(!askable) askMode=false;
-    el("actions").innerHTML=actionsHtml(m.canBack, false, askable, false, false, m.githubUrl); wireActions(m.canBack);
+    el("actions").innerHTML=actionsHtml(m.canBack, false, false, false, m.githubUrl); wireActions(m.canBack);
     var items=m.items||[];
     el("content").innerHTML = items.length ? items.map(function(it){
       return '<div class="card teamcard'+(it.isDefault?' default':'')+'" data-name="'+esc(it.name)+'"><button class="pick">'
@@ -1783,18 +1761,17 @@ function renderShell(): string {
         +'<span class="csub">'+esc(it.sub)+'</span></button></div>';
     }).join('') : '<div class="empty">ยังไม่มีทีม — สร้างในหน้า Teams ก่อน</div>';
     el("content").querySelectorAll('.card').forEach(function(c){
-      c.addEventListener('click',function(){post('pick_team',{name:c.dataset.name, askMode:askMode});});});
+      c.addEventListener('click',function(){post('pick_team',{name:c.dataset.name});});});
   }
   function renderOrch(m){ disarmAll(); _lastProjKey=null;  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด (+invalidate skip-guard)
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
-    var askable=m.askable===true; if(!askable) askMode=false;
-    el("actions").innerHTML=actionsHtml(false, false, askable); wireActions(false);
+    el("actions").innerHTML=actionsHtml(false, false); wireActions(false);
     el("content").innerHTML=(m.items||[]).map(function(it){
       return '<div class="card" data-name="'+esc(it.name)+'"><button class="pick">'
         +'<span class="cname">'+esc(it.name)+'</span><span class="csub">orchestrator</span></button></div>';
     }).join('');
     el("content").querySelectorAll('.card').forEach(function(c){
-      c.addEventListener('click',function(){post('pick_orch',{name:c.dataset.name, askMode:askMode});});});
+      c.addEventListener('click',function(){post('pick_orch',{name:c.dataset.name});});});
   }
 
   window.addEventListener("message",function(e){

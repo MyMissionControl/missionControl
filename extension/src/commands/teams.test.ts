@@ -266,23 +266,16 @@ test("buildKickoffPrompt: no workers → hint text", () => {
   expect(buildKickoffPrompt("orch-dev", "foreman", [])).toContain("ยังไม่มี worker");
 });
 
-test("buildKickoffPrompt: askMode off (default) → no โหมดถาม trigger", () => {
-  const p = buildKickoffPrompt("carbon", "foreman", ["bob"]);
-  expect(p).not.toContain("โหมดถาม");
-  expect(p).not.toContain("grilling");
-});
-
-test("buildKickoffPrompt: askMode on → appends grilling + scrutinize trigger", () => {
-  const p = buildKickoffPrompt("carbon", "foreman", ["bob"], true);
-  expect(p).toContain("โหมดถาม"); // the word /orches-drive scans for
-  expect(p).toContain("grilling");
-  expect(p).toContain("scrutinize");
-});
-
-test("buildResumeKickoff: askMode on → appends the trigger; off → not", () => {
-  const on = buildResumeKickoff("rpn", "/p/rpn", "carbon", "foreman", ["bob"], true);
-  expect(on).toContain("โหมดถาม");
-  expect(on).toContain("scrutinize");
-  const off = buildResumeKickoff("rpn", "/p/rpn", "carbon", "foreman", ["bob"]);
-  expect(off).not.toContain("โหมดถาม");
+// "โหมดถาม" (grilling + scrutinize) ถูกถอดออกทั้งฟีเจอร์ 2026-08-05 — user สั่งเพราะไม่เคยได้ใช้
+// และฝั่งสกิล /orches-drive ก็ถอดสายออกหมดแล้ว (ไฟล์สกิลยังอยู่ เก็บไว้ implement ที่อื่นในอนาคต)
+// ⛔ เทสนี้ล็อกว่า kickoff **ต้องไม่** พา trigger ไปด้วย: ส่งคำที่ไม่มีใครอ่านแล้ว = โทเคนเปล่า +
+//   ทำให้คนอ่าน prompt เข้าใจผิดว่าโหมดนี้ยังมีอยู่ · ห้ามต่อกลับโดยไม่มีคนสั่ง
+test("kickoff ทั้งสองแบบไม่พา trigger โหมดถาม/grilling/scrutinize ไปด้วยอีก", () => {
+  const fresh = buildKickoffPrompt("carbon", "foreman", ["bob"]);
+  const resume = buildResumeKickoff("rpn", "/p/rpn", "carbon", "foreman", ["bob"]);
+  for (const p of [fresh, resume]) {
+    expect(p).not.toContain("โหมดถาม");
+    expect(p).not.toContain("grilling");
+    expect(p).not.toContain("scrutinize");
+  }
 });
