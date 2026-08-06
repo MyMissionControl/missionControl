@@ -3,7 +3,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { buildProjectRow, parseFrontmatter, parseSprintDoc } from "./dataView";
+import {
+  buildProjectRow,
+  loadProjectDocList,
+  loadProjectPlan,
+  loadProjectTasks,
+  parseSprintDoc,
+  parseSprintTasks,
+} from "./dataView";
 
 function tmpProject(name = "proj"): string {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "mc-dv-"));
@@ -16,20 +23,6 @@ function writeDoc(p: string, rel: string, body: string) {
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, body);
 }
-
-// ---- parseFrontmatter ----
-
-test("parseFrontmatter: none → empty", () => {
-  expect(parseFrontmatter("# แผน build\n\n- [x] Sprint 1")).toEqual({});
-});
-test("parseFrontmatter: category + inline tags", () => {
-  const raw = "---\ncategory: marketplace\ntags: [nextjs, prisma]\n---\n# plan";
-  expect(parseFrontmatter(raw)).toEqual({ category: "marketplace", tags: ["nextjs", "prisma"] });
-});
-test("parseFrontmatter: quoted + comma list without brackets", () => {
-  const raw = `---\ncategory: "web app"\ntags: a, b ,c\n---\n`;
-  expect(parseFrontmatter(raw)).toEqual({ category: "web app", tags: ["a", "b", "c"] });
-});
 
 // ---- parseSprintDoc ----
 
@@ -55,6 +48,168 @@ test("parseSprintDoc: non-sprint filename → null", () => {
   expect(parseSprintDoc("plan.md", "x")).toBeNull();
 });
 
+// ---- parseSprintTasks ----
+
+const TASK_DOC = [
+  "# Sprint 2 — Marketplace",
+  "_2026-08-01 · สถานะ: เสร็จครบ_",
+  "",
+  "## สปรินต์นี้ทำอะไร",
+  "เปิดหน้า marketplace ให้ใช้งานได้จริง",
+  "",
+  "## ทำอะไรเสร็จบ้าง",
+  "- **หน้า marketplace ใช้งานได้จริง** — เห็นสกิลทั้งหมดเป็นการ์ด",
+  "- กรองหาสกิลที่ต้องการ",
+  "    - กรองด้วย tag (รายละเอียดย่อย ไม่ใช่ task)",
+  "- ติดดาวสกิลที่ชอบ",
+  "",
+  "## ⚠️ ข้อควรรู้ / ยังค้าง",
+  "- หน้ารายละเอียดสกิลยังเป็นหน้าเปล่า",
+  "- ยังไม่มีหน้าแก้ไข/ลบสกิล",
+  "",
+  "---",
+  "## 🧩 รายละเอียดเชิงเทคนิค",
+  "- **ไฟล์ที่แตะ:** `app/api/skills/**`",
+].join("\n");
+
+test("parseSprintTasks: done bullets come from ทำอะไรเสร็จบ้าง", () => {
+  expect(parseSprintTasks(TASK_DOC).done).toEqual([
+    "หน้า marketplace ใช้งานได้จริง — เห็นสกิลทั้งหมดเป็นการ์ด",
+    "กรองหาสกิลที่ต้องการ",
+    "ติดดาวสกิลที่ชอบ",
+  ]);
+});
+
+test("parseSprintTasks: pending bullets come from the ยังค้าง heading", () => {
+  expect(parseSprintTasks(TASK_DOC).pending).toEqual([
+    "หน้ารายละเอียดสกิลยังเป็นหน้าเปล่า",
+    "ยังไม่มีหน้าแก้ไข/ลบสกิล",
+  ]);
+});
+
+test("parseSprintTasks: a section stops at the next ## heading", () => {
+  // the technical section below ยังค้าง must not leak into pending
+  expect(parseSprintTasks(TASK_DOC).pending).not.toContain(
+    "**ไฟล์ที่แตะ:** `app/api/skills/**`",
+  );
+});
+
+test("parseSprintTasks: indented sub-bullets are not tasks", () => {
+  expect(parseSprintTasks(TASK_DOC).done).not.toContain("กรองด้วย tag (รายละเอียดย่อย ไม่ใช่ task)");
+});
+
+test("parseSprintTasks: older English docs use Delivered / Built as the done list", () => {
+  const raw = "# Sprint 2\n\n## Delivered — `packages/x`\n- built the thing\n\n## Verify gate\n- PASS";
+  expect(parseSprintTasks(raw)).toEqual({ done: ["built the thing"], pending: [] });
+  expect(parseSprintTasks("# S1\n## Built\n- the db\n").done).toEqual(["the db"]);
+});
+
+test("parseSprintTasks: a heading that merely mentions a keyword is not a task list", () => {
+  // "Notes for later sprints" / "Gotchas harvested" are commentary, not ค้าง items
+  const raw = "# S1\n## Notes for later sprints\n- think about caching\n";
+  expect(parseSprintTasks(raw)).toEqual({ done: [], pending: [] });
+});
+
+test("parseSprintTasks: missing sections → empty lists", () => {
+  expect(parseSprintTasks("# Sprint 1 — Foundation\n_2026-07-31_\n")).toEqual({
+    done: [],
+    pending: [],
+  });
+});
+
+// ---- loadProjectTasks ----
+
+test("loadProjectTasks: one entry per sprint doc, ascending, with counts", () => {
+  const p = tmpProject("tasky");
+  writeDoc(p, "plan.md", "# แผน\n- [x] Sprint 1\n- [x] Sprint 2\n");
+  writeDoc(
+    p,
+    "tasky-sprint-2.md",
+    "# Sprint 2 — Marketplace\n_2026-08-01 · สถานะ: เสร็จครบ_\n## ทำอะไรเสร็จบ้าง\n- ก\n- ข\n## ยังค้าง\n- ค\n",
+  );
+  writeDoc(
+    p,
+    "tasky-sprint-1.md",
+    "# Sprint 1 — Foundation\n_2026-07-31 · สถานะ: เสร็จครบ_\n## ทำอะไรเสร็จบ้าง\n- จ\n",
+  );
+
+  const sprints = loadProjectTasks(p);
+  expect(sprints.map((s) => s.n)).toEqual([1, 2]);
+  expect(sprints[0]).toMatchObject({ name: "Foundation", date: "2026-07-31", done: ["จ"], pending: [] });
+  expect(sprints[1]).toMatchObject({ name: "Marketplace", done: ["ก", "ข"], pending: ["ค"] });
+  expect(sprints[1].file).toBe(path.join(p, "docs", "tasky-sprint-2.md"));
+});
+
+test("loadProjectTasks: project with no docs/ → empty list", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "mc-dv-notasks-"));
+  expect(loadProjectTasks(base)).toEqual([]);
+});
+
+// ---- loadProjectPlan ----
+
+test("loadProjectPlan: splits plan.md checklist into done / pending", () => {
+  const p = tmpProject();
+  writeDoc(p, "plan.md", "# แผน\n- [x] Sprint 1 — วางฐานระบบ\n- [X] Sprint 2 — Marketplace\n- [ ] Sprint 3 — รายละเอียด\n");
+  const plan = loadProjectPlan(p);
+  expect(plan?.rel).toBe("docs/plan.md");
+  expect(plan?.file).toBe(path.join(p, "docs", "plan.md"));
+  expect(plan?.done).toEqual(["Sprint 1 — วางฐานระบบ", "Sprint 2 — Marketplace"]);
+  expect(plan?.pending).toEqual(["Sprint 3 — รายละเอียด"]);
+});
+test("loadProjectPlan: no plan.md → null", () => {
+  const p = tmpProject();
+  writeDoc(p, "sprint-1.md", "# Sprint 1 — x");
+  expect(loadProjectPlan(p)).toBeNull();
+});
+test("loadProjectPlan: plan.md without checkboxes → empty lists (row still openable)", () => {
+  const p = tmpProject();
+  writeDoc(p, "plan.md", "# แผน\nプレーンテキスト no checklist here\n");
+  const plan = loadProjectPlan(p);
+  expect(plan?.done).toEqual([]);
+  expect(plan?.pending).toEqual([]);
+});
+
+// ---- loadProjectDocList ----
+
+test("loadProjectDocList: every .md except sprint docs, plain alphabetical by path", () => {
+  const p = tmpProject("docsy");
+  writeDoc(p, "plan.md", "# แผน");
+  writeDoc(p, "design.md", "# design");
+  writeDoc(p, "wiki/api.md", "# api");
+  writeDoc(p, "wiki/decisions/0001-storage.md", "# adr");
+  writeDoc(p, "docsy-sprint-1.md", "# Sprint 1 — Core"); // a sprint row already, not "other"
+  fs.writeFileSync(path.join(p, "README.md"), "# readme"); // project root, outside docs/
+
+  expect(loadProjectDocList(p).map((d) => d.rel)).toEqual([
+    "docs/design.md",
+    "docs/plan.md",
+    "docs/wiki/api.md",
+    "docs/wiki/decisions/0001-storage.md",
+    "README.md", // root file sorts by its own name, no special case
+  ]);
+});
+
+test("loadProjectDocList: entries carry an absolute path to open", () => {
+  const p = tmpProject("docsy2");
+  writeDoc(p, "plan.md", "# แผน");
+  expect(loadProjectDocList(p)[0].file).toBe(path.join(p, "docs", "plan.md"));
+});
+
+test("loadProjectDocList: skips generated dirs and non-markdown", () => {
+  const p = tmpProject("docsy3");
+  writeDoc(p, "plan.md", "# แผน");
+  fs.mkdirSync(path.join(p, "node_modules", "pkg"), { recursive: true });
+  fs.writeFileSync(path.join(p, "node_modules", "pkg", "README.md"), "# dep");
+  fs.writeFileSync(path.join(p, "notes.txt"), "not markdown");
+
+  expect(loadProjectDocList(p).map((d) => d.rel)).toEqual(["docs/plan.md"]);
+});
+
+test("loadProjectDocList: project with no markdown → empty", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "mc-dv-nodocs-"));
+  expect(loadProjectDocList(base)).toEqual([]);
+});
+
 // ---- buildProjectRow ----
 
 test("buildProjectRow: plan.md checklist drives total/done + in-progress", () => {
@@ -64,7 +219,6 @@ test("buildProjectRow: plan.md checklist drives total/done + in-progress", () =>
   writeDoc(p, "agentskill-v10-sprint-2.md", "# Sprint 2 — Upload\n_2026-07-16 · สถานะ: เสร็จครบ_");
   const row = buildProjectRow(p)!;
   expect(row.name).toBe("agentskill-v10");
-  expect(row.category).toBe("uncategorized");
   expect(row.sprintsTotal).toBe(3);
   expect(row.sprintsDone).toBe(2);
   expect(row.percentDone).toBe(67);
@@ -85,12 +239,10 @@ test("buildProjectRow: no plan.md → fallback to sprint docs + done", () => {
   expect(row.percentDone).toBe(100);
 });
 
-test("buildProjectRow: frontmatter category/tags picked up", () => {
+test("buildProjectRow: unchecked plan → not-started", () => {
   const p = tmpProject("shop");
-  writeDoc(p, "plan.md", "---\ncategory: marketplace\ntags: [nextjs]\n---\n# แผน\n- [ ] Sprint 1\n");
+  writeDoc(p, "plan.md", "# แผน\n- [ ] Sprint 1\n");
   const row = buildProjectRow(p)!;
-  expect(row.category).toBe("marketplace");
-  expect(row.tags).toEqual(["nextjs"]);
   expect(row.status).toBe("not-started");
   expect(row.sprintsDone).toBe(0);
 });

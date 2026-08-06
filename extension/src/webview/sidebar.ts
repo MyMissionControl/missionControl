@@ -9,6 +9,7 @@ import {
 } from "../projectState";
 import { isMawUp } from "../commands/mawServe";
 import { openDashboardPanel } from "./dashboard";
+import { getActiveNav, initNavTracking, onActiveNavChange } from "./navState";
 
 const POLL_MS = 10_000;
 const VIEW_ID = "missioncontrol.panel";
@@ -52,6 +53,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private lastOnline?: boolean; // for offline→online transition detection
   private projectsLoaded = false; // true once /projects fetched at least once
   private unsubProjectChange?: () => void;
+  private unsubNav?: () => void; // active-nav (frontmost tab) subscription
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -74,6 +76,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         await this.tick();
         await this.pushProjectList();
         await this.pushMaw();
+        this.pushActiveNav(getActiveNav()); // light the nav for the current tab
       } else if (msg?.type === "open_dashboard") {
         openDashboardPanel(this.context, getCurrentProjectId());
       } else if (msg?.type === "refreshProjects") {
@@ -92,6 +95,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       void this.pushProjectList();
     });
 
+    // Re-light the sidebar nav whenever the frontmost editor tab changes.
+    this.unsubNav = onActiveNavChange((nav) => this.pushActiveNav(nav));
+
     void this.render();
     // Frontend-only build: no backend health poll. The only recurring probe is
     // a cheap local TCP check of :3456 so the maw-ui toggle stays in sync even
@@ -104,7 +110,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       this.mawTimer = undefined;
       this.unsubProjectChange?.();
       this.unsubProjectChange = undefined;
+      this.unsubNav?.();
+      this.unsubNav = undefined;
     });
+  }
+
+  /** Tell the webview which nav item (if any) matches the frontmost tab.
+   *  Ready state only — the setup screen has no nav. */
+  private pushActiveNav(nav: string | null): void {
+    if (!this.view || this.renderedSetup !== false) return;
+    this.view.webview.postMessage({ type: "activeNav", nav });
   }
 
   /** Setup is complete once EITHER a GitHub token has been stored by /setup
@@ -339,12 +354,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   (function(){ var b = document.body.classList;
     document.documentElement.dataset.theme = (b.contains('vscode-light') || b.contains('vscode-high-contrast-light')) ? 'light' : 'dark'; })();
 
-  function setActive(el) {
+  // The active glow follows the ACTUAL frontmost editor tab (pushed by the host),
+  // not the last click — and only lights for Skills / Accounts / Localhosts.
+  function setActiveNav(nav) {
     document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
-    if (el) el.classList.add('active');
+    if (nav) {
+      var el = document.querySelector('.nav-item[data-cmd="missioncontrol.' + nav + '"]');
+      if (el) el.classList.add('active');
+    }
   }
+  window.addEventListener('message', (ev) => {
+    var m = ev.data;
+    if (m && m.type === 'activeNav') setActiveNav(m.nav || null);
+  });
   document.querySelectorAll('.nav-item[data-cmd]').forEach((b) => {
-    b.addEventListener('click', () => { setActive(b); vscode.postMessage({ type: 'run', command: b.dataset.cmd }); });
+    b.addEventListener('click', () => vscode.postMessage({ type: 'run', command: b.dataset.cmd }));
   });
   document.getElementById('openDashboard').addEventListener('click', () => {
     vscode.postMessage({ type: 'open_dashboard' });
@@ -372,6 +396,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 }
 
 export function registerSidebar(context: vscode.ExtensionContext): void {
+  initNavTracking(context); // watch the frontmost tab so the nav reflects the real page
   const provider = new SidebarProvider(context);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(VIEW_ID, provider),

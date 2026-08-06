@@ -3,6 +3,7 @@ import * as path from "node:path";
 
 import { listBackedUpProjects } from "./docsBackup";
 import { getGithubWebUrl } from "./gitOps";
+import { listProjectTree, type TreeNode } from "./projectDocs";
 import { dedupeByRealpath, parsePlan, projectScanDirs } from "./orchestratorResume";
 // NOTE: resolveOwnerRoot lives in startOrchestrator.ts, which imports `vscode`.
 // It is pulled in via dynamic import() inside loadDataIndex() only, so this module's
@@ -14,8 +15,6 @@ import { dedupeByRealpath, parsePlan, projectScanDirs } from "./orchestratorResu
 export interface ProjectRow {
   name: string; // project folder basename
   path: string; // absolute path
-  category: string; // from docs/plan.md frontmatter; "uncategorized" if absent
-  tags: string[]; // from docs/plan.md frontmatter; [] if absent
   sprintsTotal: number;
   sprintsDone: number;
   percentDone: number; // 0..100, rounded; 0 when total is 0
@@ -39,36 +38,6 @@ interface SprintDoc {
   mtime: number;
 }
 
-/** Parse the YAML-ish frontmatter block at the very top of a markdown file.
- *  Only `category` (string) and `tags` (inline `[a, b]` or comma list) are read —
- *  everything else is ignored. No frontmatter / not starting with `---` → {}.
- *  Deliberately tiny (no YAML dep): the docs we generate are simple. */
-export function parseFrontmatter(raw: string): { category?: string; tags?: string[] } {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(raw);
-  if (!m) return {};
-  const out: { category?: string; tags?: string[] } = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line.trim());
-    if (!kv) continue;
-    const key = kv[1].toLowerCase();
-    let val = kv[2].trim();
-    if (key === "category" && val) out.category = stripQuotes(val);
-    else if (key === "tags" && val) {
-      val = val.replace(/^\[|\]$/g, "");
-      const tags = val
-        .split(",")
-        .map((t) => stripQuotes(t.trim()))
-        .filter(Boolean);
-      if (tags.length) out.tags = tags;
-    }
-  }
-  return out;
-}
-
-function stripQuotes(s: string): string {
-  return s.replace(/^["']|["']$/g, "").trim();
-}
-
 /** Extract sprint metadata from one sprint doc. `n` comes from the filename (the
  *  authoritative ordering); name/date/done are best-effort from the doc heading and
  *  the `_YYYY-MM-DD · สถานะ: …_` status line. `done` is only used as a fallback when
@@ -89,6 +58,128 @@ export function parseSprintDoc(filename: string, raw: string, mtime = 0): Sprint
   // the word "doing"). `done` is a fallback signal, used only when there is no plan.md.
   const done = !/(ยัง|ค้าง|กำลังทำ|กําลังทำ|in[\s-]?progress|doing)/i.test(statusText);
   return { n, name, date, done, mtime };
+}
+
+/** One sprint's task lists — the unit of the project-scoped (single-project) view,
+ *  the way ProjectRow is the unit of the cross-project one. */
+export interface SprintTasks {
+  n: number;
+  name: string;
+  date: string | null;
+  file: string; // absolute path of the sprint doc, so the view can open it
+  done: string[];
+  pending: string[];
+}
+
+// `Delivered` / `Built` are the older English orches docs' name for the same list.
+// The pending side gets no English alias on purpose: those docs' `Notes for later
+// sprints` / `Gotchas harvested` are commentary, not outstanding work.
+const DONE_HEADING_RX = /ทำอะไรเสร็จบ้าง|^##\s+(?:Delivered|Built)\b/;
+const PENDING_HEADING_RX = /ยังค้าง/;
+
+/** Pull the task bullets out of one sprint doc. orches writes two lists at sprint
+ *  close: `## ทำอะไรเสร็จบ้าง` (shipped) and `## ⚠️ ข้อควรรู้ / ยังค้าง` (known gaps) —
+ *  headings are matched by substring because the emoji prefix varies. Only TOP-LEVEL
+ *  `- ` bullets count; an indented one is detail about the bullet above it, not its
+ *  own task. Docs in another format (older English ones) yield two empty lists —
+ *  the view says so rather than showing a misleading zero. */
+export function parseSprintTasks(raw: string): { done: string[]; pending: string[] } {
+  const done: string[] = [];
+  const pending: string[] = [];
+  let bucket: string[] | null = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^##\s/.test(line)) {
+      bucket = DONE_HEADING_RX.test(line) ? done : PENDING_HEADING_RX.test(line) ? pending : null;
+      continue;
+    }
+    if (!bucket) continue;
+    const m = /^[-*]\s+(.*\S)\s*$/.exec(line); // no leading space → top level only
+    if (m) bucket.push(m[1].replace(/\*\*(.+?)\*\*/g, "$1").trim());
+  }
+  return { done, pending };
+}
+
+/** Every sprint of one project with its tasks, ascending. Read on demand (when the
+ *  user drills into a project), never as part of the cross-project index — that would
+ *  mean reading every sprint doc of every project up front for data usually unseen. */
+export function loadProjectTasks(projectPath: string): SprintTasks[] {
+  const docsDir = path.join(projectPath, "docs");
+  let names: string[];
+  try {
+    names = fs.readdirSync(docsDir);
+  } catch {
+    return []; // no docs/ → nothing to show
+  }
+  const out: SprintTasks[] = [];
+  for (const fn of names) {
+    if (!SPRINT_FILE_RX.test(fn)) continue;
+    const abs = path.join(docsDir, fn);
+    let raw = "";
+    try {
+      raw = fs.readFileSync(abs, "utf8");
+    } catch {
+      /* unreadable → still list the sprint, just with no tasks */
+    }
+    const meta = parseSprintDoc(fn, raw);
+    if (!meta) continue;
+    const { done, pending } = parseSprintTasks(raw);
+    out.push({ n: meta.n, name: meta.name, date: meta.date, file: abs, done, pending });
+  }
+  return out.sort((a, b) => a.n - b.n);
+}
+
+/** One markdown file of a project that is not a sprint doc — the wiki pages, ADRs,
+ *  plan/design/req, README. Sprint docs are left out: they are already rows of their
+ *  own, each with its own link. */
+export interface DocEntry {
+  rel: string; // project-relative POSIX path, e.g. "docs/wiki/api.md"
+  file: string; // absolute path, so the view can open it
+}
+
+/** Every other `.md` in the project, alphabetically. Reuses the doc tree the Project
+ *  Detail explorer is built on (it already prunes node_modules / dist / dot-dirs and
+ *  the `agents/` worktrees, which are full duplicate checkouts), then flattens it —
+ *  this view wants one plain list, not a tree. */
+export function loadProjectDocList(projectPath: string): DocEntry[] {
+  const out: DocEntry[] = [];
+  const walk = (nodes: TreeNode[]) => {
+    for (const n of nodes) {
+      if (n.kind === "dir") walk(n.children ?? []);
+      else if (!SPRINT_FILE_RX.test(path.basename(n.rel)))
+        out.push({ rel: n.rel, file: path.join(projectPath, n.rel) });
+    }
+  };
+  walk(listProjectTree(projectPath));
+  return out.sort((a, b) => a.rel.localeCompare(b.rel, undefined, { sensitivity: "base" }));
+}
+
+/** plan.md surfaced as a {done,pending} pair — its checklist items — so the Data
+ *  View can show it as an expandable row above the sprints, in the same shape a
+ *  sprint expands into. `[x]`/`[X]` → done, `[ ]` → pending. Null when there is no
+ *  plan.md (its `.md` link still opens the file even if the checklist is empty). */
+export interface PlanDoc {
+  file: string; // absolute path to docs/plan.md
+  rel: string; // "docs/plan.md"
+  done: string[];
+  pending: string[];
+}
+export function loadProjectPlan(projectPath: string): PlanDoc | null {
+  const abs = path.join(projectPath, "docs", "plan.md");
+  let raw: string;
+  try {
+    raw = fs.readFileSync(abs, "utf8");
+  } catch {
+    return null; // no plan.md
+  }
+  const done: string[] = [];
+  const pending: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const m = /^\s*[-*]\s*\[( |x|X)\]\s+(.*\S)\s*$/.exec(line);
+    if (!m) continue;
+    const text = m[2].replace(/\*\*(.+?)\*\*/g, "$1").trim();
+    (m[1] === " " ? pending : done).push(text);
+  }
+  return { file: abs, rel: "docs/plan.md", done, pending };
 }
 
 /** Read + parse every sprint doc under <project>/docs. Sorted ascending by N. */
@@ -153,17 +244,11 @@ export function buildProjectRow(projectPath: string): ProjectRow | null {
     return null; // no docs/ → not a project we surface
   }
 
-  // category / tags from plan.md frontmatter (absent for all projects today → uncategorized)
-  let category = "uncategorized";
-  let tags: string[] = [];
   let planRaw: string | null = null;
   try {
     planRaw = fs.readFileSync(path.join(docsDir, "plan.md"), "utf8");
-    const fm = parseFrontmatter(planRaw);
-    if (fm.category) category = fm.category;
-    if (fm.tags) tags = fm.tags;
   } catch {
-    /* no plan.md → uncategorized + checklist fallback below */
+    /* no plan.md → sprint-doc fallback below */
   }
 
   const sprints = readSprintDocs(projectPath);
@@ -197,8 +282,6 @@ export function buildProjectRow(projectPath: string): ProjectRow | null {
   return {
     name: path.basename(projectPath),
     path: projectPath,
-    category,
-    tags,
     sprintsTotal,
     sprintsDone,
     percentDone,
