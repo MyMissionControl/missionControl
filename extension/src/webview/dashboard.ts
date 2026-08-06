@@ -17,7 +17,7 @@ import {
   defaultTeamFor,
   launchOrchestrator,
   listOrchestratorTeams,
-  scanResumableProjects,
+  scanProjects,
 } from "../commands/startOrchestrator";
 import { parseTeamRoster, type OracleTeam } from "../commands/teams";
 import { trackClaudeTerminal } from "../commands/claudeTerminals";
@@ -479,7 +479,9 @@ function startOrchWizard(panel: vscode.WebviewPanel, mode: "new" | "continue") {
     _orch = { mode, step: "team" };
     pushOrchTeamScreen(panel);
   } else {
-    const projects = scanResumableProjects();
+    // the "ทำต่อ" wizard only offers projects with real leftover work — unlike the
+    // Projects screen, which is a full inventory.
+    const projects = scanProjects({ resumableOnly: true });
     _orch = { mode, step: "project", projects };
     void pushOrchProjectScreen(panel, projects);
   }
@@ -1161,7 +1163,7 @@ function renderHtml(): string {
         </button>
         <button class="rrow" type="button" onclick="run('missioncontrol.openObsidian')">
           <span class="ricon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 2 20 9l-8 13L4 9z"/></svg></span>
-          <span class="rtext"><span class="rtitle">Open in Obsidian</span><span class="rdesc">เปิดแอป Obsidian (vault ล่าสุด)</span></span>
+          <span class="rtext"><span class="rtitle">Open in Obsidian</span><span class="rdesc">vault โปรเจค (อัปเดตให้ก่อนเปิด)</span></span>
         </button>
       </div>
     </div>

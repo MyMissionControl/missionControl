@@ -13,7 +13,7 @@ import {
   listTmuxSessionsSafe,
   projectDrivenState,
   reapSession,
-  scanResumableProjects,
+  scanProjects,
   sessionCreatedAt,
   tmuxHasSession,
 } from "../commands/startOrchestrator";
@@ -95,7 +95,7 @@ async function computeGitStates(
 // ── name-popup: local + github availability probes (impure; pure logic = projectName.ts) ──
 // รายชื่อโฟลเดอร์ทั้งหมดใต้ projects root (local-taken = ทุกโฟลเดอร์ ไม่ใช่แค่ resumable)
 function localProjectNames(): string[] {
-  const first = scanResumableProjects()[0];
+  const first = scanProjects()[0];
   if (!first) return [];
   try {
     return fs
@@ -103,7 +103,7 @@ function localProjectNames(): string[] {
       .filter((d) => d.isDirectory())
       .map((d) => d.name);
   } catch {
-    return scanResumableProjects().map((p) => p.name);
+    return scanProjects().map((p) => p.name);
   }
 }
 let _ghOk: boolean | undefined;
@@ -145,10 +145,11 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
   const sessions = listTmuxSessionsSafe();
   panel.webview.postMessage({
     type: "screen_projects",
-    title: "⏮ ทำต่อ — เลือก project ค้าง",
+    // Full inventory — every dir under projects/, no filter, no view toggle.
+    title: "โปรเจกต์ทั้งหมด",
     subtitle: projects.length
       ? "⠋ กำลังทำ = worker run อยู่ตอนนี้ · 🔨 ค้าง = sprint ที่ยังไม่เสร็จ (จากแผน หรือ worktree ที่เปิดค้าง) · 'ทำไปแล้ว X' = เสร็จกี่ sprint · ปุ่มขวา = git"
-      : "ไม่พบงานค้าง — ต้องมี docs/plan.md, docs/*sprint-*.md หรือ worktree agents/* เปิดอยู่",
+      : "ไม่พบโปรเจกต์เลยใต้ projects/ — สร้างใหม่ด้วยปุ่ม '+ new project'",
     items: ordered.map((p) => {
       // continue-button state derived purely (marker + tmux liveness) — the
       // zombie guard compares the live session's creation time to the recorded one.
@@ -239,7 +240,7 @@ function startSpinPoll(panel: vscode.WebviewPanel) {
     for (const s of finishedSessions(_runningRuns, new Set(nowRunning.keys()))) reapSession(s);
     // Re-scan so "ค้าง N sprint" drops, and render with fetch=true so the git panel
     // (Commit / up-to-date) reflects what landed — no manual "fetch" click needed.
-    if (someFinished && _st) _st.projects = scanResumableProjects();
+    if (someFinished && _st) _st.projects = scanProjects();
     _runningRuns = nowRunning;
     // finished → full render (fresh scan + git fetch + green re-probe); otherwise a
     // cheap spin tick (spinner only, skip the owner/label probe).
@@ -429,7 +430,7 @@ async function doLaunch(panel: vscode.WebviewPanel, orch: string) {
 
 export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
   _ctx = context;
-  _st = { projects: scanResumableProjects() };
+  _st = { projects: scanProjects() };
   if (_panel) {
     _panel.title = titleFor();
     _panel.reveal();
@@ -468,7 +469,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         _st.team = undefined;
         _st.newName = undefined;
         const def = suggestDefaultName(
-          sortResumable(scanResumableProjects()).map((p) => p.name),
+          sortResumable(scanProjects()).map((p) => p.name),
           localProjectNames(),
           ghView,
         );
@@ -581,8 +582,9 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         return;
       }
       case "open_data_view": {
-        // Detail → cross-project Data View (status of every project from its .md docs).
-        void openDataViewPanel();
+        // Detail → Data View scoped to THIS project (its sprints broken into tasks);
+        // its back button reaches the cross-project view. No project picked → cross-project.
+        void openDataViewPanel(_st.project?.path);
         return;
       }
       case "toggle_archived": {
@@ -653,7 +655,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
       case "git_refresh":
         // Full manual refresh: re-scan sprint state too (so "ค้าง N sprint"
         // reflects reality), not just git — the one-time open snapshot is stale.
-        if (_st) _st.projects = scanResumableProjects();
+        if (_st) _st.projects = scanProjects();
         await pushProjectsScreen(panel, true);
         return;
       case "continue_run": {
@@ -706,7 +708,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         if (!p) return;
         const r = deleteProjectFlow(p);
         if (r.deleted) {
-          _st.projects = scanResumableProjects(); // re-scan → การ์ดหลุดจาก list
+          _st.projects = scanProjects(); // re-scan → การ์ดหลุดจาก list
           await pushProjectsScreen(panel);
         } else if (r.reason) {
           vscode.window.showWarningMessage(r.reason);
@@ -1341,7 +1343,7 @@ function renderShell(): string {
     return back
       + lh
       + '<button id="contBtn" class="dt-cont" title="ไปเลือกทีม / เข้า session ที่ทำอยู่">▶ ทำต่อ</button>'
-      + '<button id="dvBtn" title="ดูสถานะทุกโปรเจกต์ (table / kanban / timeline)">Data View</button>'
+      + '<button id="dvBtn" title="ดู sprint/task ของโปรเจกต์นี้ (กดปุ่มกลับเพื่อดูทุกโปรเจกต์)">Data View</button>'
       + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">GitHub</button>' : '');
   }
   function wireDetailActions(){

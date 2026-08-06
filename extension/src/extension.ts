@@ -49,7 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Cross-project Data View — project status parsed from each project's .md docs
     // (table / kanban / timeline). Opened from a Project Detail button + palette.
     vscode.commands.registerCommand("missioncontrol.dataView", () => openDataViewPanel()),
-    // Launch the Obsidian desktop app (opens its last-used vault) from the dashboard.
+    // Refresh the project vault (one folder per project) and launch Obsidian on it.
     vscode.commands.registerCommand("missioncontrol.openObsidian", () => openObsidianCommand()),
     vscode.commands.registerCommand("missioncontrol.skills", () => skillsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.teams", () => teamsCommand(context)),

@@ -1,0 +1,474 @@
+import { expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import type { ProjectRow } from "./dataView";
+import {
+  MC_MARKER,
+  VAULT_TOP,
+  isGeneratedNote,
+  planVault,
+  projectNoteName,
+  projectPrefix,
+  readmeOnlyRows,
+  registerVault,
+  renderIndexNote,
+  renderProjectNote,
+  safeName,
+  sprintNoteName,
+  vaultId,
+  writeVault,
+} from "./obsidianVault";
+
+function tmp(prefix: string): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+/** A project on disk: docs/wiki/, sprint docs (deliberately out of order and
+ *  double-digit), a loose doc, plus a docs/superpowers/ scratch dir. */
+function makeProject(base: string, name: string, sprintNums: number[] = [1, 2, 10]): string {
+  const p = path.join(base, name);
+  fs.mkdirSync(path.join(p, "docs", "wiki"), { recursive: true });
+  fs.mkdirSync(path.join(p, "docs", "superpowers", "plans"), { recursive: true });
+  fs.writeFileSync(path.join(p, "README.md"), "# readme " + name);
+  fs.writeFileSync(path.join(p, "docs", "plan.md"), "# plan");
+  fs.writeFileSync(path.join(p, "docs", "wiki", "overview.md"), "# overview");
+  fs.writeFileSync(path.join(p, "docs", "superpowers", "plans", "scratch.md"), "# scratch");
+  for (const n of sprintNums)
+    fs.writeFileSync(path.join(p, "docs", `${name}-sprint-${n}.md`), `# sprint ${n}`);
+  return p;
+}
+
+function row(over: Partial<ProjectRow> = {}): ProjectRow {
+  return {
+    name: "demo",
+    path: "/nope",
+    sprintsTotal: 3,
+    sprintsDone: 2,
+    percentDone: 67,
+    status: "in-progress",
+    sprints: [
+      { n: 1, name: "Sprint 1", date: "2026-01-01" },
+      { n: 2, name: "Sprint 2", date: null },
+      { n: 10, name: "Sprint 10", date: "2026-02-02" },
+    ],
+    latestSprint: { n: 10, name: "Sprint 10", date: "2026-02-02" },
+    updated: "2026-02-02",
+    hasPreview: false,
+    githubUrl: null,
+    ...over,
+  };
+}
+
+// ------------------------------------------------------------------ plan ----
+
+test("planVault: one folder per project, folder note, sprint renamed to sort numerically", () => {
+  const base = tmp("mc-ov-plan-");
+  const p = makeProject(base, "alpha");
+  const plan = planVault([row({ name: "alpha", path: p })]);
+
+  expect(plan.dirs).toContain(VAULT_TOP);
+  expect(plan.dirs).toContain(`${VAULT_TOP}/alpha`);
+  expect(plan.dirs).toContain(`${VAULT_TOP}/alpha/sprint`);
+  // folder note + vault index note
+  expect(plan.notes.map((n) => n.rel).sort()).toEqual([
+    `${VAULT_TOP}/${VAULT_TOP}.md`,
+    `${VAULT_TOP}/alpha/alpha.md`,
+  ]);
+
+  const rels = plan.links.map((l) => l.rel);
+  expect(rels).toContain(`${VAULT_TOP}/alpha/README.md`);
+  expect(rels).toContain(`${VAULT_TOP}/alpha/plan.md`);
+  expect(rels).toContain(`${VAULT_TOP}/alpha/wiki`);
+  // zero-padded so Obsidian's alphabetical sort reads as numeric
+  expect(rels).toContain(`${VAULT_TOP}/alpha/sprint/sprint-01.md`);
+  expect(rels).toContain(`${VAULT_TOP}/alpha/sprint/sprint-02.md`);
+  expect(rels).toContain(`${VAULT_TOP}/alpha/sprint/sprint-10.md`);
+  // the sprint link points at the real long-named file
+  const s10 = plan.links.find((l) => l.rel.endsWith("sprint-10.md"));
+  expect(s10?.target).toBe(path.join(p, "docs", "alpha-sprint-10.md"));
+});
+
+test("planVault: docs/superpowers is scratch, never linked", () => {
+  const base = tmp("mc-ov-skip-");
+  const p = makeProject(base, "beta");
+  const plan = planVault([row({ name: "beta", path: p })]);
+  expect(plan.links.some((l) => l.rel.includes("superpowers"))).toBe(false);
+});
+
+test("planVault: README-only project gets a note and a README link, no sprint dir", () => {
+  const base = tmp("mc-ov-thin-");
+  const p = path.join(base, "morse");
+  fs.mkdirSync(p, { recursive: true });
+  fs.writeFileSync(path.join(p, "README.md"), "# morse");
+
+  const plan = planVault([row({ name: "morse", path: p, sprints: [], sprintsTotal: 0 })]);
+  expect(plan.dirs).not.toContain(`${VAULT_TOP}/morse/sprint`);
+  expect(plan.links.map((l) => l.rel)).toEqual([`${VAULT_TOP}/morse/README.md`]);
+});
+
+test("planVault: a doc named like the project does not clobber the folder note", () => {
+  const base = tmp("mc-ov-collide-");
+  const p = path.join(base, "gamma");
+  fs.mkdirSync(path.join(p, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(p, "docs", "gamma.md"), "# doc that shares the name");
+
+  const plan = planVault([row({ name: "gamma", path: p })]);
+  expect(plan.notes.some((n) => n.rel === `${VAULT_TOP}/gamma/gamma.md`)).toBe(true);
+  expect(plan.links.map((l) => l.rel)).toEqual([`${VAULT_TOP}/gamma/gamma_2.md`]);
+});
+
+test("readmeOnlyRows: picks up docs-less README projects, skips known and ψ", () => {
+  const owner = tmp("mc-ov-owner-");
+  const projects = path.join(owner, "projects");
+  fs.mkdirSync(projects, { recursive: true });
+  // README-only → should be picked up
+  for (const n of ["morse", "ttt"]) {
+    fs.mkdirSync(path.join(projects, n));
+    fs.writeFileSync(path.join(projects, n, "README.md"), "# " + n);
+  }
+  // already indexed by buildProjectRow → must not be duplicated
+  makeProject(projects, "learningPlatform");
+  // nothing readable at all → skipped
+  fs.mkdirSync(path.join(projects, "empty"));
+  // the shared oracle vault and dotfiles are never projects
+  fs.mkdirSync(path.join(projects, "ψ"));
+  fs.writeFileSync(path.join(projects, "ψ", "README.md"), "# psi");
+  fs.mkdirSync(path.join(projects, ".hidden"));
+  fs.writeFileSync(path.join(projects, ".hidden", "README.md"), "# dot");
+
+  const rows = readmeOnlyRows(owner, new Set(["learningPlatform"]));
+  expect(rows.map((r) => r.name).sort()).toEqual(["morse", "ttt"]);
+  expect(rows[0].sprintsTotal).toBe(0);
+  expect(rows[0].status).toBe("not-started");
+  expect(rows[0].updated).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("readmeOnlyRows: such a project still gets its own folder + README link", () => {
+  const owner = tmp("mc-ov-owner2-");
+  const projects = path.join(owner, "projects");
+  fs.mkdirSync(path.join(projects, "morse"), { recursive: true });
+  fs.writeFileSync(path.join(projects, "morse", "README.md"), "# morse");
+  const vault = tmp("mc-ov-vault-");
+
+  const rows = readmeOnlyRows(owner, new Set());
+  writeVault(planVault(rows), vault);
+  const link = path.join(vault, VAULT_TOP, "morse", "README.md");
+  expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+  expect(fs.readFileSync(link, "utf8")).toBe("# morse");
+  expect(fs.existsSync(path.join(vault, VAULT_TOP, "morse", "morse.md"))).toBe(true);
+});
+
+test("projectPrefix/projectNoteName: the layout rule and its folder note", () => {
+  expect(projectPrefix(row({ name: "alpha" }))).toBe(`${VAULT_TOP}/alpha`);
+  expect(projectPrefix(row({ name: "a/b" }))).toBe(`${VAULT_TOP}/a-b`); // sanitised
+  expect(projectNoteName(`${VAULT_TOP}/archive/alpha`)).toBe("alpha");
+  expect(projectNoteName(`${VAULT_TOP}/alpha/`)).toBe("alpha"); // trailing slash tolerated
+  expect(projectNoteName("")).toBe("unnamed");
+});
+
+test("planVault: relocating a project moves its dir, links, note AND wikilinks together", () => {
+  const base = tmp("mc-ov-relocate-");
+  const p = makeProject(base, "alpha");
+  // the future case: projects grouped somewhere else in the vault
+  const grouped = (r: ProjectRow) => `${VAULT_TOP}/done/${safeName(r.name)}`;
+  const plan = planVault([row({ name: "alpha", path: p })], grouped);
+  const home = `${VAULT_TOP}/done/alpha`;
+
+  expect(plan.dirs).toContain(home);
+  expect(plan.dirs).toContain(`${home}/sprint`);
+  expect(plan.notes.some((n) => n.rel === `${home}/alpha.md`)).toBe(true);
+  expect(plan.links.every((l) => l.rel.startsWith(`${home}/`))).toBe(true);
+  expect(plan.projects).toBe(1);
+
+  // the whole point: nothing still points at the OLD location
+  for (const n of plan.notes) {
+    for (const m of n.body.matchAll(/\[\[([^\]|\\]*)/g)) expect(m[1].startsWith(home)).toBe(true);
+    expect(n.body).not.toContain(`${VAULT_TOP}/alpha/`);
+  }
+  // and it still materialises + resolves on disk
+  const vault = tmp("mc-ov-vault-");
+  const res = writeVault(plan, vault);
+  expect(res.projects).toBe(1);
+  expect(fs.readFileSync(path.join(vault, home, "sprint", "sprint-10.md"), "utf8")).toBe(
+    "# sprint 10",
+  );
+});
+
+test("safeName: strips separators and Obsidian-hostile characters", () => {
+  expect(safeName("a/b")).toBe("a-b");
+  expect(safeName("we[i]rd#name")).toBe("we-i-rd-name");
+  expect(safeName("../escape")).toBe("-escape");
+  expect(safeName("")).toBe("unnamed");
+});
+
+// ---------------------------------------------------------------- render ----
+
+test("renderProjectNote: frontmatter carries the queryable fields + marker", () => {
+  const body = renderProjectNote(row({ name: "alpha", path: "/p/alpha" }));
+  expect(body.startsWith("---\n" + MC_MARKER)).toBe(true);
+  expect(body).toContain("status: in-progress");
+  expect(body).toContain("sprints_total: 3");
+  expect(body).toContain("sprints_done: 2");
+  expect(body).toContain("percent_done: 67");
+  expect(body).toContain("updated: 2026-02-02");
+  expect(body).toContain("  - mc/project");
+  expect(body).toContain("  - mc/status/in-progress");
+  expect(body).toContain("# alpha");
+  // FULL-path link: "sprint-10.md" exists once per project, so a short [[sprint-10]]
+  // would leave Obsidian guessing between all of them
+  expect(body).toContain(`[[${VAULT_TOP}/alpha/sprint/sprint-10\\|Sprint 10]]`);
+});
+
+test("renderProjectNote/renderIndexNote: no short wikilinks anywhere", () => {
+  const base = tmp("mc-ov-nolinkshort-");
+  const p = makeProject(base, "alpha");
+  const plan = planVault([row({ name: "alpha", path: p })]);
+  for (const n of plan.notes)
+    for (const m of n.body.matchAll(/\[\[([^\]|\\]*)/g))
+      expect(m[1].startsWith(`${VAULT_TOP}/`)).toBe(true);
+});
+
+test("planVault: every wikilink in a note points at a file the plan creates", () => {
+  const base = tmp("mc-ov-resolve-");
+  const a = makeProject(base, "alpha", [1, 2, 10]);
+  const b = makeProject(base, "beta", [1, 2]);
+  // row.sprints must mirror the sprint docs on disk — in production both come from
+  // the same docs/ scan, so keep the fixture consistent too
+  const plan = planVault([
+    row({ name: "alpha", path: a }),
+    row({
+      name: "beta",
+      path: b,
+      sprints: [
+        { n: 1, name: "Sprint 1", date: null },
+        { n: 2, name: "Sprint 2", date: null },
+      ],
+    }),
+  ]);
+
+  const created = new Set<string>([
+    ...plan.links.map((l) => l.rel.replace(/\.md$/i, "")),
+    ...plan.notes.map((n) => n.rel.replace(/\.md$/i, "")),
+  ]);
+  const targets: string[] = [];
+  for (const n of plan.notes)
+    for (const m of n.body.matchAll(/\[\[([^\]|\\]*)/g)) targets.push(m[1]);
+
+  expect(targets.length).toBeGreaterThan(4);
+  for (const t of targets) expect(created.has(t)).toBe(true);
+  // and each project's timeline points into ITS OWN folder, not a sibling's
+  const alphaNote = plan.notes.find((n) => n.rel.endsWith("alpha/alpha.md"))!;
+  expect(alphaNote.body).not.toContain(`${VAULT_TOP}/beta/`);
+});
+
+test("sprintNoteName: zero-padded, suffixed when a number repeats", () => {
+  const seen = new Set<string>();
+  expect(sprintNoteName(1, seen)).toBe("sprint-01");
+  expect(sprintNoteName(1, seen)).toBe("sprint-01_2");
+  expect(sprintNoteName(10, seen)).toBe("sprint-10");
+  expect(sprintNoteName(100, seen)).toBe("sprint-100");
+});
+
+test("renderProjectNote: no sprints → no empty Sprint table", () => {
+  const body = renderProjectNote(row({ sprints: [], sprintsTotal: 0, percentDone: 0 }));
+  expect(body).not.toContain("## Sprint");
+});
+
+test("renderProjectNote: pipes in a sprint title cannot break the table", () => {
+  const body = renderProjectNote(
+    row({ sprints: [{ n: 1, name: "a|b [c]", date: null }] }),
+  );
+  const line = body.split("\n").find((l) => l.startsWith("| 1 |")) ?? "";
+  // only UNescaped pipes are cell separators — the wikilink alias pipe is "\|"
+  expect(line.split(/(?<!\\)\|/).length).toBe(5); // "", " 1 ", " link ", " date ", ""
+  expect(line).toContain("a b [c]".replace(/[[\]]/g, " ").replace(/\s+/g, " ").trim());
+});
+
+test("renderIndexNote: dataview block over the project tag + wikilink list", () => {
+  const body = renderIndexNote(
+    [row({ name: "alpha" }), row({ name: "beta", updated: "2026-03-03" })].map((r) => ({
+      row: r,
+      prefix: projectPrefix(r),
+    })),
+  );
+  expect(body).toContain("```dataview");
+  expect(body).toContain("FROM #mc/project");
+  expect(body).toContain(`- [[${VAULT_TOP}/beta/beta|beta]]`);
+  expect(body.indexOf("/beta/beta|")).toBeLessThan(body.indexOf("/alpha/alpha|")); // newest first
+});
+
+// ----------------------------------------------------------------- write ----
+
+test("writeVault: creates symlinks that resolve to the real docs", () => {
+  const base = tmp("mc-ov-write-");
+  const p = makeProject(base, "alpha");
+  const vault = tmp("mc-ov-vault-");
+
+  const res = writeVault(planVault([row({ name: "alpha", path: p })]), vault);
+  expect(res.projects).toBe(1);
+  expect(res.skipped).toEqual([]);
+
+  const link = path.join(vault, VAULT_TOP, "alpha", "sprint", "sprint-10.md");
+  expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+  expect(fs.readFileSync(link, "utf8")).toBe("# sprint 10");
+  expect(fs.readFileSync(path.join(vault, VAULT_TOP, "alpha", "wiki", "overview.md"), "utf8")).toBe(
+    "# overview",
+  );
+  expect(fs.existsSync(path.join(vault, VAULT_TOP, "alpha", "alpha.md"))).toBe(true);
+});
+
+test("writeVault: editing through the symlink writes the project's real file", () => {
+  const base = tmp("mc-ov-edit-");
+  const p = makeProject(base, "alpha");
+  const vault = tmp("mc-ov-vault-");
+  writeVault(planVault([row({ name: "alpha", path: p })]), vault);
+
+  fs.writeFileSync(path.join(vault, VAULT_TOP, "alpha", "plan.md"), "# edited in obsidian");
+  expect(fs.readFileSync(path.join(p, "docs", "plan.md"), "utf8")).toBe("# edited in obsidian");
+});
+
+test("writeVault: rerun is idempotent — same links, nothing pruned", () => {
+  const base = tmp("mc-ov-idem-");
+  const p = makeProject(base, "alpha");
+  const vault = tmp("mc-ov-vault-");
+  const plan = planVault([row({ name: "alpha", path: p })]);
+  const first = writeVault(plan, vault);
+  const second = writeVault(planVault([row({ name: "alpha", path: p })]), vault);
+  expect(second.links).toBe(first.links);
+  expect(second.pruned).toEqual([]);
+});
+
+test("writeVault: dropping a project prunes its folder but NOT the real files", () => {
+  const base = tmp("mc-ov-prune-");
+  const a = makeProject(base, "alpha");
+  const b = makeProject(base, "beta");
+  const vault = tmp("mc-ov-vault-");
+  writeVault(planVault([row({ name: "alpha", path: a }), row({ name: "beta", path: b })]), vault);
+  expect(fs.existsSync(path.join(vault, VAULT_TOP, "beta"))).toBe(true);
+
+  const res = writeVault(planVault([row({ name: "alpha", path: a })]), vault);
+  expect(res.pruned.length).toBeGreaterThan(0);
+  expect(fs.existsSync(path.join(vault, VAULT_TOP, "beta"))).toBe(false);
+  // the whole point: beta's real docs survive the prune untouched
+  expect(fs.readFileSync(path.join(b, "docs", "plan.md"), "utf8")).toBe("# plan");
+  expect(fs.readFileSync(path.join(b, "docs", "wiki", "overview.md"), "utf8")).toBe("# overview");
+  expect(fs.readFileSync(path.join(b, "README.md"), "utf8")).toBe("# readme beta");
+  expect(fs.readFileSync(path.join(b, "docs", "beta-sprint-10.md"), "utf8")).toBe("# sprint 10");
+});
+
+test("writeVault: prune leaves a hand-written note in the vault alone", () => {
+  const base = tmp("mc-ov-hand-");
+  const a = makeProject(base, "alpha");
+  const vault = tmp("mc-ov-vault-");
+  writeVault(planVault([row({ name: "alpha", path: a })]), vault);
+  const mine = path.join(vault, VAULT_TOP, "my own thoughts.md");
+  fs.writeFileSync(mine, "# mine\nno frontmatter here");
+
+  const res = writeVault(planVault([row({ name: "alpha", path: a })]), vault);
+  expect(res.pruned).toEqual([]);
+  expect(fs.existsSync(mine)).toBe(true);
+});
+
+test("writeVault: a real file where a link belongs is skipped, never clobbered", () => {
+  const base = tmp("mc-ov-skipreal-");
+  const a = makeProject(base, "alpha");
+  const vault = tmp("mc-ov-vault-");
+  fs.mkdirSync(path.join(vault, VAULT_TOP, "alpha"), { recursive: true });
+  const real = path.join(vault, VAULT_TOP, "alpha", "README.md");
+  fs.writeFileSync(real, "# hand written readme");
+
+  const res = writeVault(planVault([row({ name: "alpha", path: a })]), vault);
+  expect(res.skipped).toContain(`${VAULT_TOP}/alpha/README.md`);
+  expect(fs.readFileSync(real, "utf8")).toBe("# hand written readme");
+});
+
+test("writeVault: a vanished project doc yields no dead symlink", () => {
+  const base = tmp("mc-ov-dead-");
+  const a = makeProject(base, "alpha");
+  const vault = tmp("mc-ov-vault-");
+  const plan = planVault([row({ name: "alpha", path: a })]);
+  fs.rmSync(path.join(a, "docs", "plan.md")); // disappears between plan and write
+
+  writeVault(plan, vault);
+  expect(fs.existsSync(path.join(vault, VAULT_TOP, "alpha", "plan.md"))).toBe(false);
+});
+
+test("isGeneratedNote: only files carrying the marker", () => {
+  const base = tmp("mc-ov-marker-");
+  const gen = path.join(base, "gen.md");
+  const hand = path.join(base, "hand.md");
+  fs.writeFileSync(gen, `---\n${MC_MARKER}\nmc: project\n---\n\n# x`);
+  fs.writeFileSync(hand, "---\ntitle: mine\n---\n\n# x");
+  expect(isGeneratedNote(gen)).toBe(true);
+  expect(isGeneratedNote(hand)).toBe(false);
+  expect(isGeneratedNote(path.join(base, "missing.md"))).toBe(false);
+});
+
+// -------------------------------------------------------------- register ----
+
+function withConfig(body: string | null, fn: (cfg: string) => void): void {
+  const dir = tmp("mc-ov-cfg-");
+  const cfg = path.join(dir, "obsidian.json");
+  if (body !== null) fs.writeFileSync(cfg, body);
+  const prev = process.env.MC_OBSIDIAN_CONFIG;
+  process.env.MC_OBSIDIAN_CONFIG = cfg;
+  try {
+    fn(cfg);
+  } finally {
+    if (prev === undefined) delete process.env.MC_OBSIDIAN_CONFIG;
+    else process.env.MC_OBSIDIAN_CONFIG = prev;
+  }
+}
+
+test("registerVault: keeps other vaults, marks only ours open", () => {
+  withConfig(
+    JSON.stringify({
+      vaults: { abc123: { path: "/home/u/.oracle/graphify/maw-ui/vault", ts: 1, open: true } },
+    }),
+    (cfg) => {
+      expect(registerVault("/home/u/.mission-control/obsidian", 999)).toBe("registered");
+      const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
+      expect(data.vaults["abc123"].path).toBe("/home/u/.oracle/graphify/maw-ui/vault");
+      expect(data.vaults["abc123"].open).toBe(false);
+      const id = vaultId("/home/u/.mission-control/obsidian");
+      expect(data.vaults[id]).toEqual({
+        path: "/home/u/.mission-control/obsidian",
+        ts: 999,
+        open: true,
+      });
+    },
+  );
+});
+
+test("registerVault: rerun does not duplicate the entry", () => {
+  withConfig(JSON.stringify({ vaults: {} }), (cfg) => {
+    registerVault("/v/mine", 1);
+    registerVault("/v/mine", 2);
+    const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
+    expect(Object.keys(data.vaults).length).toBe(1);
+    expect(data.vaults[vaultId("/v/mine")].ts).toBe(2);
+  });
+});
+
+test("registerVault: folds an Obsidian-assigned id for the same path into ours", () => {
+  withConfig(
+    JSON.stringify({ vaults: { deadbeefdeadbeef: { path: "/v/mine", ts: 5, open: false } } }),
+    (cfg) => {
+      expect(registerVault("/v/mine", 7)).toBe("registered");
+      const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
+      expect(Object.keys(data.vaults)).toEqual([vaultId("/v/mine")]);
+    },
+  );
+});
+
+test("registerVault: corrupt or missing registry is left untouched", () => {
+  withConfig("{not json at all", (cfg) => {
+    expect(registerVault("/v/mine")).toBe("unreadable");
+    expect(fs.readFileSync(cfg, "utf8")).toBe("{not json at all");
+  });
+  withConfig(null, () => {
+    expect(registerVault("/v/mine")).toBe("no-config");
+  });
+});

@@ -196,12 +196,15 @@ function readPlan(
   }
 }
 
-/** Scan every project under projects/ (owner-root and ghq-root) for leftover
- *  work — a project is resumable if it has docs/*sprint-*.md (new <project>-sprint-N.md
- *  or legacy sprint-N.md naming) OR an open agents/*
- *  worktree. NOT filtered by team (user picks the team after). Sorted so the
- *  most-recently-driven is first. */
-export function scanResumableProjects(): ResumableProject[] {
+/** Every project under projects/ (owner-root and ghq-root). NOT filtered by team
+ *  (user picks the team after). Sorted so the most-recently-driven is first.
+ *  By default nothing is filtered out — the Projects screen is a full inventory, so
+ *  a project with no docs/plan/worktree still lists (as a plain row: no sprint rail,
+ *  no continue button, since pending = 0). Hiding those made the list look like it
+ *  had silently dropped projects.
+ *  `opts.resumableOnly` = keep only dirs with real leftover work (`isResumable`) —
+ *  used by the dashboard's "ทำต่อ" wizard, where an unstartable project is noise. */
+export function scanProjects(opts?: { resumableOnly?: boolean }): ResumableProject[] {
   const root = resolveOwnerRoot();
   if (!root) return [];
   const candidates: string[] = [];
@@ -229,7 +232,10 @@ export function scanResumableProjects(): ResumableProject[] {
     const sprintDocs = countSprintDocs(p);
     const openWorktrees = countOpenAgentWorktrees(p);
     const plan = readPlan(p);
-    if (!isResumable({ sprintDocs, openWorktrees, plannedTotal: plan?.total, plannedDone: plan?.done }))
+    if (
+      opts?.resumableOnly &&
+      !isResumable({ sprintDocs, openWorktrees, plannedTotal: plan?.total, plannedDone: plan?.done })
+    )
       continue;
     const meta = readMeta(p);
     out.push({
