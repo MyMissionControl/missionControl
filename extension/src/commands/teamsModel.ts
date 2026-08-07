@@ -5,8 +5,10 @@
 // with `bun test`.
 
 /** Roles the maw oracle store uses in practice (free-text field, but these are
- *  the established vocabulary — offered as a dropdown). */
-export const ROLE_OPTIONS = ["orchestrator", "member", "builder"] as const;
+ *  the established vocabulary — offered as a dropdown). Only "orchestrator" is
+ *  ever special-cased anywhere; every non-orchestrator is a "worker" (the old
+ *  "member"/"builder" split was cosmetic and is collapsed into this one). */
+export const ROLE_OPTIONS = ["orchestrator", "worker"] as const;
 
 /** Member colors — EXACTLY maw's AgentColor palette (maw-js
  *  tmux/layout-manager.ts → AGENT_COLORS). This is the color maw paints the
@@ -165,7 +167,17 @@ export function extractOauthToken(raw: string | null | undefined, nowMs = Date.n
   return null;
 }
 
-export const DEFAULT_ROLE = "member";
+export const DEFAULT_ROLE = "worker";
+
+/** Coerce any stored/legacy role value to the current vocabulary at the LOAD
+ *  boundary. "orchestrator" is the only role special-cased anywhere; everything
+ *  else — the retired "member"/"builder" labels, blanks, or anything unexpected
+ *  — becomes "worker". Applied when reading the roster (mergeTeamStores) so old
+ *  on-disk rosters render + diff as "worker" instead of the role <select>
+ *  falling through to its first <option> (which would silently be orchestrator). */
+export function normalizeRole(role: string | undefined): string {
+  return (role ?? "").trim() === "orchestrator" ? "orchestrator" : DEFAULT_ROLE;
+}
 // The model a member defaults to when none is stored (or when maw wrote the bare
 // engine name "claude" into the model field). Pinned to a versioned id so the
 // dropdown pre-selects a concrete version and maw launches `claude --model claude-sonnet-5`.
@@ -290,7 +302,7 @@ export function mergeTeamStores(
     const tool = byName.get(m.oracle);
     out.push({
       oracle: m.oracle,
-      role: (m.role && m.role.trim()) || DEFAULT_ROLE,
+      role: normalizeRole(m.role),
       model: tool?.model,
       color: tool?.color,
     });

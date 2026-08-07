@@ -187,7 +187,7 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
       case "awaken_member": {
         const name = typeof msg.name === "string" ? msg.name : "";
         const oracle = typeof msg.oracle === "string" ? msg.oracle : "";
-        const role = typeof msg.role === "string" && msg.role.trim() ? msg.role.trim() : "member";
+        const role = typeof msg.role === "string" && msg.role.trim() ? msg.role.trim() : DEFAULT_ROLE;
         if (!isSafeTeamName(name) || !isSafeTeamName(oracle)) {
           vscode.window.showErrorMessage(`Teams: ชื่อทีม/oracle ไม่ถูกต้อง: '${name}' / '${oracle}'`);
           panel.webview.postMessage({ type: "op_done" });
@@ -408,7 +408,7 @@ export function renderShell(): string {
   // The "awaken" button (create+ritual) only makes sense for a team that exists,
   // so it's shown/wired only when this is set.
   let DETAIL_TEAM = "";
-  let OPT = { roleOptions: [], colorOptions: [], modelOptions: [], defaultRole: "member", defaultModel: "claude-sonnet-5" };
+  let OPT = { roleOptions: [], colorOptions: [], modelOptions: [], defaultRole: "worker", defaultModel: "claude-sonnet-5" };
   const COLOR_HEX = { blue:'#4ea1ff', green:'#3fb950', red:'#f85149', yellow:'#e3b341',
     magenta:'#d2a8ff', cyan:'#39c5cf', white:'#e6edf3', orange:'#f0883e' };
 
@@ -436,7 +436,12 @@ export function renderShell(): string {
   function optionList(values, sel){
     return values.map(v => '<option value="'+esc(v)+'"'+(v===sel?' selected':'')+'>'+esc(v)+'</option>').join('');
   }
-  function roleSelect(sel){ return '<select class="role">'+optionList(OPT.roleOptions, sel||OPT.defaultRole)+'</select>'; }
+  function roleSelect(sel){
+    var val = sel || OPT.defaultRole;
+    var opts = (OPT.roleOptions || []).slice();
+    if (opts.indexOf(val) < 0) opts.unshift(val); // preserve an out-of-vocab stored role instead of silently selecting the first option (orchestrator)
+    return '<select class="role">'+optionList(opts, val)+'</select>';
+  }
   function colorSelect(sel){
     var opts = '<option value=""'+(!sel?' selected':'')+'>—</option>'
       + OPT.colorOptions.map(c => '<option value="'+esc(c)+'"'+(c===sel?' selected':'')+'>'+esc(c)+'</option>').join('');
@@ -584,7 +589,7 @@ export function renderShell(): string {
         var oracle = ni ? ni.value.trim() : '';
         if (!oracle) { clearBusy(); return; } // nothing typed — release + no-op
         var roleSel = tr.querySelector('.role');
-        post('awaken_member', { name: DETAIL_TEAM, oracle: oracle, role: roleSel ? roleSel.value : 'member' });
+        post('awaken_member', { name: DETAIL_TEAM, oracle: oracle, role: roleSel ? roleSel.value : 'worker' });
       });
     }
     Array.prototype.forEach.call(tbody.querySelectorAll('tr'), bindRow);

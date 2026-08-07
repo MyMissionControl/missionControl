@@ -39,9 +39,9 @@ test("mergeTeamStores fills model/color from tool store, defaults role", () => {
     [{ name: "bob", model: "claude", color: "blue" }],
   );
   expect(merged).toEqual([
-    { oracle: "bob", role: "member", model: "claude", color: "blue" },
+    { oracle: "bob", role: "worker", model: "claude", color: "blue" },
     { oracle: "foreman", role: "orchestrator", model: undefined, color: undefined },
-    { oracle: "jack", role: "member", model: undefined, color: undefined }, // blank role → default
+    { oracle: "jack", role: "worker", model: undefined, color: undefined }, // blank role → default
   ]);
 });
 
@@ -54,9 +54,9 @@ test("mergeTeamStores appends tool-store-only members (divergent stores)", () =>
   );
   expect(merged).toEqual([
     { oracle: "orches", role: "orchestrator", model: undefined, color: undefined },
-    { oracle: "dev1", role: "builder", model: undefined, color: undefined },
-    { oracle: "foreman", role: "member", model: "claude-opus-4-8", color: undefined },
-    { oracle: "bob", role: "member", model: "claude-sonnet-5", color: "green" },
+    { oracle: "dev1", role: "worker", model: undefined, color: undefined },
+    { oracle: "foreman", role: "worker", model: "claude-opus-4-8", color: undefined },
+    { oracle: "bob", role: "worker", model: "claude-sonnet-5", color: "green" },
   ]);
 });
 
@@ -243,7 +243,7 @@ test("mergeTeamStores: skips maw live-worker entries (team up pollution)", () =>
   );
   expect(merged).toEqual([
     { oracle: "foreman", role: "orchestrator", model: undefined, color: undefined },
-    { oracle: "bob", role: "member", model: "claude-opus-4-8", color: "cyan" }, // decorated, not from the live %1 entry
+    { oracle: "bob", role: "worker", model: "claude-opus-4-8", color: "cyan" }, // decorated, not from the live %1 entry
   ]);
 });
 

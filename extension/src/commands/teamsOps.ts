@@ -8,6 +8,7 @@ import { readTeamModels, writeTeamModels } from "./teamModels";
 import {
   awakenStatusFromClaudeMd,
   createArgs,
+  DEFAULT_ROLE,
   deleteArgs,
   diffMembers,
   inviteArgs,
@@ -368,7 +369,7 @@ export async function prepareAwakenMember(
   }
   const errors: string[] = [];
   // scaffold (maw bud --scaffold-only) + oracle-invite with the role — same path Save uses.
-  await ensureAndInvite(team, [{ oracle, role: role || "member" }], errors);
+  await ensureAndInvite(team, [{ oracle, role: role || DEFAULT_ROLE }], errors);
   // Charter must list the new member or `maw team up --only <oracle>` finds nothing.
   const roster = readTeamDetailSync(team).members.map((m) => ({ oracle: m.oracle, role: m.role }));
   syncCharter(team, roster, errors);
