@@ -205,6 +205,7 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
   .tl .track { position: relative; height: 16px; }
   .tl .seg { position: absolute; top: 7px; height: 2px; background: var(--border2); }
   .tl .dot { position: absolute; top: 3px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent2); transform: translateX(-50%); }
+  .tl.ptl .sbar { position: absolute; top: 50%; transform: translateY(-50%); height: 12px; border-radius: 4px; background: var(--accent); min-width: 3px; }
   .tl .nodate { font-size: 11px; color: var(--faint); }
   .tl.ptl .row { grid-template-columns: 260px 1fr; }
   .tl .sum { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-bottom: 6px; }
@@ -220,7 +221,9 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
   .brow { display: grid; grid-template-columns: 220px 1fr; align-items: center; padding: 5px 0; position: relative; z-index: 1; }
   .brow:hover { background: var(--accentSoft); }
   .brow.deleted { opacity: .55; }
-  .bnm { font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; padding-right: 10px; }
+  .bnm { display: flex; align-items: center; gap: 6px; min-width: 0; font-family: var(--mono); font-size: 11.5px; cursor: pointer; padding-right: 10px; }
+  .bnm .pn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .bnm .deltag { flex: none; white-space: nowrap; }
   .btrack { position: relative; height: 18px; }
   .btrack .nodate { position: absolute; left: 0; top: 50%; transform: translateY(-50%); font-size: 11px; color: var(--faint); }
   .brange { position: absolute; top: 50%; transform: translateY(-50%); height: 12px; border-radius: 4px; background-color: var(--accent);
@@ -443,7 +446,7 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
         const tip = dated[0] + ' → ' + dated[dated.length - 1] + ' · ' + r.sprintsTotal + ' sprint';
         track = '<div class="btrack"><div class="brange" title="' + esc(tip) + '" style="left:' + lo + '%;width:' + w + '%;background-size:' + (100 / nSeg) + '% 100%"></div></div>';
       }
-      rows += '<div class="brow' + (r.deleted ? ' deleted' : '') + '"><div class="bnm" data-p="' + esc(r.path) + '" data-name="' + esc(r.name) + '" title="' + esc(r.name) + '">' + esc(r.name) + delTag(r) + '</div>' + track + '</div>';
+      rows += '<div class="brow' + (r.deleted ? ' deleted' : '') + '"><div class="bnm" data-p="' + esc(r.path) + '" data-name="' + esc(r.name) + '" title="' + esc(r.name) + '"><span class="pn">' + esc(r.name) + '</span>' + delTag(r) + '</div>' + track + '</div>';
     }
     const legend = '<div class="tlb-legend"><span class="lg"><span class="sw"></span>ช่วงที่มีสปรินต์</span><span class="lg"><span class="tln"></span>วันนี้</span></div>';
     return '<div class="tlbar">' + axis + '<div class="tlb-scroll">' + overlay + rows + '</div>' + legend + '</div>';
@@ -557,12 +560,13 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
       }
       return '<div class="col"><h3><span>' + label + '</span><span>' + n + '</span></h3>' + (inner || '<div class="empty">—</div>') + '</div>';
     };
-    return taskNote() + '<div class="kb kb2">' + col('เสร็จ', 'done', 'done') + col('ค้าง', 'pending', 'todo') + '</div>';
+    return taskNote() + '<div class="kb kb2">' + col('ค้าง', 'pending', 'todo') + col('เสร็จ', 'done', 'done') + '</div>';
   }
 
-  /* project mode: sprints as dots on one shared date axis — same look as the
-   * cross-project timeline. Each sprint doc carries one date (its completion), so
-   * the segment from the previous sprint's dot to this one is how long it took. */
+  /* project mode: one solid bar per sprint on a shared date axis — same look as the
+   * cross-project timeline, but not subdivided (each row is a single sprint). Each
+   * sprint doc carries one date (its completion); the bar spans from the previous
+   * sprint's date to this one = how long the sprint took. */
   function renderProjectTimeline() {
     if (S.tasks === null) return '<div class="empty">กำลังอ่านเอกสาร…</div>';
     const sprints = (S.tasks || []).slice().sort((a, b) => a.n - b.n);
@@ -582,21 +586,17 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
         track = '<span class="nodate">ไม่มีวันที่</span>';
       } else {
         const x = pos(s.date);
-        let seg = "", dur = "";
-        if (prev) {
-          const px = pos(prev.date);
-          const lo = Math.min(px, x), hi = Math.max(px, x);
-          seg = '<div class="seg" style="left:' + lo + '%;width:' + (hi - lo) + '%"></div>';
-          const days = Math.max(0, Math.round((Date.parse(s.date) - Date.parse(prev.date)) / DAY));
-          dur = days === 0 ? ' · วันเดียวกับก่อนหน้า' : ' · ~' + days + ' วัน';
-        }
-        const dot = '<div class="dot" title="' + esc('Sprint ' + s.n + ' · ' + s.date + dur) + '" style="left:' + x + '%"></div>';
-        track = '<div class="track">' + seg + dot + '</div>';
+        const px = prev ? pos(prev.date) : x;   // first sprint: no prior span → a stub at the start
+        const lo = Math.min(px, x), w = Math.abs(x - px);
+        const days = prev ? Math.max(0, Math.round((Date.parse(s.date) - Date.parse(prev.date)) / DAY)) : 0;
+        const dur = !prev ? ' · เริ่มต้น' : days === 0 ? ' · วันเดียวกับก่อนหน้า' : ' · ~' + days + ' วัน';
+        const tip = 'Sprint ' + s.n + ' · ' + s.date + dur;
+        track = '<div class="track"><div class="sbar" title="' + esc(tip) + '" style="left:' + lo + '%;width:' + w + '%"></div></div>';
         prev = s;
       }
       body += '<div class="row">' + nm + track + '</div>';
     }
-    const sum = '<div class="sum">รวม ' + total + ' วัน · ' + sprints.length + ' sprint · ชี้ที่จุดเพื่อดูว่าแต่ละ sprint ใช้เวลาเท่าไหร่</div>';
+    const sum = '<div class="sum">รวม ' + total + ' วัน · ' + sprints.length + ' sprint · แต่ละแท่ง = เวลาที่ sprint นั้นใช้</div>';
     return '<div class="tl ptl">' + sum + axis + body + '</div>';
   }
 
