@@ -24,6 +24,7 @@ import { terminalCommand } from "./commands/terminal";
 import { PROJECT_STATE_KEY, setCurrentProjectId } from "./projectState";
 import { registerStatusBar } from "./statusBar";
 import { openBudgetPanel } from "./webview/budget";
+import { openCreateRequirementPanel } from "./webview/createRequirement";
 import { openDataViewPanel } from "./webview/dataView";
 import { openMirrorPanel } from "./webview/mirror";
 import { openOrchestratorPanel } from "./webview/orchestrator";
@@ -50,6 +51,12 @@ export function activate(context: vscode.ExtensionContext) {
     // Cross-project Data View — project status parsed from each project's .md docs
     // (table / kanban / timeline). Opened from a Project Detail button + palette.
     vscode.commands.registerCommand("missioncontrol.dataView", () => openDataViewPanel()),
+    // Draft the requirement .md that gets handed to /orches: templated textarea,
+    // a `claude -p` review answered one question at a time, and a save that turns
+    // the button into Copy-absolute-path until the draft is edited.
+    vscode.commands.registerCommand("missioncontrol.createRequirement", () =>
+      openCreateRequirementPanel(context),
+    ),
     // Refresh the project vault (one folder per project) and launch Obsidian on it.
     vscode.commands.registerCommand("missioncontrol.openObsidian", () => openObsidianCommand()),
     vscode.commands.registerCommand("missioncontrol.skills", () => skillsCommand(context)),

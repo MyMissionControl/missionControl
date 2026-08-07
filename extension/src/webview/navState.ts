@@ -5,12 +5,13 @@ import * as vscode from "vscode";
 // nav item; any other tab (Home/Projects/Budget/a file) clears it. Kept out of
 // sidebar.ts so the panel modules never have to depend on the sidebar.
 
-export type NavId = "skills" | "accounts" | "localhosts";
+export type NavId = "skills" | "accounts" | "localhosts" | "createRequirement";
 
 const VIEWTYPE_TO_NAV: Record<string, NavId> = {
   "missioncontrol.skills": "skills",
   "missioncontrol.accounts": "accounts",
   "missioncontrol.localhosts": "localhosts",
+  "missioncontrol.createRequirement": "createRequirement",
 };
 
 /** Map an editor tab's webview viewType to a nav id. VS Code can report panel

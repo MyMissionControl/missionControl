@@ -97,6 +97,10 @@
         "title": "Mission Control: Data View"
       },
       {
+        "command": "missioncontrol.createRequirement",
+        "title": "Mission Control: Create Requirement"
+      },
+      {
         "command": "missioncontrol.openObsidian",
         "title": "Mission Control: Open in Obsidian"
       },
