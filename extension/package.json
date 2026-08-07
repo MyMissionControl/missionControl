@@ -123,8 +123,22 @@
       {
         "command": "missioncontrol.mawToggle",
         "title": "Mission Control: Toggle maw ui"
+      },
+      {
+        "command": "missioncontrol.pendingAsk",
+        "title": "Mission Control: คำถามที่ agent รอคำตอบ"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Mission Control",
+      "properties": {
+        "missioncontrol.pendingAsk.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "เฝ้าดูจอของ Claude pane ทุกตัว แล้วเด้งกล่องตัวเลือกใน VS Code เมื่อ agent ถามคำถามแล้วค้างรอคำตอบอยู่ · ตอบกลับได้เลยสำหรับกล่องเลือกข้อเดียว"
+        }
+      }
+    }
   },
   "scripts": {
     "setup": "node scripts/setup.mjs",

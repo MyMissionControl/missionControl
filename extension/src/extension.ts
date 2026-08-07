@@ -12,6 +12,7 @@ import { installCommand } from "./commands/install";
 import { localhostsCommand } from "./commands/localhostsPanel";
 import { mawToggleCommand } from "./commands/mawServe";
 import { openObsidianCommand } from "./commands/openObsidian";
+import { initPendingAskWatch, pendingAskCommand } from "./commands/pendingAskWatch";
 import { settingsCommand } from "./commands/settingsPanel";
 import { setupCommand } from "./commands/setup";
 import { skillsCommand } from "./commands/skills";
@@ -78,6 +79,9 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.orchestratorContinue", () =>
       openOrchestratorPanel(context),
     ),
+    // "N รอตอบ" in the status bar → re-open the choice box of whichever agent is
+    // blocked on an AskUserQuestion (also recovers one dismissed with Esc).
+    vscode.commands.registerCommand("missioncontrol.pendingAsk", () => pendingAskCommand()),
   ];
   context.subscriptions.push(...registrations);
 
@@ -87,6 +91,11 @@ export function activate(context: vscode.ExtensionContext) {
   // context is shown in each REPL's own in-pane statusLine bar.)
   initClaudeTerminalRegistry(context);
   initAttachStatusBar(context);
+  // Poll every live Claude pane's SCREEN for an open choice box and pop it as a
+  // native QuickPick — the agents ask inside tmux, where nothing else in VS Code
+  // was ever going to show it. (The transcript is not usable for this: Claude
+  // Code only writes the ask once it has been answered — see pendingAsk.ts.)
+  initPendingAskWatch(context);
 }
 
 export function deactivate() {}
