@@ -171,6 +171,28 @@ export function askKey(pane: string, ask: PaneAsk): string {
 }
 
 /**
+ * How an option is written in the QuickPick, and how it is read back.
+ *
+ * These two are a pair and must never drift: the accept handler receives only
+ * the picked item's `label`, so the formatting side and the lookup side have to
+ * agree exactly. If they diverge the box renders perfectly and clicking it does
+ * nothing — a dead affordance, the same failure the dashboard's window rows once
+ * had. Matching the WHOLE formatted string (rather than parsing the leading
+ * digit) is what makes an option whose own text begins "2. …" still resolve to
+ * its real key. `pendingAsk.test.ts` locks the round-trip.
+ */
+export function itemLabel(o: AskOption): string {
+  return `${o.key}. ${o.label}`;
+}
+
+/** The option a picked QuickPick label refers to, or null if it belongs to a
+ *  box that has since been replaced. */
+export function findOptionByLabel(ask: PaneAsk, label: string): AskOption | null {
+  if (!label) return null;
+  return ask.options.find((o) => itemLabel(o) === label) ?? null;
+}
+
+/**
  * `tmux send-keys` argv that picks the option printed as `digit`.
  *
  * Live-proved 2026-08-07: `tmux send-keys -t %0 2` on an open AskUserQuestion

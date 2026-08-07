@@ -6,6 +6,22 @@
 //
 // Poll every live Claude pane, and when one is sitting on a choice box, pop the
 // same box as a native QuickPick and send the answer back with one keystroke.
+//
+// Live-proved 2026-08-07 in an Extension Development Host, verified from a
+// screen capture: a tmux pane blocked on AskUserQuestion produced a QuickPick
+// titled "<session> รอคำตอบ · <header>", placeholder = the question, one item per
+// real option ("1. Monday" + its description as detail, the TUI's own "Type
+// something."/"Chat about this" rows correctly absent), and "1 รอตอบ" in the
+// status bar. The tmux send is separately proved (`send-keys -t %0 2` on a live
+// modal selected AND submitted option 2).
+//
+// What could NOT be driven from a script is the click itself: under xrdp neither
+// synthetic keys nor a synthetic click reliably reach the dev host's overlay, and
+// pushing harder risks landing them in the user's real window. So the glue
+// between "an item was picked" and "that option's digit is sent" is covered in
+// the pure layer instead — itemLabel/findOptionByLabel are a locked round-trip
+// (pendingAsk.test.ts R1-R6). If those two ever drift, the box renders and the
+// click silently does nothing; that is the failure the tests exist to stop.
 
 import * as cp from "node:child_process";
 
@@ -14,7 +30,9 @@ import * as vscode from "vscode";
 import {
   PANE_LIST_FMT,
   buildAnswerArgs,
+  findOptionByLabel,
   isDigitAnswerable,
+  itemLabel,
   parseAskFromPane,
   parsePaneList,
   scanPending,
@@ -113,7 +131,7 @@ function showBox(hit: PendingHit): void {
   qp.matchOnDetail = true;
 
   const items: vscode.QuickPickItem[] = ask.options.map((o) => ({
-    label: `${o.key}. ${o.label}`,
+    label: itemLabel(o),
     detail: o.description || undefined,
   }));
   if (!answerable) {
@@ -131,7 +149,7 @@ function showBox(hit: PendingHit): void {
         await openPane(hit);
         return;
       }
-      const opt = ask.options.find((o) => `${o.key}. ${o.label}` === picked.label);
+      const opt = findOptionByLabel(ask, picked.label);
       if (!opt) return;
       if (!(await stillUp(hit))) {
         vscode.window.showInformationMessage(`${hit.session}: กล่องปิดไปแล้ว — ไม่ได้ส่งคำตอบซ้ำ`);

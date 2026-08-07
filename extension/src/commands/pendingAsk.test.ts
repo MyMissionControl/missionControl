@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 
 import {
   askKey,
+  findOptionByLabel,
+  itemLabel,
   buildAnswerArgs,
   isDigitAnswerable,
   parseAskFromPane,
@@ -275,5 +277,53 @@ describe("scanPending", () => {
   test("S4 nothing waiting = no work", () => {
     expect(scanPending(panes, () => REAL_WORKING)).toEqual([]);
     expect(scanPending([], () => REAL_MODAL)).toEqual([]);
+  });
+});
+
+// ── itemLabel / findOptionByLabel ──────────────────────────────────────────
+// The QuickPick round-trip: a label is FORMATTED for display, then the accept
+// handler matches the picked label back to its option. If those two ever
+// diverge the box renders fine and the click silently does nothing — the same
+// dead-affordance class as the dashboard row that had no handler. Both sides
+// now go through these functions, and these tests are what keep them in step.
+describe("QuickPick label round-trip", () => {
+  const ask = (labels: string[]) => ({
+    header: "h",
+    question: "q",
+    multiSelect: false,
+    options: labels.map((label, i) => ({ key: i + 1, label, description: "" })),
+  });
+
+  test("R1 a formatted label finds its own option again", () => {
+    const a = ask(["Now", "Tonight", "Tomorrow"]);
+    for (const o of a.options) {
+      expect(findOptionByLabel(a, itemLabel(o))!.key).toBe(o.key);
+    }
+  });
+
+  test("R2 Thai labels round-trip", () => {
+    const a = ask(["เดี๋ยวนี้", "คืนนี้", "พรุ่งนี้"]);
+    expect(findOptionByLabel(a, itemLabel(a.options[2]))!.label).toBe("พรุ่งนี้");
+  });
+
+  test("R3 a label that itself looks numbered does not match the wrong key", () => {
+    // Option 1's text is "2. เอาแบบเดิม" -> displayed as "1. 2. เอาแบบเดิม".
+    // A lookup that parsed the leading digit would return option 2. It must not.
+    const a = ask(["2. เอาแบบเดิม", "อย่างอื่น"]);
+    expect(findOptionByLabel(a, itemLabel(a.options[0]))!.key).toBe(1);
+  });
+
+  test("R4 duplicate label text stays distinguishable by its key", () => {
+    const a = ask(["same", "same"]);
+    expect(findOptionByLabel(a, itemLabel(a.options[1]))!.key).toBe(2);
+  });
+
+  test("R5 a label from a different box matches nothing", () => {
+    expect(findOptionByLabel(ask(["a", "b"]), "1. หายไปแล้ว")).toBeNull();
+    expect(findOptionByLabel(ask(["a", "b"]), "")).toBeNull();
+  });
+
+  test("R6 the displayed label carries the digit the pane will receive", () => {
+    expect(itemLabel({ key: 3, label: "Friday", description: "" })).toBe("3. Friday");
   });
 });
