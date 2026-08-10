@@ -24,7 +24,12 @@ import {
 } from "../commands/startOrchestrator";
 import { partitionStarred, sortResumable, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
 import { removeProjectDir } from "../commands/deleteProject";
-import { listDetailDocs, resolveProjectFile, renderMarkdown } from "../commands/projectDocs";
+import {
+  listDetailDocs,
+  resolveProjectFile,
+  renderMarkdown,
+  hasMermaid,
+} from "../commands/projectDocs";
 import { listBackedUpProjects, type BackupEntry } from "../commands/docsBackup";
 import { openDataViewPanel } from "./dataView";
 import { openMirrorPanel } from "./mirror";
@@ -626,7 +631,16 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         }
         try {
           const html = renderMarkdown(fs.readFileSync(abs, "utf8"));
-          panel.webview.postMessage({ type: "doc_html", rel, html });
+          // mermaid bundle ส่งเป็น webview uri "เฉพาะเอกสารที่มีบล็อกจริง" — ไฟล์ 3.4MB ไม่ควรถูกโหลด
+          // ให้คนที่เปิดแต่เอกสารข้อความล้วน · ไฟล์อยู่ใน media/ (vendored) ไม่ใช่ node_modules:
+          // ตัว dep เต็มคือ 85MB และ extension นี้ไม่ได้ bundle → มันจะไหลเข้า .vsix ทั้งก้อน
+          const mermaidUri =
+            hasMermaid(html) && _ctx
+              ? panel.webview
+                  .asWebviewUri(vscode.Uri.joinPath(_ctx.extensionUri, "media", "mermaid.min.js"))
+                  .toString()
+              : undefined;
+          panel.webview.postMessage({ type: "doc_html", rel, html, mermaidUri });
         } catch {
           panel.webview.postMessage({ type: "doc_html", rel, error: "อ่านไฟล์ไม่ได้" });
         }
@@ -1552,6 +1566,8 @@ function renderShell(): string {
     });
     var op = el("content").querySelector('.opened');
     if(op) op.addEventListener('click', function(){ if(_selected) post('open_in_editor',{rel:_selected}); });
+    // full render ก็ยัด HTML จาก cache เข้า DOM เหมือนกัน → ต้อง render mermaid ด้วย ไม่งั้นกลับมาหน้านี้แล้วไดอะแกรมหาย
+    renderMermaidIn(el("content").querySelector('.pbody'));
   }
   // Re-render only the tree (folder toggle / selection change) — leaves the right
   // pane + its scroll position untouched. The click listener is on .tree (delegated).
@@ -1567,14 +1583,62 @@ function renderShell(): string {
     if(bar){ var f=bar.querySelector('.pfname'); if(f) f.textContent=selName(); }
     else { renderSplit(); return; }   // pane had no file selected yet → full render
     var body = el("content").querySelector('.pbody');
-    if(body){ body.innerHTML = _docCache[rel]!==undefined ? _docCache[rel] : '<div class="doc-empty">กำลังโหลด…</div>'; body.scrollTop=0; }
+    if(body){
+      // cache hit = HTML เดิมถูกยัดกลับเข้า DOM → ต้อง render mermaid ใหม่ (SVG ที่เคย render หายไปกับ innerHTML)
+      paintDocBody(_docCache[rel]!==undefined ? _docCache[rel] : '<div class="doc-empty">กำลังโหลด…</div>');
+      body.scrollTop=0;
+    }
     loadDoc(rel);
   }
   function loadDoc(rel){ if(_docCache[rel]===undefined) post('open_doc',{rel:rel}); }
-  function handleDocHtml(rel, html, error){
+
+  // ── mermaid: โหลดบันเดิล 3.4MB แบบ lazy "ครั้งเดียวต่อ panel" และเฉพาะตอนเปิดเอกสารที่มีไดอะแกรมจริง
+  //   ⛔ ห้ามใส่ <script src> ไว้ในหน้าเลย: คนที่ไม่เคยเปิดเอกสารที่มีไดอะแกรม (ส่วนใหญ่) จะจ่าย
+  //      เวลา parse ทุกครั้งที่เปิด panel ฟรี ๆ · host ส่ง uri มาพร้อม doc_html เฉพาะเอกสารที่มี block
+  //   ⛔ พังต้องพังแบบเห็น: โหลดไม่ได้/parse ไม่ผ่าน = ขึ้นข้อความบอกเหตุ แล้ว **คงข้อความไดอะแกรมไว้**
+  //      (เงียบ ๆ แล้วเหลือกล่องว่าง = แยกไม่ออกจาก "ไม่มีไดอะแกรม")
+  var _mmUri=null, _mmLoaded=false, _mmLoading=null;
+  function loadMermaid(){
+    if(_mmLoaded) return Promise.resolve();
+    if(_mmLoading) return _mmLoading;
+    if(!_mmUri) return Promise.reject(new Error('ไม่ได้รับที่อยู่ไฟล์ mermaid'));
+    _mmLoading = new Promise(function(res,rej){
+      var s=document.createElement('script');
+      s.src=_mmUri;
+      s.onload=function(){
+        try{
+          var b=document.body.classList;
+          var dark=b.contains('vscode-dark')||b.contains('vscode-high-contrast');
+          window.mermaid.initialize({startOnLoad:false, securityLevel:'strict', theme: dark?'dark':'default'});
+          _mmLoaded=true; res();
+        }catch(e){ rej(e); }
+      };
+      s.onerror=function(){ rej(new Error('โหลดไฟล์ mermaid ไม่ได้')); };
+      document.head.appendChild(s);
+    });
+    return _mmLoading;
+  }
+  function renderMermaidIn(root){
+    if(!root) return;
+    var nodes=root.querySelectorAll('pre.mermaid:not([data-processed])');
+    if(!nodes.length) return;
+    loadMermaid().then(function(){ return window.mermaid.run({nodes:nodes}); })
+      .catch(function(e){
+        var msg='แสดงไดอะแกรมไม่ได้: '+esc(String((e&&e.message)||e))+' — ข้อความไดอะแกรมยังอยู่ด้านล่าง';
+        for(var i=0;i<nodes.length;i++) nodes[i].insertAdjacentHTML('beforebegin','<div class="doc-empty">'+msg+'</div>');
+      });
+  }
+  function paintDocBody(html){
+    var body=el("content").querySelector('.pbody');
+    if(!body) return;
+    body.innerHTML=html;
+    renderMermaidIn(body);
+  }
+  function handleDocHtml(rel, html, error, mermaidUri){
+    if(mermaidUri) _mmUri=mermaidUri;
     var out = error ? '<div class="doc-empty">'+esc(error)+'</div>' : (html||'');
     _docCache[rel]=out;
-    if(_selected===rel){ var body=el("content").querySelector('.pbody'); if(body) body.innerHTML=out; }
+    if(_selected===rel) paintDocBody(out);
   }
   function handlePreviewState(running){
     _previewRunning=!!running;
@@ -1890,7 +1954,7 @@ function renderShell(): string {
     else if(m.type==="screen_teams") renderTeams(m);
     else if(m.type==="screen_orch") renderOrch(m);
     else if(m.type==="screen_detail") renderDetail(m);
-    else if(m.type==="doc_html") handleDocHtml(m.rel, m.html, m.error);
+    else if(m.type==="doc_html") handleDocHtml(m.rel, m.html, m.error, m.mermaidUri);
     else if(m.type==="preview_state") handlePreviewState(m.running);
     else if(m.type==="disarm_all") disarmAll();  // panel ถูกซ่อน/สลับ tab (backend แจ้งมา) → เลิก arm ค้าง
     else if(m.type==="git_auto_result") handleAutoResult(m.path,m.message,m.gen);

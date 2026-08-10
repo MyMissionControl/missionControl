@@ -223,11 +223,36 @@ export function resolveDocPath(projectPath: string, rel: string): string | null 
   return abs;
 }
 
+/** True when the rendered HTML carries at least one mermaid block — the webview uses this
+ *  to decide whether to pull in the 3.4 MB mermaid bundle (lazily, once per panel). */
+export function hasMermaid(html: string): boolean {
+  return html.includes('<pre class="mermaid">');
+}
+
+/** ```mermaid fences → `<pre class="mermaid">`, everything else = normal marked output.
+ *  ⛔ Escape ONLY `&` and `<`. The browser decodes entities when mermaid reads
+ *  `textContent`, so the diagram source arrives byte-identical — while escaping `>`
+ *  would be wrong to leave unescaped-by-hand and escaping the whole thing (marked's
+ *  default `escape`) turns `-->` into `--&gt;` and `A & B` into `A &amp; B`, which
+ *  mermaid then fails to parse. This is why we override the renderer instead of
+ *  post-processing marked's `<code class="language-mermaid">` output. */
+function mermaidAwareMarked(md: string): string {
+  const renderer = new marked.Renderer();
+  const base = renderer.code.bind(renderer);
+  renderer.code = function (code: string, lang?: string, escaped?: boolean): string {
+    if ((lang || "").trim().toLowerCase().split(/\s+/)[0] === "mermaid") {
+      const src = code.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+      return `<pre class="mermaid">${src}</pre>\n`;
+    }
+    return base(code, lang, escaped ?? false);
+  };
+  return marked.parse(md, { renderer }) as string; // marked v4: synchronous, returns string
+}
+
 /** Render markdown → sanitized HTML for injection into the webview. Content is our own
  *  generated docs in the user's repo (trusted), but we sanitize defensively anyway. */
 export function renderMarkdown(md: string): string {
-  const raw = marked.parse(md) as string; // marked v4: synchronous, returns string
-  return sanitizeHtml(raw);
+  return sanitizeHtml(mermaidAwareMarked(md));
 }
 
 /** Remove script/dangerous tags, inline event handlers, and javascript: URLs. */

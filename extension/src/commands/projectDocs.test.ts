@@ -8,6 +8,7 @@ import {
   listProjectDocs,
   listProjectTree,
   renderMarkdown,
+  hasMermaid,
   resolveDocPath,
   resolveProjectFile,
   sanitizeHtml,
@@ -164,4 +165,40 @@ test("sanitizeHtml: strips <script>, on* handlers, and javascript: hrefs", () =>
   expect(clean).not.toContain("onclick");
   expect(clean).not.toContain("javascript:");
   expect(clean).not.toContain("<iframe");
+});
+
+// ── mermaid fences (wiki-diagram ของ /orches-drive เขียนบล็อกพวกนี้ทุก sprint) ──────────
+// ⛔ กับดักที่เทสพวกนี้ล็อกไว้: ถ้าปล่อยให้ marked escape ตามปกติ `-->` จะกลายเป็น `--&gt;`
+//    และ `A & B` เป็น `A &amp; B` → mermaid parse ไม่ผ่าน = ขึ้นกล่อง error แทนรูป
+test("mermaid fence → <pre class=mermaid> and arrows survive un-escaped", () => {
+  const html = renderMarkdown('```mermaid\nflowchart LR\n  A --> B\n```');
+  expect(html).toContain('<pre class="mermaid">');
+  expect(html).toContain("A --> B");
+  expect(html).not.toContain("--&gt;");
+  expect(html).not.toContain('class="language-mermaid"');
+});
+
+test("mermaid: & and < are entity-escaped (textContent decodes them back for mermaid)", () => {
+  const html = renderMarkdown('```mermaid\nflowchart LR\n  A["a & b"] --> B\n```');
+  expect(html).toContain("&amp;");
+  expect(html).not.toContain('"a & b"'); // raw & would be invalid HTML
+});
+
+test("non-mermaid fences are untouched (still escaped code blocks)", () => {
+  const html = renderMarkdown("```ts\nconst x = 1 < 2;\n```");
+  expect(html).toContain("<code");
+  expect(html).toContain("1 &lt; 2");
+  expect(html).not.toContain('class="mermaid"');
+});
+
+test("hasMermaid gates the 3.4MB bundle: true only when a block exists", () => {
+  expect(hasMermaid(renderMarkdown("```mermaid\nflowchart LR\n A-->B\n```"))).toBe(true);
+  expect(hasMermaid(renderMarkdown("# just prose\n\nno diagram here"))).toBe(false);
+  expect(hasMermaid(renderMarkdown("```ts\nconst a=1;\n```"))).toBe(false);
+});
+
+test("mermaid block survives sanitizeHtml (pre/class must not be stripped)", () => {
+  const html = renderMarkdown('```mermaid\nsequenceDiagram\n  A->>B: hi\n```');
+  expect(html).toContain('<pre class="mermaid">');
+  expect(html).toContain("A->>B: hi");
 });
