@@ -414,9 +414,26 @@ export function openDashboardPanel(
         vscode.window[r.ok ? "showInformationMessage" : "showErrorMessage"](
           r.ok
             ? `Mission Control: commit สำเร็จ — ${p.split("/").pop()}`
-            : `Mission Control: commit ล้มเหลว — ${(r.stderr || r.stdout).split("\n")[0]}`,
+            : `Mission Control: commit ล้มเหลว — ${gitOps.gitErrorLine(r) || "(git ไม่ได้บอกสาเหตุ)"}`,
         );
         await refreshOrchProjects(panel);
+        return;
+      }
+      case "git_pull": {
+        // parseGitButtonState can return kind "pull", so this screen renders a
+        // Pull button — it just had no handler here (and none in the client),
+        // i.e. a button that did nothing at all when pressed.
+        const p = typeof msg.path === "string" ? msg.path : "";
+        if (!p) return;
+        const r = await gitOps.pullRepo(p);
+        vscode.window[r.ok ? "showInformationMessage" : "showErrorMessage"](
+          r.ok
+            ? `Mission Control: pull สำเร็จ — ${p.split("/").pop()}`
+            : `Mission Control: pull ล้มเหลว — ${gitOps.gitErrorLine(r) || "(git ไม่ได้บอกสาเหตุ)"}`,
+        );
+        // a failed pull means origin moved → refresh so the row stops offering
+        // the same doomed button (see the same fix in orchestrator.ts)
+        await refreshOrchProjects(panel, !r.ok);
         return;
       }
       case "git_push": {
@@ -427,9 +444,9 @@ export function openDashboardPanel(
         vscode.window[r.ok ? "showInformationMessage" : "showErrorMessage"](
           r.ok
             ? `Mission Control: push สำเร็จ — ${p.split("/").pop()}`
-            : `Mission Control: push ล้มเหลว — ${(r.stderr || r.stdout).split("\n")[0]}`,
+            : `Mission Control: push ล้มเหลว — ${gitOps.gitErrorLine(r) || "(git ไม่ได้บอกสาเหตุ)"}`,
         );
-        await refreshOrchProjects(panel);
+        await refreshOrchProjects(panel, !r.ok); // rejected push = origin moved → refetch
         return;
       }
       case "git_createpush": {
@@ -450,7 +467,7 @@ export function openDashboardPanel(
         vscode.window[r.ok ? "showInformationMessage" : "showErrorMessage"](
           r.ok
             ? `Mission Control: สร้าง+push '${repoName}' สำเร็จ`
-            : `Mission Control: create/push ล้มเหลว — ${(r.stderr || r.stdout).split("\n")[0]}`,
+            : `Mission Control: create/push ล้มเหลว — ${gitOps.gitErrorLine(r) || "(git ไม่ได้บอกสาเหตุ)"}`,
         );
         await refreshOrchProjects(panel);
         return;
@@ -1322,12 +1339,19 @@ function renderHtml(): string {
   var GIT_BTN_STYLE = {
     commit: 'background:#c47f1a;color:#fff;',
     push: 'background:#1f6feb;color:#fff;',
+    pull: 'background:#1b9aaa;color:#fff;',
     'create-push': 'background:#238636;color:#fff;',
   };
   function gitCellHtml(g) {
     if (!g || g.kind === 'none') return '';
     if (g.kind === 'uptodate')
       return '<span class="git-uptodate" style="color:#7d8590;font-size:11px;">'
+        + escapeHtml(g.label) + '</span>';
+    // diverged has no safe auto-action → an info chip, never a button. It used
+    // to render as a styleless <button> whose click did nothing at all.
+    if (g.kind === 'diverged')
+      return '<span class="git-diverged" style="color:#e3a13a;font-size:11px;" '
+        + 'title="local + remote ต่างมี commit ใหม่ — reconcile เองใน terminal">'
         + escapeHtml(g.label) + '</span>';
     return '<button class="git-act" type="button" data-kind="' + g.kind + '" style="'
       + (GIT_BTN_STYLE[g.kind] || '') + 'border:none;border-radius:5px;padding:4px 10px;'
@@ -1420,6 +1444,7 @@ function renderHtml(): string {
         e.stopPropagation();
         const kind = act.dataset.kind;
         if (kind === 'push') { vscode.postMessage({ type: "git_push", path }); return; }
+        if (kind === 'pull') { vscode.postMessage({ type: "git_pull", path }); return; }
         if (editor) editor.style.display = editor.style.display === 'none' ? 'block' : 'none';
       });
       if (!editor) return;

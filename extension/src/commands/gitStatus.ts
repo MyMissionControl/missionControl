@@ -18,6 +18,7 @@ export interface GitButtonState {
   dirtyCount: number;
   ahead: number;
   behind: number;
+  staleMs?: number; // age of the fetch these ahead/behind numbers came from
 }
 
 /** Raw facts gathered by gitOps.readGitStatus (all from `git`). */
@@ -28,11 +29,49 @@ export interface GitRawStatus {
   hasUpstream: boolean; // current branch tracks an upstream
   ahead: number; // commits HEAD is ahead of upstream (0 if no upstream)
   behind: number; // commits HEAD is behind upstream
+  staleMs?: number; // ms since the last `git fetch` (undefined = unknown)
+}
+
+/** ahead/behind are read from the remote-tracking refs, i.e. from whenever this
+ *  repo last fetched — and the Projects list only fetches when the user presses
+ *  ⟳. So "up to date" is a claim about that fetch, NOT about GitHub right now,
+ *  and a row can sit on a green chip while origin has moved. This is the hover
+ *  text that says how old the comparison is. */
+export function gitStaleNote(staleMs: number | undefined): string {
+  if (staleMs === undefined || !Number.isFinite(staleMs) || staleMs < 0) {
+    return "ยังไม่ทราบว่า fetch จาก origin ครั้งล่าสุดเมื่อไหร่ — กดปุ่ม fetch เพื่ออัปเดต";
+  }
+  const min = Math.floor(staleMs / 60_000);
+  if (min < 2) return "เทียบกับ origin เมื่อครู่นี้";
+  const tail = " — กดปุ่ม fetch เพื่ออัปเดต";
+  if (min < 60) return `เทียบกับ origin เมื่อ ${min} นาทีที่แล้ว${tail}`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `เทียบกับ origin เมื่อ ${hr} ชั่วโมงที่แล้ว${tail}`;
+  return `เทียบกับ origin เมื่อ ${Math.floor(hr / 24)} วันที่แล้ว${tail}`;
 }
 
 /** Count real change lines in porcelain output (blank lines ignored). */
 export function countDirty(porcelain: string): number {
   return porcelain.split(/\r?\n/).filter((l) => l.trim().length > 0).length;
+}
+
+/** Which repos a background auto-fetch should refresh: those whose ahead/behind
+ *  is older than `staleMs` AND that we have not already TRIED within the same
+ *  window. Keying the cooldown on the attempt rather than on success is what
+ *  makes this terminate — an offline repo never updates its FETCH_HEAD, so a
+ *  staleness-only rule would re-fetch it on every redraw, and each redraw
+ *  schedules the next fetch: a permanent loop. */
+export function pickAutoFetch(
+  staleByPath: Record<string, number | undefined>,
+  attemptedAt: Map<string, number>,
+  now: number,
+  staleMs: number,
+): string[] {
+  return Object.keys(staleByPath).filter(
+    (p) =>
+      (staleByPath[p] ?? Number.POSITIVE_INFINITY) > staleMs &&
+      now - (attemptedAt.get(p) ?? 0) > staleMs,
+  );
 }
 
 /** Decide the one action button for a project from its raw git facts.
@@ -43,7 +82,7 @@ export function countDirty(porcelain: string): number {
  *  (diverged) we show an info chip, never an auto-merge, so ff-only can't fail
  *  on a button press. */
 export function parseGitButtonState(s: GitRawStatus): GitButtonState {
-  const base = { dirtyCount: 0, ahead: s.ahead || 0, behind: s.behind || 0 };
+  const base = { dirtyCount: 0, ahead: s.ahead || 0, behind: s.behind || 0, staleMs: s.staleMs };
   // Not a repo yet → still offer ONE green "Create & Push". The create-push
   // handler (gitOps.createAndPush) git-inits + makes an initial commit before
   // creating the GitHub repo, so a single button covers bare-folder → published.

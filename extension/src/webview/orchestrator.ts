@@ -1,7 +1,12 @@
 import * as vscode from "vscode";
 
 import * as gitOps from "../commands/gitOps";
-import { parseGitButtonState, type GitButtonState } from "../commands/gitStatus";
+import {
+  gitStaleNote,
+  parseGitButtonState,
+  pickAutoFetch,
+  type GitButtonState,
+} from "../commands/gitStatus";
 import {
   annotateLiveState,
   attachToProject,
@@ -76,6 +81,52 @@ function starredList(): string[] {
 }
 async function setStarred(list: string[]): Promise<void> {
   await _ctx?.globalState.update(STARRED_KEY, list);
+}
+
+// ── background auto-fetch ────────────────────────────────────────────────────
+// ahead/behind come from the remote-tracking refs, i.e. from whenever this repo
+// last fetched — so without this the list only ever showed how things stood at
+// the last manual ⟳, and a row could sit on a green "up to date" chip while
+// origin had moved on (press Push → rejected → now genuinely diverged).
+//
+// Measured on 16 real projects: fetching them all in parallel takes ~2.5s, and
+// a `git status` sweep (what the list already does every tick) takes 53ms. The
+// cost is not the wall-clock, it is the ONE bad network state — a route that
+// accepts the connection and never answers (VPN dropped, captive wifi) — where
+// git hangs until the 20s timeout kills it. DNS failure and missing credentials
+// both fail in under a third of a second. So the fetch never blocks a render:
+// the screen is drawn from what is on disk, the fetch happens after, and the
+// list is redrawn only if the user is still looking at it.
+const AUTOFETCH_STALE_MS = 5 * 60_000;
+let _autoFetching = false;
+/** path → when we last ATTEMPTED an auto-fetch. Keyed on the attempt, not on
+ *  success: a repo that is offline never refreshes its FETCH_HEAD, so keying on
+ *  staleness alone would re-fetch it on every single redraw. */
+const _autoFetchedAt = new Map<string, number>();
+
+function scheduleAutoFetch(
+  panel: vscode.WebviewPanel,
+  states: Record<string, GitButtonState>,
+): void {
+  if (_autoFetching) return;
+  const now = Date.now();
+  const staleByPath: Record<string, number | undefined> = {};
+  for (const p of Object.keys(states)) staleByPath[p] = states[p]?.staleMs;
+  const stale = pickAutoFetch(staleByPath, _autoFetchedAt, now, AUTOFETCH_STALE_MS);
+  if (!stale.length) return;
+  _autoFetching = true;
+  for (const p of stale) _autoFetchedAt.set(p, now);
+  void (async () => {
+    try {
+      await Promise.all(stale.map((p) => gitOps.fetchRepo(p)));
+    } finally {
+      _autoFetching = false;
+    }
+    // Redraw only if this panel is still the live one AND still showing the
+    // list — posting to a disposed webview throws, and clobbering the Detail
+    // screen the user navigated to mid-fetch would be worse than a stale chip.
+    if (_panel === panel && _screen === "projects") await pushProjectsScreen(panel);
+  })();
 }
 
 async function computeGitStates(
@@ -185,12 +236,19 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
         starred: starred.has(p.path),
         run: { state: btn.state, errorMsg: btn.errorMsg },
         actions: resolveCardActions(btn.state, driven, pending),
-        git: { path: p.path, ...states[p.path] },
+        // `note` = how old the ahead/behind comparison is, shown on hover: the
+        // list does not fetch on its own, so a green "up to date" chip can be
+        // hours stale (see gitStaleNote).
+        git: { path: p.path, ...states[p.path], note: gitStaleNote(states[p.path]?.staleMs) },
       };
     }),
   });
   // Keep polling while any run is live so the spinner + git panel stay fresh.
   if (ordered.some((p) => readRunMarker(p.path)?.status === "running")) startSpinPoll(panel);
+  // The screen is already posted above — this only ever redraws it later. Not
+  // on a spin tick (that fires every 2.5s), and not right after a manual fetch
+  // (nothing would be stale anyway).
+  if (fetch === false) scheduleAutoFetch(panel, states);
 }
 
 /** The deleted-projects list — every durable backup, read-only. Reuses the
@@ -298,6 +356,36 @@ function deleteProjectFlow(p: ResumableProject): { deleted: boolean; reason?: st
 
 /** guard ปุ่ม git ฝั่ง host: หา project จาก path แล้วเช็ค busy ซ้ำ (UI ซ่อนปุ่มไปแล้ว
  *  แต่ webview state อาจ stale) — คืน project ถ้าทำต่อได้, null ถ้าต้อง bail (แจ้ง warning แล้ว). */
+/** One mutating git action per project at a time. The buttons are not disabled
+ *  while the extension works, so two quick clicks used to start two `git`s in
+ *  the same repo — they then collide on .git/index.lock and the second reports
+ *  a scary "another git process seems to be running". */
+const _gitBusy = new Set<string>();
+async function withGitLock(path: string, fn: () => Promise<void>): Promise<void> {
+  if (_gitBusy.has(path)) return;
+  _gitBusy.add(path);
+  try {
+    await fn();
+  } finally {
+    _gitBusy.delete(path);
+  }
+}
+
+/** Re-render after a git action. A FAILED push/pull almost always means the
+ *  local view of origin is stale — and ahead/behind is computed from the last
+ *  fetch, so a plain re-render leaves the SAME failing button on the row (a
+ *  rejected push keeps saying "Push (1)" and fails again on every click, until
+ *  the user happens to press ⟳ fetch). One fetch of just this repo, only on the
+ *  failure path, is what lets the row become the "diverged" chip. */
+async function settleAfterGit(
+  panel: vscode.WebviewPanel,
+  path: string,
+  ok: boolean,
+): Promise<void> {
+  if (!ok) await gitOps.fetchRepo(path);
+  await pushProjectsScreen(panel);
+}
+
 function requireIdleProject(path: string): ResumableProject | null {
   const p = _st?.projects.find((x) => x.path === path);
   if (!p) return null;
@@ -734,18 +822,22 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         const p = typeof msg.path === "string" ? msg.path : "";
         const message = typeof msg.message === "string" ? msg.message.trim() : "";
         if (!p || !message || !requireIdleProject(p)) return;
-        const r = await gitOps.commitAll(p, message);
-        notify(r.ok, `commit ${short(p)}`, r);
-        await pushProjectsScreen(panel);
+        await withGitLock(p, async () => {
+          const r = await gitOps.commitAll(p, message);
+          notify(r.ok, `commit ${short(p)}`, r);
+          await settleAfterGit(panel, p, r.ok);
+        });
         return;
       }
       case "git_push": {
         const p = typeof msg.path === "string" ? msg.path : "";
         if (!p || !requireIdleProject(p)) return;
-        const st = await gitOps.readGitStatus(p);
-        const r = await gitOps.pushRepo(p, st.hasUpstream);
-        notify(r.ok, `push ${short(p)}`, r);
-        await pushProjectsScreen(panel);
+        await withGitLock(p, async () => {
+          const st = await gitOps.readGitStatus(p);
+          const r = await gitOps.pushRepo(p, st.hasUpstream);
+          notify(r.ok, `push ${short(p)}`, r);
+          await settleAfterGit(panel, p, r.ok);
+        });
         return;
       }
       case "git_commit_push": {
@@ -755,22 +847,28 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         const p = typeof msg.path === "string" ? msg.path : "";
         const message = typeof msg.message === "string" ? msg.message.trim() : "";
         if (!p || !message || !requireIdleProject(p)) return;
-        const c = await gitOps.commitAll(p, message);
-        notify(c.ok, `commit ${short(p)}`, c);
-        if (c.ok) {
-          const st = await gitOps.readGitStatus(p);
-          const r = await gitOps.pushRepo(p, st.hasUpstream);
-          notify(r.ok, `push ${short(p)}`, r);
-        }
-        await pushProjectsScreen(panel);
+        await withGitLock(p, async () => {
+          const c = await gitOps.commitAll(p, message);
+          notify(c.ok, `commit ${short(p)}`, c);
+          let ok = c.ok;
+          if (c.ok) {
+            const st = await gitOps.readGitStatus(p);
+            const r = await gitOps.pushRepo(p, st.hasUpstream);
+            notify(r.ok, `push ${short(p)}`, r);
+            ok = r.ok;
+          }
+          await settleAfterGit(panel, p, ok);
+        });
         return;
       }
       case "git_pull": {
         const p = typeof msg.path === "string" ? msg.path : "";
         if (!p || !requireIdleProject(p)) return;
-        const r = await gitOps.pullRepo(p);
-        notify(r.ok, `pull ${short(p)}`, r);
-        await pushProjectsScreen(panel);
+        await withGitLock(p, async () => {
+          const r = await gitOps.pullRepo(p);
+          notify(r.ok, `pull ${short(p)}`, r);
+          await settleAfterGit(panel, p, r.ok);
+        });
         return;
       }
       case "git_createpush": {
@@ -786,9 +884,11 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
           "Create & Push",
         );
         if (pick !== "Create & Push") return;
-        const r = await gitOps.createAndPush(p, repoName, isPrivate);
-        notify(r.ok, `create+push '${repoName}'`, r);
-        await pushProjectsScreen(panel);
+        await withGitLock(p, async () => {
+          const r = await gitOps.createAndPush(p, repoName, isPrivate);
+          notify(r.ok, `create+push '${repoName}'`, r);
+          await pushProjectsScreen(panel);
+        });
         return;
       }
     }
@@ -810,8 +910,12 @@ function notify(ok: boolean, what: string, r: gitOps.RunResult): void {
     return;
   }
   // ล้มเหลว = toast ค้างไว้ให้เห็นชัด (ต้องรู้ว่า commit/push พัง)
+  //   ⛔ เดิมหยิบ stderr บรรทัดแรก ซึ่งแทบไม่เคยเป็นสาเหตุจริง: git พิมพ์ hint:/`To <url>`
+  //      ขึ้นก่อนเสมอ → ff-pull ที่ diverged ขึ้นเป็น "hint: Diverging branches…"
+  //      และ push ที่ถูก reject ขึ้นเป็น URL เปล่าๆ · gitErrorLine เลือกบรรทัดจริง
+  const why = gitOps.gitErrorLine(r);
   vscode.window.showErrorMessage(
-    `Orchestrator: ${what} ล้มเหลว — ${(r.stderr || r.stdout).split("\n")[0]}`,
+    `Orchestrator: ${what} ล้มเหลว${why ? ` — ${why}` : " (git ไม่ได้บอกสาเหตุ)"}`,
   );
 }
 
@@ -1291,14 +1395,17 @@ function renderShell(): string {
   // ── git button (project rows) ────────────────────────────────────────────
   function gitCell(g){
     if (!g || g.kind==='none') return '';
-    if (g.kind==='uptodate') return '<span style="color:#7d8590;font-size:11px;">'+esc(g.label)+'</span>';
+    // note = อายุของข้อมูล ahead/behind (หน้านี้ไม่ fetch เอง) — ติดไว้ทุกแบบ
+    // เพราะ "up to date" คือคำตอบที่ค้างที่สุด ไม่ใช่คำตอบที่สดที่สุด
+    var note = g.note ? esc(g.note) : '';
+    if (g.kind==='uptodate') return '<span style="color:#7d8590;font-size:11px;" title="'+note+'">'+esc(g.label)+'</span>';
     // diverged = local AND remote both moved → no safe auto-action. Show an info
     // chip (not a button); the user reconciles in a terminal (pull --rebase/merge).
-    if (g.kind==='diverged') return '<span style="color:#e3a13a;font-size:11px;" title="local + remote ต่างมี commit ใหม่ — reconcile เองใน terminal (git pull --rebase หรือ merge)">'+esc(g.label)+'</span>';
+    if (g.kind==='diverged') return '<span style="color:#e3a13a;font-size:11px;" title="local + remote ต่างมี commit ใหม่ — reconcile เองใน terminal (git pull --rebase หรือ merge)'+(note?' · '+note:'')+'">'+esc(g.label)+'</span>';
     // commit / create-push open an inline form (message / repo name) — the caret
     // signals that, so the orange button doesn't read as "commit right now".
     var caret = (g.kind==='commit'||g.kind==='create-push') ? ' ▾' : '';
-    return '<button class="git-act" data-kind="'+g.kind+'" style="background:'+(COLOR[g.kind]||'#555')
+    return '<button class="git-act" data-kind="'+g.kind+'" title="'+note+'" style="background:'+(COLOR[g.kind]||'#555')
       +';color:#fff;border:none;border-radius:5px;padding:4px 10px;font-size:11px;">'+esc(g.label)+caret+'</button>';
   }
   function gitEditor(g){

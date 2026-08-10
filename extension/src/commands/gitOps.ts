@@ -23,6 +23,10 @@ export interface RunResult {
   ok: boolean;
   stdout: string;
   stderr: string;
+  /** true when the child was killed (execFile `timeout` fired), not when it
+   *  exited non-zero. A kill usually leaves stderr empty, so the failure toast
+   *  has to say "timeout" itself or it reads as a blank error. */
+  killed: boolean;
 }
 
 export function run(
@@ -49,7 +53,12 @@ export function run(
         env: opts.env,
       },
       (err, stdout, stderr) => {
-        resolve({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+        resolve({
+          ok: !err,
+          stdout: String(stdout ?? ""),
+          stderr: String(stderr ?? ""),
+          killed: !!(err as { killed?: boolean } | null)?.killed,
+        });
       },
     );
     if (opts.input !== undefined) {
@@ -69,6 +78,56 @@ const git = (dir: string, args: string[], timeout?: number) =>
     timeout,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
   });
+
+// Lines git emits BEFORE the actual error: the advice block, the push banner,
+// the fetch summary and transfer progress. Taking stderr line 1 (what the
+// failure toast used to do) almost always lands on one of these instead of the
+// reason — e.g. a failed ff-pull reported "hint: Diverging branches can't be
+// fast-forwarded…" and a rejected push reported nothing but the repo URL.
+const GIT_NOISE =
+  /^(hint:|remote:|To\s|From\s|Fetching\s|Aborting\b|Please\s|(Enumerating|Counting|Compressing|Writing|Receiving|Resolving|Unpacking|Total)\b)/;
+
+/** The one line of a failed git run that actually says what went wrong.
+ *  Priority: the `! [rejected]` refspec line (push) > `fatal:` > `error:` >
+ *  the first non-noise line. When the chosen line ends in ':' git put the
+ *  detail (usually the offending file names) on the indented lines below it,
+ *  so those get folded in — "would be overwritten by merge:" alone is useless.
+ *  Returns "" only when git said nothing at all. */
+export function gitErrorLine(r: RunResult): string {
+  const lines = `${r.stderr}\n${r.stdout}`
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0);
+  const signal = lines.filter((l) => !GIT_NOISE.test(l.trim()));
+  const from = signal.length ? signal : lines;
+  const pick =
+    from.find((l) => /^!\s*\[(rejected|remote rejected)\]/.test(l.trim())) ??
+    from.find((l) => /^fatal:/.test(l)) ??
+    from.find((l) => /^error:/.test(l)) ??
+    from[0];
+  if (pick === undefined) {
+    return r.killed ? "หมดเวลา (timeout) — git ถูกหยุดกลางคัน ลองใหม่อีกครั้ง" : "";
+  }
+  let out = pick.trim();
+  if (out.endsWith(":")) {
+    const detail = lines
+      .slice(lines.indexOf(pick) + 1)
+      .filter((l) => /^\s+\S/.test(l))
+      .slice(0, 4)
+      .map((l) => l.trim());
+    if (detail.length) out += ` ${detail.join(", ")}`;
+  } else if (!/[.)!?]$/.test(out)) {
+    // git hard-wraps long messages, so the reason can be split across lines
+    // ("…with the ref 'refs/heads/main'" / "from the remote, but no such ref
+    // was fetched."). Line 1 on its own is a sentence fragment.
+    for (const next of from.slice(from.indexOf(pick) + 1, from.indexOf(pick) + 3)) {
+      if (/^(fatal:|error:|!\s*\[)/.test(next.trim())) break;
+      out += ` ${next.trim()}`;
+      if (/[.)!?]$/.test(out)) break;
+    }
+  }
+  return out.slice(0, 300);
+}
 
 const indexLock = (dir: string) => path.join(dir, ".git", "index.lock");
 
@@ -119,10 +178,22 @@ function reapStaleIndexLock(dir: string): boolean {
 }
 
 /** An index-writing git call that heals itself once past an orphaned lock. */
-async function writeGit(dir: string, args: string[]): Promise<RunResult> {
-  const first = await git(dir, args, WRITE_TIMEOUT);
+async function writeGit(dir: string, args: string[], timeout = WRITE_TIMEOUT): Promise<RunResult> {
+  const first = await git(dir, args, timeout);
   if (first.ok || !isIndexLockError(first) || !reapStaleIndexLock(dir)) return first;
-  return git(dir, args, WRITE_TIMEOUT);
+  return git(dir, args, timeout);
+}
+
+/** ms since this repo last ran `git fetch`/`git pull`, from FETCH_HEAD's mtime
+ *  (git rewrites it on every fetch). undefined when it has never fetched, or
+ *  when `.git` is a worktree pointer file rather than a real dir. Cheap: one
+ *  stat, no git process — this runs on every render tick. */
+function lastFetchAgeMs(dir: string): number | undefined {
+  try {
+    return Date.now() - fs.statSync(path.join(dir, ".git", "FETCH_HEAD")).mtimeMs;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Gather the raw git facts parseGitButtonState needs. Never throws. */
@@ -155,7 +226,15 @@ export async function readGitStatus(dir: string): Promise<GitRawStatus> {
       ahead = parseInt(m[1] ?? "0", 10) || 0;
     }
   }
-  return { isRepo: true, porcelain: porc.stdout, hasRemote, hasUpstream, ahead, behind };
+  return {
+    isRepo: true,
+    porcelain: porc.stdout,
+    hasRemote,
+    hasUpstream,
+    ahead,
+    behind,
+    staleMs: lastFetchAgeMs(dir),
+  };
 }
 
 /** `git fetch` (quiet) so ahead/behind is accurate. Best-effort. */
@@ -181,16 +260,32 @@ export async function commitAll(dir: string, message: string): Promise<RunResult
 
 /** Fast-forward pull. `--ff-only` refuses (harmless error) if the branch can't
  *  advance cleanly — but the UI only offers Pull on a clean, strictly-behind
- *  tree, so in practice it always fast-forwards without a merge or conflict. */
+ *  tree, so in practice it always fast-forwards without a merge or conflict.
+ *  Goes through writeGit for the same reason commitAll does: a fast-forward
+ *  writes the index, so a pull killed at its timeout can orphan .git/index.lock
+ *  and then every later git in that repo fails. Same timeout as before. */
 export function pullRepo(dir: string): Promise<RunResult> {
-  return git(dir, ["pull", "--ff-only"], FETCH_TIMEOUT);
+  return writeGit(dir, ["pull", "--ff-only"], FETCH_TIMEOUT);
 }
 
-/** Push current branch. Sets upstream on first push when none is configured. */
+/** Push current branch. Sets upstream on first push when none is configured.
+ *  No upstream can also mean a DETACHED head (`@{u}` fails either way), where
+ *  `push -u origin HEAD` dies on "not a full refname" — a message that reads
+ *  like a bug in Mission Control. Name the branch explicitly and refuse early
+ *  when there isn't one. For a normal branch this is the same push as before. */
 export async function pushRepo(dir: string, hasUpstream: boolean): Promise<RunResult> {
-  return hasUpstream
-    ? git(dir, ["push"], FETCH_TIMEOUT)
-    : git(dir, ["push", "-u", "origin", "HEAD"], FETCH_TIMEOUT);
+  if (hasUpstream) return git(dir, ["push"], FETCH_TIMEOUT);
+  const head = await git(dir, ["symbolic-ref", "--short", "-q", "HEAD"]);
+  const branch = head.stdout.trim();
+  if (!branch) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: "error: HEAD ไม่ได้ชี้ที่ branch ใด (detached HEAD) — checkout branch ก่อนถึงจะ push ได้",
+      killed: false,
+    };
+  }
+  return git(dir, ["push", "-u", "origin", branch], FETCH_TIMEOUT);
 }
 
 /** Create a GitHub repo from this local repo and push (external — caller
