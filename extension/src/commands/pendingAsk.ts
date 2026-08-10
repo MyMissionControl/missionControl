@@ -212,6 +212,114 @@ export function buildAnswerArgs(paneId: string, digit: number): string[] {
   return ["send-keys", "-t", paneId, String(digit)];
 }
 
+/** Named keys we are willing to send. A whitelist, not a string pass-through:
+ *  `send-keys` with unknown text types it into whatever has focus, and the thing
+ *  with focus here is a blocked agent's prompt. */
+const KEY_NAMES = ["Right", "Left", "Enter", "Escape"] as const;
+export type SendKeyName = (typeof KEY_NAMES)[number];
+
+/** `tmux send-keys` argv for one named key (not text). */
+export function buildKeyArgs(paneId: string, key: SendKeyName): string[] {
+  if (!/^%\d+$/.test(paneId)) throw new Error(`unsafe pane id: ${paneId}`);
+  if (!KEY_NAMES.includes(key)) throw new Error(`key not allowed: ${key}`);
+  return ["send-keys", "-t", paneId, key];
+}
+
+/**
+ * True when this box can be answered from outside the pane at all.
+ *
+ * Multi-select used to be excluded, because a digit only TOGGLES there and the
+ * Submit affordance carries no digit to send. The full protocol was then found
+ * by experiment on a live REPL (2026-08-10) and is deterministic — see
+ * `parseReviewFromPane` — so these are answerable now too.
+ */
+export function isMultiAnswerable(ask: PaneAsk): boolean {
+  return ask.multiSelect && ask.options.length > 0;
+}
+
+/** The review screen a multi-select box shows after `Right`. */
+export interface AskReview {
+  /** Best-effort split of the answer line, for showing the human what will be sent. */
+  answers: string[];
+  /** The answer line verbatim — a label may contain its own comma, so the split
+   *  above is for display and `reviewMatches` uses this instead. */
+  answerText: string;
+  /** The digit printed for "Submit answers". */
+  submitKey: number;
+  /** The digit printed for "Cancel", when it is there. */
+  cancelKey: number | null;
+}
+
+/** `   → มะม่วง, เงาะ` — what the review screen says it will send. */
+const REVIEW_ANSWER_RE = /^[\s ]*→[\s ]+(\S.*)$/;
+const SUBMIT_RE = /^submit answers$/i;
+const CANCEL_RE = /^cancel$/i;
+
+/**
+ * Read the review screen, or null when the pane is not showing one.
+ *
+ * ⛔ Do NOT key this on the modal footer: the review screen prints **no**
+ * `Esc to cancel` line at all (verified on a live capture 2026-08-10). That is
+ * also why `parseAskFromPane` returns null here, which is what we want — the
+ * poller must not count a review screen as a fresh question.
+ *
+ * The tell is an option row labelled exactly "Submit answers"; everything else
+ * about the screen is prose that could be reworded upstream.
+ */
+export function parseReviewFromPane(text: string): AskReview | null {
+  if (!text) return null;
+  const lines = text.split("\n").map((l) => l.replace(/\s+$/, ""));
+  let submitKey = -1;
+  let cancelKey: number | null = null;
+  const answerLines: string[] = [];
+  for (const line of lines) {
+    const m = OPTION_RE.exec(line);
+    if (m) {
+      const label = m[2].trim();
+      if (SUBMIT_RE.test(label)) submitKey = Number(m[1]);
+      else if (CANCEL_RE.test(label)) cancelKey = Number(m[1]);
+      continue;
+    }
+    const a = REVIEW_ANSWER_RE.exec(line);
+    if (a) answerLines.push(a[1].trim());
+  }
+  if (submitKey < 1 || submitKey > MAX_DIGIT) return null;
+  const answerText = answerLines.join(" · ");
+  return {
+    answers: answerLines.flatMap((l) => l.split(/,[\s ]+/).map((s) => s.trim())).filter(Boolean),
+    answerText,
+    submitKey,
+    cancelKey,
+  };
+}
+
+/**
+ * Does the review screen list exactly what we ticked?
+ *
+ * This is the gate that makes sending the final keystroke safe: rather than
+ * trusting that N digit presses landed, we read back the agent's own summary of
+ * what it is about to submit and compare. A mismatch means a digit was dropped
+ * or something was already ticked before we arrived — we abort and leave the box
+ * for the human instead of submitting the wrong answer.
+ *
+ * Substring containment, not a comma split: a label may legitimately contain
+ * ", ". An option we did NOT tick appearing in the review is a hard abort —
+ * except when it is a substring of one we did tick, where the two are
+ * indistinguishable and blocking would break a legitimate answer.
+ */
+export function reviewMatches(review: AskReview, chosen: string[], all: string[]): boolean {
+  if (!chosen.length) return false; // never submit an empty box
+  const t = review.answerText;
+  if (!t) return false;
+  for (const c of chosen) if (!t.includes(c)) return false;
+  for (const o of all) {
+    if (chosen.includes(o)) continue;
+    if (chosen.some((c) => c.includes(o))) continue; // ambiguous by containment — cannot judge
+    if (t.includes(o)) return false; // something we did not tick is in there
+  }
+  return true;
+}
+
 /** A live pane, from `tmux list-panes -a`. */
 export interface PaneRow {
   pane: string;

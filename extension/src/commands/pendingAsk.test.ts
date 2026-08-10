@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  buildKeyArgs,
+  isMultiAnswerable,
+  parseReviewFromPane,
+  reviewMatches,
   askKey,
   findOptionByLabel,
   itemLabel,
@@ -325,5 +329,77 @@ describe("QuickPick label round-trip", () => {
 
   test("R6 the displayed label carries the digit the pane will receive", () => {
     expect(itemLabel({ key: 3, label: "Friday", description: "" })).toBe("3. Friday");
+  });
+});
+
+// ── multi-select: the ✔ Submit protocol ────────────────────────────────────
+// ⛔⛔ ทั้งบล็อกนี้มาจากการทดลองกับกล่องจริง 2026-08-10 (tmux + claude REPL สด) ไม่ใช่การเดา:
+//   กด `2`      → `[ ]` ของข้อ 2 กลายเป็น `[✔]` และ `❯` **ไม่ขยับ** (เลข = toggle ไม่ใช่คำตอบ)
+//   กด `Right`  → เปลี่ยนไปแท็บ `✔ Submit` = หน้า review (ข้างล่างนี้คือ capture จริง)
+//   กด `1`      → "Submit answers" → pane ขึ้น `User answered ... → มะม่วง, เงาะ`
+//   ติ๊กหลายข้อ → review เขียนรวมบรรทัดเดียวคั่นด้วย ", "
+//   ⛔ หน้า review **ไม่มีบรรทัด footer** (`Esc to cancel`) → parseAskFromPane คืน null ที่หน้านี้
+//     เป็นเรื่องดี (poller จะไม่นับหน้า review เป็นคำถามใหม่) แต่แปลว่า parser ของ review
+//     ห้ามพึ่ง footer เป็นตัวจับ
+const REAL_REVIEW = [
+  "────────────────────────────────────────────────────────",
+  "←  ☒ ผลไม้  ✔ Submit  →",
+  "",
+  "Review your answers",
+  "",
+  " ● ชอบผลไม้อะไรบ้าง",
+  "   → มะม่วง, เงาะ",
+  "",
+  "Ready to submit your answers?",
+  "",
+  "❯ 1. Submit answers",
+  "  2. Cancel",
+].join("\n");
+
+describe("multi-select submit", () => {
+  test("M1 a multiSelect box IS answerable now (was handed off to the pane)", () => {
+    expect(isMultiAnswerable(parseAskFromPane(REAL_MULTI)!)).toBe(true);
+    expect(isMultiAnswerable(parseAskFromPane(REAL_MODAL)!)).toBe(false); // single-select ใช้ทางเดิม
+  });
+
+  test("M2 reads the review screen: answers + the Submit digit", () => {
+    const r = parseReviewFromPane(REAL_REVIEW);
+    expect(r).not.toBeNull();
+    expect(r!.submitKey).toBe(1);
+    expect(r!.cancelKey).toBe(2);
+    expect(r!.answers).toEqual(["มะม่วง", "เงาะ"]);
+  });
+
+  test("M3 keeps the raw answer text (a label may contain its own comma)", () => {
+    expect(parseReviewFromPane(REAL_REVIEW)!.answerText).toContain("มะม่วง, เงาะ");
+  });
+
+  test("M4 the option box itself is NOT a review screen", () => {
+    expect(parseReviewFromPane(REAL_MULTI)).toBeNull();
+    expect(parseReviewFromPane(REAL_MODAL)).toBeNull();
+    expect(parseReviewFromPane("")).toBeNull();
+  });
+
+  // ⛔ ด่านนี้คือเหตุผลที่กล้าส่งคีย์สุดท้ายเลย: อ่าน review กลับมาเทียบก่อน ไม่ยิงมั่ว
+  test("M5 review must list exactly what was ticked", () => {
+    const r = parseReviewFromPane(REAL_REVIEW)!;
+    const all = ["มะม่วง", "ทุเรียน", "เงาะ"];
+    expect(reviewMatches(r, ["มะม่วง", "เงาะ"], all)).toBe(true);
+    expect(reviewMatches(r, ["เงาะ", "มะม่วง"], all)).toBe(true);   // ลำดับไม่สำคัญ
+    expect(reviewMatches(r, ["มะม่วง"], all)).toBe(false);          // review มีของที่เราไม่ได้ติ๊ก
+    expect(reviewMatches(r, ["มะม่วง", "ทุเรียน"], all)).toBe(false); // ของที่ติ๊กไม่อยู่ใน review
+    expect(reviewMatches(r, [], all)).toBe(false);                   // ไม่ติ๊กอะไร = ไม่ submit
+  });
+
+  test("M6 a label that is a substring of a ticked one never blocks the submit", () => {
+    const r = { answers: ["มะม่วงอกร่อง"], answerText: "มะม่วงอกร่อง", submitKey: 1, cancelKey: 2 };
+    expect(reviewMatches(r, ["มะม่วงอกร่อง"], ["มะม่วงอกร่อง", "มะม่วง"])).toBe(true);
+  });
+
+  test("M7 buildKeyArgs sends a KEY NAME, and only from the whitelist", () => {
+    expect(buildKeyArgs("%2", "Right")).toEqual(["send-keys", "-t", "%2", "Right"]);
+    expect(() => buildKeyArgs("bad", "Right")).toThrow();
+    // @ts-expect-error — ห้ามส่งคีย์ที่ไม่ได้ whitelist (ตัวอักษรหลุดเข้า prompt ของ agent ได้)
+    expect(() => buildKeyArgs("%2", "rm -rf /")).toThrow();
   });
 });
