@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 
 import * as vscode from "vscode";
@@ -5,9 +6,10 @@ import * as vscode from "vscode";
 import { type ProjectDetail, buildDetail } from "../budget-detail";
 import { openBudgetDetailPanel } from "./budget-detail-page";
 import {
-  type ProjectAgg,
+  type ProjectAggLive,
   type ProjectPeriods,
   type UsageSummary,
+  allDayDetail,
   collapseProjectDayDetail,
   computeUsage,
   getInstantUsage,
@@ -15,6 +17,7 @@ import {
   groupByProjectRoot,
   localMonthKey,
   localTodayKey,
+  mergeProjectsByRealpath,
   projectPeriods,
   refreshUsage,
   sumByPrefix,
@@ -45,6 +48,10 @@ export interface BudgetView {
   monthStartMs: number; // local start-of-month (ms) — client's "this month" filter
   providerNote: string; // reminder when a provider on disk isn't summed in yet ("" = none)
   sessions: number;
+  // Whole-bill token-category split per period — the "แยกตามประเภท token" card.
+  // NOT derived from `projects` (those cover only cwds under a projects/ folder,
+  // ~20% of spend); this matches the hero. See allDayDetail.
+  portfolio: ProjectPeriods;
 }
 
 export interface ProjectRow {
@@ -99,18 +106,23 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
   // skipped). Then fold in any ledger-only root NOT seen in this live scan —
   // a project whose folder (or transcripts) are gone locally now, but whose
   // last-known totals are still worth showing.
-  const byKey = new Map<string, ProjectAgg & { live: boolean }>();
+  const rows: Record<string, ProjectAggLive> = {};
   for (const [root, agg] of Object.entries(groupByProjectRoot(u))) {
-    byKey.set(root, { ...agg, live: true });
+    rows[root] = { ...agg, live: true };
   }
   const ledger = await getProjectLedger();
   for (const [root, entry] of Object.entries(ledger)) {
-    if (byKey.has(root)) continue; // live data is at least as fresh — keep it
-    byKey.set(root, {
+    if (rows[root]) continue; // live data is at least as fresh — keep it
+    rows[root] = {
       name: entry.name, cost: entry.cost, tokens: entry.tokens, lastMs: entry.lastMs,
       det: entry.detail, live: false,
-    });
+    };
   }
+  // A moved project leaves a symlink behind, so the same directory can arrive
+  // under two roots — merge those into one row instead of showing it twice.
+  const byKey = new Map<string, ProjectAggLive>(
+    Object.entries(mergeProjectsByRealpath(rows, (p) => fs.realpathSync(p))),
+  );
   const projects: ProjectRow[] = [...byKey.entries()]
     .map(([key, b]) => ({
       name: b.name,
@@ -136,6 +148,11 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
     ? "พบ " + unwired.join(", ") + " บนเครื่อง — ยอดนี้ยังนับเฉพาะ Claude Code (ยังไม่รวม provider เหล่านี้)"
     : "";
 
+  // Whole-bill split for the token card, on the same period boundaries the
+  // per-project rows use (attachPeriods) — `cutoff` is already local midnight
+  // six days back, i.e. the start of the rolling 7-day window.
+  const portfolio = projectPeriods(allDayDetail(u), localTodayKey(), ymd(cutoff), localMonthKey());
+
   return {
     monthFmt: fmt(month),
     todayFmt: fmt(today),
@@ -143,9 +160,12 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
     allTimeFmt: fmt(u.total.cost),
     daily14,
     projects,
+    portfolio,
     monthStartMs: monthStart.getTime(),
     providerNote,
-    sessions: u.fileCount,
+    // Real sessions, not transcript files — subagent/workflow transcripts are
+    // part of a session, not sessions of their own (1832 files ≈ 448 sessions).
+    sessions: u.sessionCount ?? u.fileCount,
   };
 }
 
@@ -320,7 +340,7 @@ function renderShell(): string {
   .bars { display: flex; align-items: flex-end; gap: 3px; height: 56px; margin-top: 12px; }
   .bars .b { flex: 1; background: var(--accent); opacity: .75; border-radius: 2px 2px 0 0; min-height: 2px; }
   .bars .b.today { background: var(--accent2); opacity: 1; box-shadow: 0 0 8px var(--accent2); }
-  .daily .cap { font-family: var(--mono); font-size: 9.5px; color: var(--faint); margin-top: 8px; }
+  .panelcard .cap { font-family: var(--mono); font-size: 9.5px; color: var(--faint); margin-top: 8px; }
   .toks { width: 340px; flex: none; }
   .stack { display: flex; gap: 2px; height: 12px; border-radius: 6px; overflow: hidden; margin-top: 12px; }
   .stack > span { display: block; height: 100%; }
@@ -404,14 +424,14 @@ function renderShell(): string {
 
   <div class="twoup">
     <div class="panelcard daily"><div class="clabel">รายวัน · 14 วัน</div><div class="bars" id="bars"></div><div class="cap" id="daily-cap"></div></div>
-    <div class="panelcard toks"><div class="clabel">แยกตามประเภท token</div><div class="stack" id="stack"></div><div class="legend" id="tok-legend"></div></div>
+    <div class="panelcard toks"><div class="clabel">แยกตามประเภท token · ทั้งบิล</div><div class="stack" id="stack"></div><div class="legend" id="tok-legend"></div><div class="cap">นับทุกงาน รวมที่อยู่นอก projects/ — รวมแล้วตรงกับยอดด้านบน</div></div>
   </div>
 
   <div class="secbar">
     <span class="section-k" id="projects-k">PROJECTS</span>
     <span class="rng" id="range"></span>
     <span class="hair"></span>
-    <span class="hint">คลิกหัวคอลัมน์เพื่อเรียง · ชี้ค้าง 3 วิ ดูกราฟวงกลม</span>
+    <span class="hint">นับเฉพาะงานใต้ projects/ · คลิกหัวคอลัมน์เพื่อเรียง · ชี้ค้าง 3 วิ ดูกราฟวงกลม</span>
     <div class="pager" id="pager" hidden>
       <button class="pg" id="pg-prev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
       <span class="pi" id="pg-info"></span>
@@ -458,8 +478,17 @@ function renderShell(): string {
   ];
 
   // Selected-period {cost, tokens, cats} for a project — day-scoped from the host.
+  // A project whose transcripts are gone (live === false) has no day series left,
+  // so every period computes to 0 and the row would be filtered out of the list
+  // entirely — which is exactly what the durable ledger exists to prevent. Its
+  // all-time row total stands in for the "all" period.
   function periodOf(p) {
     var pd = (p.periods && p.periods[STATE.period]) || { cost: 0, tokens: 0, cats: {} };
+    if (p.live === false && STATE.period === "all" && !pd.cost) {
+      var cats = {};
+      ((p.detail && p.detail.slices) || []).forEach(function (s) { cats[s.key] = { usd: s.cost, tokens: 0 }; });
+      return { cost: p.cost || 0, tokens: p.tokens || 0, cats: cats };
+    }
     return { cost: pd.cost || 0, tokens: pd.tokens || 0, cats: pd.cats || {} };
   }
   function heroFmt() {
@@ -535,9 +564,18 @@ function renderShell(): string {
     document.getElementById("daily-cap").textContent = "วันนี้ " + money2(today) + " · สูงสุดในรอบ " + money2(max);
   }
 
-  // Portfolio token-type totals for the active period (sum across visible spend).
+  // Whole-bill token-type totals for the active period. Comes straight from the
+  // host's portfolio field (every cwd), NOT from the project rows — summing rows
+  // scoped this card to work under projects/ only, so it read ~1/5 of the hero
+  // sitting right above it. Falls back to the old row-sum if an older host build
+  // sends no portfolio.
   function portfolioCats() {
     var tot = { cacheRead: 0, output: 0, cacheWrite: 0, input: 0 }, sum = 0;
+    var pf = STATE.view.portfolio && STATE.view.portfolio[STATE.period];
+    if (pf) {
+      CATS.forEach(function (c) { var u = ((pf.cats || {})[c.key] || {}).usd || 0; tot[c.key] = u; sum += u; });
+      return { tot: tot, sum: sum };
+    }
     (STATE.view.projects || []).forEach(function (p) {
       var cats = periodOf(p).cats;
       CATS.forEach(function (c) { var u = (cats[c.key] || {}).usd || 0; tot[c.key] += u; sum += u; });

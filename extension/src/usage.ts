@@ -41,7 +41,8 @@ export interface UsageSummary {
   // range is day-bounded; keeps the payload/cache small.
   byProjectDayDetail: Record<string, Record<string, Breakdown>>;
   projectLastMs: Record<string, number>; // key = cwd -> latest touched session mtime (ms)
-  fileCount: number;
+  fileCount: number; // every transcript scanned (sessions + their subagent/workflow files)
+  sessionCount: number; // real Claude Code sessions = top-level <proj>/<session>.jsonl only
   computedAt: number;
 }
 
@@ -82,6 +83,19 @@ export function localMonthKey(): string {
 // opus $5/$25, sonnet $3/$15, haiku $1/$5, fable $10/$50. Cache write = 1.25×in
 // (5-min) / 2×in (1-hour); cache read = 0.1×in. <synthetic> lines are free.
 // Matched by substring so older ids (claude-3-5-haiku-…, claude-3-opus-…) also hit.
+
+// Sonnet 5 launched with an introductory list price of $2/$10 per MTok, applied
+// to usage through 2026-08-31 (UTC) — $3/$15 from 2026-09-01 on. This is a rate
+// that varies by WHEN the tokens were spent, not by when we compute: a line from
+// August stays at the intro price forever, so this rule is permanent history and
+// must not be deleted once the window closes (removing it would silently reprice
+// every past August line by +50%). Priced flat at $3/$15, Sonnet 5 was
+// overstated by $292 here. A line with no usable timestamp falls back to the
+// standard rate.
+const SONNET5_INTRO_END_MS = Date.UTC(2026, 8, 1); // 2026-09-01T00:00Z, exclusive
+function isSonnet5(m: string): boolean {
+  return m.includes("sonnet-5") || m.includes("sonnet5");
+}
 interface Rate {
   i: number;
   o: number;
@@ -89,12 +103,21 @@ interface Rate {
   w1: number;
   r: number;
 }
-function ratesFor(model: string): Rate | null {
+function ratesFor(model: string, fast = false, atMs?: number): Rate | null {
   const m = model.toLowerCase();
   if (!m || m.indexOf("synthetic") !== -1) return null;
   let inp: number;
   let out: number;
-  if (m.includes("fable") || m.includes("mythos")) {
+  if (!fast && isSonnet5(m) && atMs !== undefined && Number.isFinite(atMs) && atMs < SONNET5_INTRO_END_MS) {
+    inp = 2; // introductory rate — see SONNET5_INTRO_END_MS
+    out = 10;
+  } else if (fast) {
+    // Fast mode (`/fast`, Opus 5 / 4.8) runs the SAME model at premium pricing —
+    // $10/$50 per MTok. The transcript records it as usage.speed = "fast"; without
+    // this branch a fast-mode session is billed at half its real cost.
+    inp = 10;
+    out = 50;
+  } else if (m.includes("fable") || m.includes("mythos")) {
     inp = 10;
     out = 50;
   } else if (m.includes("opus")) {
@@ -129,6 +152,7 @@ interface UsageCounts {
     ephemeral_5m_input_tokens?: number;
     ephemeral_1h_input_tokens?: number;
   };
+  speed?: string; // "standard" | "fast" — fast mode is billed at premium rates
 }
 
 export function emptyBreakdown(): Breakdown {
@@ -158,8 +182,9 @@ export function addBreakdown(a: Breakdown, b: Breakdown): Breakdown {
 export function priceLine(
   model: string,
   u: UsageCounts,
+  atMs?: number, // when the tokens were spent — some list prices are date-scoped
 ): { cost: number; tokens: number; bd: Breakdown } | null {
-  const rate = ratesFor(model);
+  const rate = ratesFor(model, u.speed === "fast", atMs);
   if (!rate) return null;
   const cc = u.cache_creation || {};
   const c5 = cc.ephemeral_5m_input_tokens ?? 0;
@@ -222,9 +247,26 @@ const CACHE_FILE = path.join(os.homedir(), ".cache", "mission-control", "usage-f
 // per-project input/output/cache token+cost split; v5: added a global byHour;
 // v6: replaced global byHour with byProjectHour — the hourly series is now kept
 // PER cwd so the detail page can chart one project's usage over time, not the
-// whole machine's) — so hydrate discards the stale cache and the next scan
-// recomputes everything.
-const CACHE_VERSION = 7;
+// whole machine's; v8: cached day/hour keys are LOCAL, so the host's timezone is
+// part of the cache identity — see CACHE_TZ) — so hydrate discards the stale
+// cache and the next scan recomputes everything.
+const CACHE_VERSION = 8;
+// Every cached byDay / byProjectHour / byProjectDayDetail key was rendered in the
+// timezone the extension host happened to run in. That makes the TZ part of the
+// cache key: when the machine's zone changes (a fresh cloud VM is UTC until it's
+// configured), entries written before the change keep their old day boundaries
+// FOREVER, because the per-file cache only re-parses on mtime/size change. That
+// really happened here — the box moved UTC→Asia/Bangkok and ~a third of all
+// spend stayed bucketed 7 hours early. Storing the zone alongside the version
+// makes the next scan rebuild instead of silently mixing two calendars.
+function hostTz(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+const CACHE_TZ = hostTz();
 let hydrated = false;
 
 async function hydrateFileCache(): Promise<void> {
@@ -232,8 +274,8 @@ async function hydrateFileCache(): Promise<void> {
   hydrated = true; // attempt once per process; a miss just means a cold scan
   try {
     const raw = await fs.promises.readFile(CACHE_FILE, "utf8");
-    const obj = JSON.parse(raw) as { v?: number; entries?: [string, FileAgg][] };
-    if (obj?.v === CACHE_VERSION && Array.isArray(obj.entries)) {
+    const obj = JSON.parse(raw) as { v?: number; tz?: string; entries?: [string, FileAgg][] };
+    if (obj?.v === CACHE_VERSION && obj.tz === CACHE_TZ && Array.isArray(obj.entries)) {
       for (const [k, v] of obj.entries) fileCache.set(k, v);
     }
   } catch {
@@ -246,7 +288,7 @@ async function saveFileCache(currentFiles: string[]): Promise<void> {
     const keep = new Set(currentFiles); // drop entries for vanished transcripts
     const entries = [...fileCache].filter(([k]) => keep.has(k));
     await fs.promises.mkdir(path.dirname(CACHE_FILE), { recursive: true });
-    await fs.promises.writeFile(CACHE_FILE, JSON.stringify({ v: CACHE_VERSION, entries }));
+    await fs.promises.writeFile(CACHE_FILE, JSON.stringify({ v: CACHE_VERSION, tz: CACHE_TZ, entries }));
   } catch {
     // best-effort — a failed write just means the next reload cold-scans
   }
@@ -266,8 +308,8 @@ async function hydrateSummary(): Promise<void> {
   if (summaryCache) return; // a scan already produced one this process
   try {
     const raw = await fs.promises.readFile(SUMMARY_FILE, "utf8");
-    const obj = JSON.parse(raw) as { v?: number; summary?: UsageSummary };
-    if (obj?.v === CACHE_VERSION && obj.summary) {
+    const obj = JSON.parse(raw) as { v?: number; tz?: string; summary?: UsageSummary };
+    if (obj?.v === CACHE_VERSION && obj.tz === CACHE_TZ && obj.summary) {
       summaryCache = obj.summary;
       summaryAt = obj.summary.computedAt || 0; // real age → staleness triggers a refresh
     }
@@ -279,7 +321,7 @@ async function hydrateSummary(): Promise<void> {
 async function saveSummary(s: UsageSummary): Promise<void> {
   try {
     await fs.promises.mkdir(path.dirname(SUMMARY_FILE), { recursive: true });
-    await fs.promises.writeFile(SUMMARY_FILE, JSON.stringify({ v: CACHE_VERSION, summary: s }));
+    await fs.promises.writeFile(SUMMARY_FILE, JSON.stringify({ v: CACHE_VERSION, tz: CACHE_TZ, summary: s }));
   } catch {
     // best-effort
   }
@@ -459,7 +501,9 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
       if (seen.has(key)) continue;
       seen.add(key);
     }
-    const pl = priceLine(String(msg.model ?? ""), usage);
+    // Parsed once: the line's own clock decides which list price applied.
+    const tsMs = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : Number.NaN;
+    const pl = priceLine(String(msg.model ?? ""), usage, Number.isNaN(tsMs) ? undefined : tsMs);
     if (!pl) continue;
     agg.cost += pl.cost;
     agg.tokens += pl.tokens;
@@ -475,7 +519,6 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
     const hour = typeof d.timestamp === "string" ? localHourKey(d.timestamp) : "unknown";
     bumpNested(agg.byProjectHour, proj, hour, pl.cost, pl.tokens);
     // Track this cwd's newest line timestamp (ms) for recency — see FileAgg.
-    const tsMs = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : Number.NaN;
     if (!Number.isNaN(tsMs) && tsMs > (agg.projectLastMs[proj] ?? 0)) {
       agg.projectLastMs[proj] = tsMs;
     }
@@ -527,11 +570,19 @@ export function unwiredProviders(): string[] {
 
 async function scan(): Promise<UsageSummary> {
   // Gather files from every AVAILABLE source, tagging each with its parser.
-  const items: { file: string; src: UsageSource }[] = [];
+  // `session` marks a real Claude Code session — one `<projectDir>/<uuid>.jsonl`
+  // directly under the source root. Everything deeper is a subagent / workflow
+  // transcript belonging to one of those sessions, so counting every file as a
+  // "session" overstates it several times over (1832 files ≈ 448 sessions here).
+  const items: { file: string; src: UsageSource; session: boolean }[] = [];
   for (const src of SOURCES) {
     const found: string[] = [];
-    await collectJsonl(src.root(), found); // missing dir → yields nothing
-    for (const f of found) items.push({ file: f, src });
+    const base = src.root();
+    await collectJsonl(base, found); // missing dir → yields nothing
+    for (const f of found) {
+      const rel = path.relative(base, f);
+      items.push({ file: f, src, session: rel.split(path.sep).length === 2 });
+    }
   }
   await hydrateFileCache(); // reuse last run's per-file aggregates across reloads
   const total: Bucket = { cost: 0, tokens: 0 };
@@ -619,6 +670,7 @@ async function scan(): Promise<UsageSummary> {
     byProjectDayDetail,
     projectLastMs,
     fileCount: files.length,
+    sessionCount: items.reduce((n, x) => n + (x.session ? 1 : 0), 0),
     computedAt: Date.now(),
   };
   summaryAt = summaryCache.computedAt;
@@ -732,6 +784,83 @@ export function groupByProjectRoot(u: UsageSummary): Record<string, ProjectAgg> 
   return byKey;
 }
 
+/** One project row as the Budget page carries it: the aggregate plus whether the
+ *  numbers came from this scan (`live`) or only from the durable ledger. */
+export interface ProjectAggLive extends ProjectAgg {
+  live: boolean;
+}
+
+/** Collapse rows whose roots are DIFFERENT PATHS TO THE SAME DIRECTORY into one.
+ *
+ *  A project that gets moved leaves a symlink at its old location so older
+ *  transcripts keep resolving; both paths then appear as separate rows and the
+ *  project's spend shows up split in two (agentskill-marketplace-newFlow: $46.70
+ *  + $0.97). Keyed on realpath, so two genuinely different projects that merely
+ *  share a name are never merged. The surviving key is the real directory when
+ *  one of the candidates is it, else the first seen; `realpath` is injected so
+ *  this stays pure and testable. */
+export function mergeProjectsByRealpath(
+  rows: Record<string, ProjectAggLive>,
+  realpath: (p: string) => string,
+): Record<string, ProjectAggLive> {
+  const real = (p: string): string => {
+    try {
+      return realpath(p);
+    } catch {
+      return p;
+    }
+  };
+  const byReal = new Map<string, { key: string; agg: ProjectAggLive }>();
+  for (const root of Object.keys(rows)) {
+    const rp = real(root);
+    const hit = byReal.get(rp);
+    if (!hit) {
+      byReal.set(rp, { key: root, agg: { ...rows[root], det: { ...rows[root].det } } });
+      continue;
+    }
+    const add = rows[root];
+    hit.agg.cost += add.cost;
+    hit.agg.tokens += add.tokens;
+    hit.agg.lastMs = Math.max(hit.agg.lastMs, add.lastMs);
+    hit.agg.det = addBreakdown(hit.agg.det, add.det);
+    hit.agg.live = hit.agg.live || add.live;
+    // Prefer the canonical path (the one that IS the real directory) as the row's
+    // identity — the detail page and the ledger both key off it.
+    if (root === rp && hit.key !== rp) {
+      hit.key = root;
+      hit.agg.name = add.name;
+    }
+  }
+  const out: Record<string, ProjectAggLive> = {};
+  for (const { key, agg } of byReal.values()) out[key] = agg;
+  return out;
+}
+
+/** Every transcript the last scan saw that recorded work in project `absRoot`,
+ *  derived from the per-file cache (each FileAgg already knows its own cwds).
+ *
+ *  The Project Usage page needs this because a transcript directory is named
+ *  after the cwd the SESSION STARTED in, not the cwd each line records: an
+ *  orchestrated build runs inside the oracle's own repo and writes the project's
+ *  spend from there, so filtering directories by the project's encoded path
+ *  misses it entirely (learningPlatform: $452 of spend, zero matching dirs).
+ *  Returns null when nothing has been scanned yet so callers can fall back. */
+export async function filesTouchingProject(absRoot: string): Promise<string[] | null> {
+  await hydrateFileCache();
+  if (!fileCache.size) return null;
+  const out: string[] = [];
+  for (const [file, agg] of fileCache) {
+    for (const cwd of Object.keys(agg.byProject)) {
+      const p = resolveProject(cwd);
+      if (p && p.root === absRoot) {
+        out.push(file);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 /** Merge every cwd that belongs to project `absRoot` into ONE hour-keyed series
  *  ("YYYY-MM-DD HH:00" LOCAL -> bucket) — the per-project usage-over-time data
  *  the detail page charts. Uses the same resolveProject grouping as the budget
@@ -757,6 +886,24 @@ export function collapseProjectDayDetail(u: UsageSummary, absRoot: string): Reco
   for (const cwd of Object.keys(src)) {
     const p = resolveProject(cwd);
     if (!p || p.root !== absRoot) continue;
+    const inner = src[cwd];
+    for (const dk of Object.keys(inner)) out[dk] = addBreakdown(out[dk] ?? emptyBreakdown(), inner[dk]);
+  }
+  return out;
+}
+
+/** Per-DAY Breakdown for the WHOLE bill — every recorded cwd, not just the ones
+ *  under a projects/ folder. Deliberately unfiltered: the budget page's
+ *  "แยกตามประเภท token" card used to sum the project ROWS, which silently scoped
+ *  it to the ~20% of spend that resolveProject accepts, while the hero above it
+ *  showed 100% — same screen, two different totals. Feeding the card from here
+ *  makes it agree with the hero to the cent (byProjectDayDetail is bumped from
+ *  the same priced lines as byDay/total; a cwd-less line lands under "unknown"
+ *  and is counted in all-time only, exactly like the hero). */
+export function allDayDetail(u: UsageSummary): Record<string, Breakdown> {
+  const out: Record<string, Breakdown> = {};
+  const src = u.byProjectDayDetail || {};
+  for (const cwd of Object.keys(src)) {
     const inner = src[cwd];
     for (const dk of Object.keys(inner)) out[dk] = addBreakdown(out[dk] ?? emptyBreakdown(), inner[dk]);
   }
@@ -848,6 +995,10 @@ export function projectPeriods(
   for (const day of Object.keys(dayDetail)) {
     const bd = dayDetail[day];
     addToPeriod(out.all, bd);
+    // A line with no parseable timestamp lands in the "unknown" bucket. It has to
+    // be skipped explicitly: the week test below is a LEXICAL compare, and
+    // "unknown" > any "YYYY-MM-DD", so it would silently count as this week.
+    if (day === "unknown") continue;
     if (day === todayKey) addToPeriod(out.today, bd);
     if (day >= weekStartKey) addToPeriod(out.week, bd); // fixed-width YYYY-MM-DD → lexical = chronological
     if (day.startsWith(monthPrefix)) addToPeriod(out.month, bd);

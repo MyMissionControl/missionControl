@@ -55,15 +55,18 @@ export function openBudgetDetailPanel(
 }
 
 /** Scan this project's transcripts and hand the client the full usage payload.
- *  The scan is synchronous FS work bounded to one project's transcript dirs. */
+ *  The file list is resolved against the global usage cache first (async), then
+ *  the transcripts are read and folded. */
 function postUsage(panel: vscode.WebviewPanel): void {
-  let u;
-  try {
-    u = scanProjectUsage(_root);
-  } catch {
-    u = { hourly: {}, models: {}, sessions: [], skills: [] };
-  }
-  panel.webview.postMessage({ type: "usage", projectName: _name, hourly: u.hourly, models: u.models, sessions: u.sessions, skills: u.skills });
+  void (async () => {
+    let u;
+    try {
+      u = await scanProjectUsage(_root);
+    } catch {
+      u = { hourly: {}, models: {}, sessions: [], skills: [] };
+    }
+    panel.webview.postMessage({ type: "usage", projectName: _name, hourly: u.hourly, models: u.models, sessions: u.sessions, skills: u.skills });
+  })();
 }
 
 // NOTE: the client <script> below is written with string concatenation only —

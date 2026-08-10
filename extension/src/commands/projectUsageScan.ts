@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { type Breakdown, priceLine, resolveProject } from "../usage";
+import { type Breakdown, filesTouchingProject, priceLine, resolveProject } from "../usage";
 
 // On-demand, single-project scan for the Project Usage drill-down page. Kept OUT
 // of the global UsageSummary/cache (which the dashboard polls every 10s) so the
@@ -95,9 +95,11 @@ export function buildProjectUsage(records: UsageRecord[], root: string): Project
       seen.add(k);
     }
     const model = String(msg.model ?? "");
-    const pl = priceLine(model, usage);
-    if (!pl) continue;
     const ts = typeof d.timestamp === "string" ? d.timestamp : "";
+    // Same date-scoped pricing as the global aggregator (Sonnet 5's intro rate).
+    const tsMsForPrice = Date.parse(ts);
+    const pl = priceLine(model, usage, Number.isNaN(tsMsForPrice) ? undefined : tsMsForPrice);
+    if (!pl) continue;
 
     const hk = hourKeyLocal(ts);
     const hb = hourly[hk] || (hourly[hk] = { cost: 0, tokens: 0, cats: emptyCats() });
@@ -155,11 +157,21 @@ function collectJsonl(dir: string, out: string[], depth: number): void {
   }
 }
 
-/** Read + fold one project's transcripts. Pre-filters transcript dirs by the
- *  encoded-cwd prefix (Claude Code names each dir after the cwd with `/`+`.`→`-`),
- *  falling back to a full walk when the encoding doesn't line up; the per-line
- *  resolveProject check in buildProjectUsage is the real correctness gate. */
-export function scanProjectUsage(root: string): ProjectUsage {
+/** Read + fold one project's transcripts.
+ *
+ *  File selection is the union of two sources, because neither alone is complete:
+ *   1. the global usage cache's own answer (`filesTouchingProject`) — every file
+ *      the last full scan saw record a cwd inside this project, wherever it lives;
+ *   2. transcript dirs whose name starts with the project's encoded cwd — these
+ *      catch a session started since that scan, which the cache can't know about.
+ *
+ *  The name filter used to be the ONLY source, and it is not sound on its own: a
+ *  directory is named after the cwd the session STARTED in, so an orchestrated
+ *  build (oracle session in its own repo, writing into the project) has no
+ *  matching directory and the page showed $0.00 for a real $452 project. Falls
+ *  back to a full walk when both come up empty. The per-line resolveProject check
+ *  in buildProjectUsage stays the correctness gate — extra files are harmless. */
+export async function scanProjectUsage(root: string): Promise<ProjectUsage> {
   const base = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
   const projectsDir = path.join(base, "projects");
   let topDirs: string[];
@@ -170,10 +182,28 @@ export function scanProjectUsage(root: string): ProjectUsage {
   }
   const encoded = root.replace(/[/.]/g, "-");
   const named = topDirs.filter((d) => path.basename(d).startsWith(encoded));
-  const scanDirs = named.length ? named : topDirs;
 
-  const files: string[] = [];
-  for (const d of scanDirs) collectJsonl(d, files, 0);
+  const set = new Set<string>();
+  for (const d of named) {
+    const found: string[] = [];
+    collectJsonl(d, found, 0);
+    for (const f of found) set.add(f);
+  }
+  let cached: string[] | null = null;
+  try {
+    cached = await filesTouchingProject(root);
+  } catch {
+    cached = null;
+  }
+  for (const f of cached ?? []) set.add(f);
+  if (!set.size) {
+    // Nothing known yet (first run, or a project the cache has never seen) —
+    // read everything and let the per-line check sort it out.
+    const all: string[] = [];
+    for (const d of topDirs) collectJsonl(d, all, 0);
+    for (const f of all) set.add(f);
+  }
+  const files = [...set];
 
   const records: UsageRecord[] = [];
   for (const f of files) {

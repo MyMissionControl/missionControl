@@ -47,6 +47,7 @@ async function showBudgetPopup(): Promise<void> {
   const qp = vscode.window.createQuickPick<Row>();
   qp.title = "Claude usage: " + v.monthFmt + " this month";
   qp.placeholder = v.sessions + " sessions · คำนวณจาก ~/.claude/projects · Anthropic list pricing";
+  // (v.sessions counts real sessions — subagent/workflow transcripts belong to one)
   qp.items = items;
   qp.matchOnDescription = true;
 
