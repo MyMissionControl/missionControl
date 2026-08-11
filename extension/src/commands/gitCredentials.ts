@@ -333,6 +333,16 @@ export function testSshHost(host: string): { ok: boolean; text: string } {
   if (/host key verification|remote host identification/i.test(s))
     return { ok: false, text: "ยังไม่รู้จัก host key — กด 'เตรียม host key'" };
   if (/permission denied|publickey/i.test(s))
-    return { ok: false, text: "key ยังไม่ได้ลงทะเบียนที่ provider (User settings → SSH public keys)" };
+    // ⛔ ข้อความนี้ครอบ 2 สาเหตุที่แยกจากกันไม่ได้จาก stderr และทางแก้ต่างกันคนละเรื่อง:
+    //    (ก) public key ยังไม่ได้ลงทะเบียนที่ provider  (ข) private key มี passphrase → BatchMode
+    //    ใช้ไม่ได้เพราะ extension host ไม่มี ssh-agent ให้ปลดล็อก. บอกทั้งคู่ดีกว่าเดาผิดข้างเดียว
+    //    (⛔ ไม่ตรวจด้วยการอ่าน private key — เจตนา: MC ไม่แตะไฟล์ key ของ user)
+    return {
+      ok: false,
+      text:
+        "auth ไม่ผ่าน — เช็ค 2 อย่าง: (1) เอา public key ไปแปะที่ provider แล้วยัง " +
+        "(User settings → SSH public keys) (2) private key ต้องไม่มี passphrase " +
+        "ไม่งั้น MC เรียกใช้ไม่ได้ (extension host ไม่มี ssh-agent)",
+    };
   return { ok: false, text: s.slice(0, 140) || "ssh ไม่ตอบอะไรเลย" };
 }
