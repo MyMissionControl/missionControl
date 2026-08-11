@@ -13,6 +13,15 @@ import {
   type Provider,
 } from "../commands/accountsOps";
 import { fetchClaudeUsage } from "../commands/usage";
+import {
+  CRED_FILE,
+  credTargetFromUrl,
+  listGitCredentials,
+  providerLabelForHost,
+  removeGitCredential,
+  setGitCredential,
+  testGitCredential,
+} from "../commands/gitCredentials";
 
 // Editor-area panel for managing multiple subscription logins across AI CLIs.
 // Singleton _panel, a display-ready postMessage + a message switch — mirrors
@@ -67,6 +76,37 @@ function buildView(): Record<string, unknown> {
 
 function pushList(panel: vscode.WebviewPanel): void {
   panel.webview.postMessage(buildView());
+}
+
+/** โซน Git — ⛔ ไม่มีค่า secret ในนี้เลย มีแต่ host/org + สถานะ (กฎเดียวกับ token ของ AI) */
+function pushGit(panel: vscode.WebviewPanel): void {
+  const { rows, ghLogin } = listGitCredentials();
+  panel.webview.postMessage({
+    type: "git",
+    file: CRED_FILE,
+    ghLogin,
+    rows: rows.map((r) => ({
+      host: r.host,
+      user: r.user,
+      provider: r.provider,
+      sub:
+        r.provider + " · " + r.host +
+        (r.helper ? "" : " · ⛔ ยังไม่ได้ตั้ง credential helper ของ host นี้ (git จะไม่อ่านไฟล์)"),
+      testable: r.provider === "Azure DevOps",
+    })),
+  });
+}
+
+/** ขอ PAT แบบไม่โชว์ค่า + ไม่เก็บไว้ที่อื่นนอกจาก ~/.git-credentials */
+async function promptPat(host: string, user: string): Promise<string> {
+  const v = await vscode.window.showInputBox({
+    title: `PAT สำหรับ ${providerLabelForHost(host)} · ${user}`,
+    prompt: "Azure DevOps: User settings → Personal access tokens → New Token → scope Code (Read)",
+    password: true,
+    ignoreFocusOut: true,
+    validateInput: (x) => ((x ?? "").trim() ? null : "ใส่ PAT ก่อน"),
+  });
+  return (v ?? "").trim();
 }
 
 /** Fetch remaining usage for every Claude account whose token is still valid and
@@ -138,8 +178,8 @@ export function openAccountsPanel(): vscode.WebviewPanel {
     return _panel;
   }
   const panel = vscode.window.createWebviewPanel(
-    "missioncontrol.accounts",
-    "Accounts",
+    "missioncontrol.accounts", // ⛔ view id เดิม — เปลี่ยนแล้ว state/keybinding ของ user พัง
+    "Connections",
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
@@ -158,8 +198,69 @@ export function openAccountsPanel(): vscode.WebviewPanel {
       case "ready":
       case "reload":
         pushList(panel);
+        pushGit(panel);
         void pushUsage(panel);
         return;
+
+      case "git_add": {
+        // "เปลี่ยน PAT" ส่ง host+user มาแล้ว → ข้ามขั้นถาม URL ไปถาม PAT ตรง ๆ
+        if (msg.host && msg.user) {
+          const host = String(msg.host);
+          const user = String(msg.user);
+          const pat0 = await promptPat(host, user);
+          if (!pat0) return;
+          notify(setGitCredential(host, user, pat0), `เปลี่ยน PAT ของ ${user} แล้ว`);
+          pushGit(panel);
+          return;
+        }
+        // ⛔ ขอ **URL ที่ copy จากปุ่ม Clone** ไม่ใช่ให้กรอก host/org แยกช่อง: org ของ Azure ต้อง
+        //    ตรงกับ username ที่ URL ระบุเป๊ะ ไม่งั้น git หา credential ไม่เจอ (พิมพ์เองพลาดง่าย)
+        const url = await vscode.window.showInputBox({
+          title: "วาง URL repo (จากปุ่ม Clone ของ Azure DevOps / GitHub)",
+          prompt: "MC จะแกะ host + org ให้เอง แล้วถาม PAT ต่อ",
+          placeHolder: "https://ORG@dev.azure.com/ORG/PROJECT/_git/REPO",
+          ignoreFocusOut: true,
+          validateInput: (v) =>
+            !(v ?? "").trim() || credTargetFromUrl((v ?? "").trim()) ? null : "อ่าน host/org จาก URL นี้ไม่ได้",
+        });
+        const target = credTargetFromUrl((url ?? "").trim());
+        if (!target) return;
+        const pat = await promptPat(target.host, target.user);
+        if (!pat) return;
+        const r = setGitCredential(target.host, target.user, pat);
+        notify(r, `เก็บ PAT ของ ${target.user} (${target.host}) แล้ว`);
+        pushGit(panel);
+        return;
+      }
+
+      case "git_del": {
+        const host = String(msg.host ?? "");
+        const user = String(msg.user ?? "");
+        const pick = await vscode.window.showWarningMessage(
+          `ลบ credential ของ '${user}' (${host}) ออกจาก ${CRED_FILE}?`,
+          { modal: true },
+          "ลบ",
+        );
+        if (pick !== "ลบ") return;
+        notify(removeGitCredential(host, user), `ลบ '${user}' แล้ว`);
+        pushGit(panel);
+        return;
+      }
+
+      case "git_test": {
+        const host = String(msg.host ?? "");
+        const user = String(msg.user ?? "");
+        panel.webview.postMessage({ type: "git_test_result", host, user, text: "กำลังเช็ค…" });
+        const r = await testGitCredential(host, user);
+        panel.webview.postMessage({
+          type: "git_test_result",
+          host,
+          user,
+          ok: r.ok,
+          text: (r.ok ? "PASS: " : "FAIL: ") + r.text,
+        });
+        return;
+      }
 
       case "refresh_usage":
         void pushUsage(panel);
@@ -299,17 +400,55 @@ function renderShell(): string {
     border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); padding-top: 14px;
   }
   .note b { opacity: 0.95; }
+  /* ตัวสลับโซน — ยืมรูปแบบ segmented ของหน้า Data View มาใช้ (ไม่คิดศัพท์ UI ใหม่) */
+  .zones { display: flex; gap: 4px; margin: 0 0 18px; }
+  .zone {
+    background: transparent; color: var(--vscode-foreground); opacity: 0.7;
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+    border-radius: 6px; padding: 6px 14px; font-size: 12.5px; cursor: pointer;
+  }
+  .zone.on { opacity: 1; font-weight: 700; border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.12)); }
+  .tres { font-size: 11px; margin-top: 3px; opacity: 0.8; }
+  .tres.bad { color: var(--vscode-inputValidation-errorBorder, #d1242f); opacity: 1; }
+  .tres.good { color: var(--vscode-charts-green, #3fd39a); opacity: 1; }
+  .mono { font-family: var(--vscode-editor-font-family), monospace; font-size: 11px; opacity: 0.7; }
 </style>
 </head>
 <body>
-  <h1>AI Accounts</h1>
-  <div class="lead">เก็บ + สลับ subscription login หลาย provider — usage หมดสลับได้ทันที</div>
+  <h1>Connections</h1>
+  <div class="lead">ทุกอย่างที่ MC ต่ออยู่ข้างนอก — บัญชี AI และ credential ของ git</div>
+  <div class="zones">
+    <button class="zone on" data-z="ai">AI accounts</button>
+    <button class="zone" data-z="git">Git</button>
+  </div>
+  <div id="zone-ai">
   <div id="providers"></div>
   <div class="note">
     <b>ใช้ยังไง:</b> login แต่ละ account ผ่าน CLI ของ provider นั้น (Claude = <b>claude /login</b>, OpenAI = <b>codex login</b>) แล้วกด "บันทึก account ปัจจุบัน" — ทำซ้ำได้หลาย account · กด <b>สลับ</b> เพื่อเปลี่ยนตัว active<br />
     <b>ข้อควรรู้:</b> สลับ = เขียนทับไฟล์ credentials ของ CLI → มีผลกับ process ที่เปิด <b>ใหม่</b> เท่านั้น ตัวที่เปิดค้างต้อง restart · ทุก session อ่าน credentials ไฟล์เดียวกันต่อ provider จึงใช้ account เดียวพร้อมกัน · token หมุนจนสลับกลับไม่ได้ → login ใหม่แล้วกด "อัปเดต"<br />
     <b>usage คงเหลือ (Claude):</b> ดึงจาก endpoint <b>/api/oauth/usage</b> ของ account เอง (ไม่กิน quota) — โชว์ 5ชม/7วัน ที่เหลือ + เวลารีเซ็ต · account ที่ active ดึงได้เสมอ (token สด) · ตัวที่ save ไว้นานจน token หมดอายุจะขึ้น "สลับไปเช็ค" · endpoint นี้ private อาจเปลี่ยนได้ กด "⟳ usage" รีเฟรช (ห่าง ≥180 วิ)<br />
     <b>ความปลอดภัย:</b> token เก็บใน ~/.claude/.mc-accounts/ (เครื่องนี้เท่านั้น, สิทธิ์ 0600) ไม่ push git ไม่แสดงค่า token
+  </div>
+  </div>
+
+  <div id="zone-git" style="display:none">
+    <section class="prov">
+      <div class="ph">
+        <div><h2>Azure DevOps · เจ้าอื่น ๆ</h2>
+        <div class="live" id="git-file"></div></div>
+        <div class="ph-btns"><button class="primary git-add">+ เพิ่มจาก URL repo</button></div>
+      </div>
+      <div id="git-rows"></div>
+    </section>
+    <section class="prov">
+      <div class="ph"><div><h2>GitHub</h2><div class="live" id="gh-live"></div></div></div>
+    </section>
+    <div class="note">
+      <b>ทำไมต้องมี:</b> ปุ่ม clone ของหน้า Projects ใช้ credential ของเครื่องนี้ (MC ไม่เก็บ secret เอง) — repo ที่ private จะ clone ไม่ผ่านถ้า host นั้นยังไม่มี credential<br />
+      <b>หลาย organization:</b> Azure DevOps ทุก org ใช้ host เดียวกัน แยกกันด้วยชื่อ org (= username ของ URL) → 1 แถวต่อ 1 org · ต้องวาง URL แบบมี <b>ORG@dev.azure.com</b> ตอน clone ไม่งั้น git หยิบแถวแรกมาใช้<br />
+      <b>PAT:</b> ผูกกับ <b>บัญชี</b> + เลือก <b>org</b> ตอนสร้าง (ไม่ใช่ต่อ project) · scope <b>Code (Read)</b> พอ · มีวันหมดอายุ พอหมดกด "เปลี่ยน PAT"<br />
+      <b>ความปลอดภัย:</b> เก็บใน ~/.git-credentials (สิทธิ์ 0600, เครื่องนี้เท่านั้น) · MC ไม่เคยส่งค่า PAT เข้าหน้าจอ · ปุ่ม <b>ทดสอบ</b> ยิง REST ของ Azure จริงเพื่อดูว่า PAT ยังไม่หมดอายุ
+    </div>
   </div>
 
 <script>
@@ -403,9 +542,65 @@ function renderShell(): string {
     root.innerHTML = html;
   }
 
+  let gitView = null;
+  const testMap = {};
+  function key(h, u) { return h + " " + u; }
+
+  function renderGit() {
+    const v = gitView;
+    if (!v) return;
+    document.getElementById("git-file").textContent = "เก็บที่ " + (v.file || "");
+    document.getElementById("gh-live").textContent = v.ghLogin
+      ? "ใช้ gh auth อยู่ (account " + v.ghLogin + ") — ไม่ต้องทำอะไร"
+      : "ยังไม่ได้ login: รัน gh auth login แล้วกดรีเฟรช";
+    const rows = v.rows || [];
+    let html = "";
+    if (!rows.length) {
+      html = '<div class="empty">ยังไม่มี credential — กด "+ เพิ่มจาก URL repo" แล้ววาง URL ที่ copy จากปุ่ม Clone</div>';
+    } else {
+      html += '<div class="rows">';
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        const t = testMap[key(r.host, r.user)];
+        const cls = t == null ? "tres" : t.ok === true ? "tres good" : t.ok === false ? "tres bad" : "tres";
+        html +=
+          '<div class="row"><div class="ri">' +
+            '<div class="rl">' + esc(r.user) + '</div>' +
+            '<div class="rs">' + esc(r.sub) + '</div>' +
+            (t ? '<div class="' + cls + '">' + esc(t.text) + '</div>' : "") +
+          '</div><div class="ra">' +
+            (r.testable ? '<button class="b gtest" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '">ทดสอบ</button>' : "") +
+            '<button class="b gedit" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '">เปลี่ยน PAT</button>' +
+            '<button class="b del gdel" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '">ลบ</button>' +
+          '</div></div>';
+      }
+      html += "</div>";
+    }
+    document.getElementById("git-rows").innerHTML = html;
+  }
+
+  function showZone(z) {
+    document.getElementById("zone-ai").style.display = z === "ai" ? "" : "none";
+    document.getElementById("zone-git").style.display = z === "git" ? "" : "none";
+    const bs = document.querySelectorAll(".zone");
+    for (let i = 0; i < bs.length; i++) {
+      if (bs[i].getAttribute("data-z") === z) bs[i].classList.add("on");
+      else bs[i].classList.remove("on");
+    }
+  }
+
   document.addEventListener("click", function (e) {
     const t = e.target;
     if (!t || !t.classList || !t.getAttribute) return;
+    const z = t.getAttribute("data-z");
+    if (z) { showZone(z); return; }
+    const h = t.getAttribute("data-h");
+    const u = t.getAttribute("data-u");
+    if (t.classList.contains("git-add")) { post("git_add"); return; }
+    if (t.classList.contains("gtest")) { post("git_test", { host: h, user: u }); return; }
+    // เปลี่ยน PAT = เขียนทับคู่ host+user เดิม → ใช้เส้นเดียวกับ add แต่ส่ง host/user มาให้เลย
+    if (t.classList.contains("gedit")) { post("git_add", { host: h, user: u }); return; }
+    if (t.classList.contains("gdel")) { post("git_del", { host: h, user: u }); return; }
     const p = t.getAttribute("data-p");
     const l = t.getAttribute("data-l");
     if (t.classList.contains("usage-btn")) { post("refresh_usage"); return; }
@@ -421,6 +616,8 @@ function renderShell(): string {
     if (!m) return;
     if (m.type === "accounts") { lastView = m; render(); }
     else if (m.type === "usage") { usageMap = m.results || {}; render(); }
+    else if (m.type === "git") { gitView = m; renderGit(); }
+    else if (m.type === "git_test_result") { testMap[key(m.host, m.user)] = { ok: m.ok, text: m.text }; renderGit(); }
   });
 
   post("ready");

@@ -344,7 +344,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   <div class="nav">
     <button class="nav-item" data-cmd="missioncontrol.createRequirement" data-label="Requirement">${ICON_DOC}<span class="nav-label">Requirement</span></button>
     <button class="nav-item" data-cmd="missioncontrol.skills" data-label="Skills">${ICON_SPARK}<span class="nav-label">Skills</span></button>
-    <button class="nav-item" data-cmd="missioncontrol.accounts" data-label="Accounts">${ICON_HALF}<span class="nav-label">Accounts</span></button>
+    <button class="nav-item" data-cmd="missioncontrol.accounts" data-label="Connections">${ICON_HALF}<span class="nav-label">Connections</span></button>
     <button class="nav-item" data-cmd="missioncontrol.localhosts" data-label="Localhosts">${ICON_SERVER}<span class="nav-label">Localhosts</span></button>
   </div>
   <div class="nav-bottom">
