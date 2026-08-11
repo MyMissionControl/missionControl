@@ -98,6 +98,37 @@ export function pickAttachAction(hasLiveTerminal: boolean, clients: number): Att
   return clients > 0 ? "focus" : "reattach";
 }
 
+/** ชื่อ "ครอบครัว" ของ session = ชื่อ oracle ที่เหลือหลังตัด prefix ของ pin (`NN-`)
+ *  หรือ `claude-` ออก แล้วตัด suffix twin (`-2`, `-3`, …) ทิ้ง. `09-foreman-2`,
+ *  `claude-foreman`, `09-foreman` → `foreman` ทั้งหมด. */
+function sessionFamily(name: string): string {
+  return name
+    .replace(/^\d+-/, "")
+    .replace(/^claude-/, "")
+    .replace(/-\d+$/, "");
+}
+
+/** ชุด session ที่ต้องปิดเมื่อกด ✕ ที่แถวหนึ่ง: ตัวที่กด **มาก่อนเสมอ** แล้วต่อด้วย
+ *  "ซาก" ของ oracle เดียวกัน — session ที่ยังมีชีวิตใน tmux แต่เหลือ 1 หน้าต่างเป็น
+ *  shell เปล่า เพราะ Claude ข้างในตาย (crash/OOM/exit).
+ *
+ *  ⛔ ทำไมต้องรวบ: Bento **ซ่อน** session แบบนั้น (`sessionIsIdle`) เพื่อให้เลข
+ *  "N active" ตรง — ผลข้างเคียงคือมันไม่มีปุ่มให้กดปิด แล้วค้างกินแรมไปเรื่อย ๆ
+ *  (user เจอจริง 2026-08-11: กดปิดตัวที่เห็น แต่ twin `09-foreman-2` ยังอยู่).
+ *  ⛔ เงื่อนไขความปลอดภัย: ตัวที่ถูกลากมาปิดด้วย **ต้องเป็นซากเท่านั้น** — session
+ *  ที่ยังรัน claude หรือมีหลายหน้าต่างคือ "งานจริง" (อาจเป็น sprint ที่กำลังรันอยู่)
+ *  ห้ามแตะเด็ดขาด. เรียงตัวที่กดไว้หน้าสุดเพื่อให้เจตนา user ถูกยิงก่อน เผื่อตัวถัดไปค้าง. */
+export function sessionKillGroup(
+  clicked: string,
+  sessions: Pick<TmuxSession, "name" | "cmd" | "windows">[],
+): string[] {
+  const fam = sessionFamily(clicked);
+  const husks = sessions
+    .filter((s) => s.name !== clicked && sessionFamily(s.name) === fam && sessionIsIdle(s))
+    .map((s) => s.name);
+  return [clicked, ...husks];
+}
+
 /** ข้อความตอน `tmux kill-session` "สำเร็จ" แต่ session ยังอยู่ (เช็คด้วย has-session
  *  หลังยิง). ⛔ ทำไมต้องมี: เดิม callback ของ execFile ทิ้ง err ทั้งก้อน แล้วรีเฟรช
  *  รายการเฉย ๆ — ถ้า tmux ไม่ทัน/ถูก timeout ตัด session จะรอดมา และ UI ก็แค่โชว์แถวเดิม

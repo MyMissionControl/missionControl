@@ -43,6 +43,7 @@ import {
   sessionClients,
   pickAttachAction,
   killFailureMessage,
+  sessionKillGroup,
   parseOraclesJson,
   projectFromPaths,
   loneOracleName,
@@ -349,39 +350,55 @@ export function openDashboardPanel(
           await pushSessions(panel);
           return;
         }
+        // กดปิดทีเดียว = เก็บซากให้หมดด้วย (user's call 2026-08-11). ⛔ ต้องอ่านลิสต์
+        // **ดิบ** ตรงนี้ — pushSessions กรองซากออกไปแล้ว (sessionIsIdle) ซึ่งเป็นเหตุผล
+        // เดียวที่ซากไม่มีปุ่มให้กดปิดตั้งแต่แรก · โชว์รายชื่อทั้งหมดใน modal ก่อนยิง
+        const group = sessionKillGroup(name, await listTmuxSessions()).filter(isSafeSessionName);
+        const extra = group.slice(1);
         const pick = await vscode.window.showWarningMessage(
-          `Kill tmux session '${name}'? This closes all its windows.`,
+          extra.length
+            ? `Kill tmux session '${name}'? This closes all its windows.\n\n` +
+                `เก็บซากของ oracle เดียวกันให้ด้วย (เหลือ shell เปล่า ปิดจากหน้าจอไม่ได้): ` +
+                extra.join(", ")
+            : `Kill tmux session '${name}'? This closes all its windows.`,
           { modal: true },
           "Kill",
         );
         if (pick !== "Kill") return;
-        const stderr = await new Promise<string>((resolve) => {
-          // execFile (no shell) — args passed as array, name already whitelisted.
-          // "=" = exact-match target: plain names prefix-match, so if this
-          // session died while the modal was open tmux would kill a DIFFERENT
-          // session sharing the prefix (verified live: -t zz-a killed zz-ab).
-          // ⛔ 2s was too tight on a loaded box: execFile's timeout SIGKILLs the
-          //    tmux CLIENT, so the kill may never reach the server — and the old
-          //    callback swallowed err entirely, leaving the row in place with no
-          //    explanation (= the "I pressed ✕ and nothing died" report 08-11).
-          cp.execFile("tmux", ["kill-session", "-t", `=${name}`], { timeout: 5000 }, (err, _o, e) =>
-            resolve(String(e ?? "") || (err ? err.message : "")),
+        const survivors: string[] = [];
+        for (const target of group) {
+          const stderr = await new Promise<string>((resolve) => {
+            // execFile (no shell) — args passed as array, name already whitelisted.
+            // "=" = exact-match target: plain names prefix-match, so if this
+            // session died while the modal was open tmux would kill a DIFFERENT
+            // session sharing the prefix (verified live: -t zz-a killed zz-ab).
+            // ⛔ 2s was too tight on a loaded box: execFile's timeout SIGKILLs the
+            //    tmux CLIENT, so the kill may never reach the server — and the old
+            //    callback swallowed err entirely, leaving the row in place with no
+            //    explanation (= the "I pressed ✕ and nothing died" report 08-11).
+            cp.execFile("tmux", ["kill-session", "-t", `=${target}`], { timeout: 5000 }, (err, _o, e) =>
+              resolve(String(e ?? "") || (err ? err.message : "")),
+            );
+          });
+          // ⛔ ถามว่า "ตายจริงไหม" ไม่ใช่ "คำสั่งคืนค่าอะไร": tmux ตอบ 0 แล้ว session
+          //    ยังอยู่ก็เกิดได้ (timeout ตัดกลางทาง / server ไม่ตอบ) → เช็คซ้ำแล้วบอกให้รู้
+          if (tmuxHasSession(target)) {
+            survivors.push(target);
+            void vscode.window.showWarningMessage(killFailureMessage(target, stderr));
+            continue; // ตัวถัดไปยังต้องได้โอกาสปิด — อย่าเงียบและอย่าหยุดทั้งชุด
+          }
+          // Drop any reused attach-terminal for the now-dead session.
+          const term = _sessionTerminals.get(target);
+          if (term) {
+            term.dispose();
+            _sessionTerminals.delete(target);
+          }
+        }
+        if (!survivors.length && extra.length)
+          void vscode.window.showInformationMessage(
+            `ปิดแล้ว ${group.length} session: ${group.join(", ")}`,
           );
-        });
-        // ⛔ ถามว่า "ตายจริงไหม" ไม่ใช่ "คำสั่งคืนค่าอะไร": tmux ตอบ 0 แล้ว session
-        //    ยังอยู่ก็เกิดได้ (timeout ตัดกลางทาง / server ไม่ตอบ) → เช็คซ้ำแล้วบอกให้รู้
-        if (tmuxHasSession(name)) {
-          void vscode.window.showWarningMessage(killFailureMessage(name, stderr));
-          await pushSessions(panel); // แถวยังอยู่จริง — อย่าทำให้ดูเหมือนหายไปแล้ว
-          return;
-        }
-        // Drop any reused attach-terminal for the now-dead session.
-        const term = _sessionTerminals.get(name);
-        if (term) {
-          term.dispose();
-          _sessionTerminals.delete(name);
-        }
-        await pushSessions(panel); // refresh the list (session is gone now)
+        await pushSessions(panel); // refresh the list
         return;
       }
       case "expand_session": {

@@ -19,6 +19,7 @@ import {
   sessionClients,
   pickAttachAction,
   killFailureMessage,
+  sessionKillGroup,
 } from "./sessions";
 
 test("parseTmuxWindows: parses index/name/cmd, preserves spaces in cmd", () => {
@@ -300,4 +301,36 @@ test("killFailureMessage: stderr ยาว/หลายบรรทัดถู�
   expect(m).not.toContain("\n");
   expect(m.length).toBeLessThan(300);
   expect(m).toContain("line one line two");
+});
+
+const _s = (name: string, windows: number, cmd: string) => ({ name, windows, cmd });
+
+test("sessionKillGroup: เก็บซาก (1 window + shell) ของ oracle เดียวกันมาปิดด้วย", () => {
+  const list = [
+    _s("09-foreman", 3, "claude"),
+    _s("09-foreman-2", 1, "bash"), // ซากของ oracle เดียวกัน — MC ซ่อนไว้ กดปิดเองไม่ได้
+    _s("09-bob", 1, "bash"), // oracle อื่น — ห้ามแตะ
+  ];
+  expect(sessionKillGroup("09-foreman", list)).toEqual(["09-foreman", "09-foreman-2"]);
+});
+
+test("sessionKillGroup: ⛔ ห้ามลากตัวที่ยังทำงานอยู่มาปิดด้วย", () => {
+  const list = [
+    _s("09-foreman-2", 1, "claude"), // twin ที่กำลังรันจริง
+    _s("09-foreman", 2, "bash"), // 2 หน้าต่าง = ยังมีงาน
+    _s("09-foreman-3", 1, "bash"), // ซากจริง
+  ];
+  expect(sessionKillGroup("09-foreman-2", list)).toEqual(["09-foreman-2", "09-foreman-3"]);
+});
+
+test("sessionKillGroup: base ชื่อ claude-<orch> กับ pin NN-<orch> = ครอบครัวเดียวกัน", () => {
+  const list = [_s("09-foreman", 1, "claude"), _s("claude-foreman", 1, "zsh")];
+  expect(sessionKillGroup("09-foreman", list)).toEqual(["09-foreman", "claude-foreman"]);
+});
+
+test("sessionKillGroup: ไม่มีซาก = คืนแค่ตัวที่กด (ไม่ใส่ noise ให้ modal)", () => {
+  const list = [_s("09-foreman", 1, "claude"), _s("09-bob-2", 1, "bash")];
+  expect(sessionKillGroup("09-foreman", list)).toEqual(["09-foreman"]);
+  // ตัวที่กดต้องมาก่อนเสมอ (เจตนา user ต้องถูกยิงก่อน เผื่อตัวถัด ๆ ไปค้าง)
+  expect(sessionKillGroup("09-foreman", [])[0]).toBe("09-foreman");
 });
