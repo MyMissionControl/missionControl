@@ -255,14 +255,15 @@ describe("Ctrl+Z after a programmatic replace", () => {
     expect(h.els.ta.value).toBe("NEW");
   });
 
-  // execCommand can report success without pushing an undo entry, and script
-  // cannot observe that. So the link is offered whichever way the call went —
-  // a hidden link plus a dead Ctrl+Z would mean no way back to the draft.
-  test("offers the fallback undo link even when the native undo reports success", () => {
-    const h = loadPage();
-    h.receive({ type: "init", text: "OLD", savedText: null, savedPath: null, defaultDir: "/d" });
-    h.receive({ type: "setText", text: "NEW" });
-    expect(h.els.btnUndo.style.display).toBe("");
+  // The footer used to carry an explicit "undo ร่างเดิม" link as a fallback for
+  // a host that refuses execCommand. Removed on request — Ctrl+Z is the only
+  // way back, so nothing may reintroduce the link or the state behind it.
+  test("no explicit undo link in the footer", () => {
+    const { js, html } = extractClientScript();
+    expect(html).not.toContain('id="btnUndo"');
+    expect(html).not.toContain("undo ร่างเดิม");
+    expect(js).not.toContain("btnUndo");
+    expect(js).not.toContain("undoText");
   });
 
   test("falls back to a direct assignment when execCommand is refused", () => {
@@ -270,7 +271,6 @@ describe("Ctrl+Z after a programmatic replace", () => {
     h.receive({ type: "init", text: "OLD", savedText: null, savedPath: null, defaultDir: "/d" });
     h.receive({ type: "setText", text: "NEW" });
     expect(h.els.ta.value).toBe("NEW");
-    expect(h.els.btnUndo.style.display).toBe("");
   });
 
   test("treats a silently-ignored execCommand as failure, not success", () => {
@@ -288,18 +288,16 @@ describe("Ctrl+Z after a programmatic replace", () => {
     h.els.btnApply.fire("click");
     expect(h.execCalls.map((c) => c.text)).toEqual(["REVISED"]);
     expect(h.els.ta.value).toBe("REVISED");
-    expect(h.els.btnUndo.style.display).toBe("");
   });
 
-  test("the fallback undo link restores the pre-Apply draft", () => {
+  // Losing the link means the toast is the only thing that can tell the user
+  // whether Ctrl+Z will actually work, so it must not claim it does blindly.
+  test("Apply still lands the draft when the host refuses execCommand", () => {
     const h = loadPage({ execOk: false });
     h.receive({ type: "init", text: "OLD", savedText: null, savedPath: null, defaultDir: "/d" });
-    h.receive({ type: "checkResult", result: { verdict: "ok", gaps: [], questions: [], revised: "REVISED" }, diff: [] });
+    h.receive({ type: "checkResult", phase: "rewrite", result: { verdict: "ok", questions: [], assumptions: [], revised: "REVISED" } });
     h.els.btnApply.fire("click");
     expect(h.els.ta.value).toBe("REVISED");
-    h.els.btnUndo.fire("click");
-    expect(h.els.ta.value).toBe("OLD");
-    expect(h.els.btnUndo.style.display).toBe("none");
   });
 });
 
@@ -522,11 +520,23 @@ describe("Check button", () => {
     revised: null,          // triage never returns one; the rewrite pass does
   };
 
+  const WITH_REWRITE = { ...RESULT, revised: "R" };
+  const NO_QUESTIONS = { verdict: "ok", questions: [], assumptions: [{ what: "A-ONE", why: "" }], revised: "R" };
+
   function opened(res: any = RESULT) {
     const h = loadPage();
     h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
     h.receive({ type: "checkResult", result: res });
     return h;
+  }
+
+  /** Fill every question and walk off the end — the only way past the last one. */
+  function answerAll(h: Harness, prefix = "ans") {
+    for (let i = 0; i < RESULT.questions.length; i++) {
+      h.els.qInput.value = prefix + (i + 1);
+      h.els.qInput.fire("input");
+      h.els.qNext.fire("click");
+    }
   }
 
   test("shows ONE question at a time, not the whole list", () => {
@@ -540,10 +550,8 @@ describe("Check button", () => {
   test("never shows assumptions while they are still only intentions", () => {
     const h = opened();
     expect(h.els.rbody.innerHTML).not.toContain("A-ONE");
-    h.els.qNext.fire("click");
-    h.els.qNext.fire("click");
-    h.els.qNext.fire("click"); // last one -> the decision screen
-    expect(h.els.rbody.innerHTML).not.toContain("A-ONE");
+    answerAll(h);                                 // the last one sends, not reports
+    expect(h.els.review.classList.contains("on")).toBe(false);
   });
 
   test("next and prev walk the questions", () => {
@@ -559,11 +567,72 @@ describe("Check button", () => {
     expect(h.els.qPrev.disabled).toBe(true);
   });
 
-  test("the last question offers the summary instead of another next", () => {
+  test("the last question offers the send-off instead of another next", () => {
     const h = opened();
     h.els.qNext.fire("click");
     h.els.qNext.fire("click");
-    expect(h.els.rbody.innerHTML).toContain("ดูสรุป");
+    expect(h.els.rbody.innerHTML).toContain("ส่งแก้เลย");
+  });
+
+  // There is no screen between the last question and the request any more.
+  test("answering the last question sends the rewrite and closes the pane", () => {
+    const h = opened();
+    answerAll(h);
+    expect(h.els.review.classList.contains("on")).toBe(false);
+    const sent = h.posted.filter((m) => m.type === "check").pop();
+    expect(sent.phase).toBe("rewrite");
+    expect(sent.qa).toEqual([
+      { q: "Q-ONE", a: "ans1" },
+      { q: "Q-TWO", a: "ans2" },
+      { q: "Q-THREE", a: "ans3" },
+    ]);
+  });
+
+  test("the send button is dead until every question has an answer", () => {
+    const h = opened();
+    h.els.qNext.fire("click");
+    h.els.qNext.fire("click");                    // on the last one, all three blank
+    expect(h.els.qNext.disabled).toBe(true);
+    expect(h.els.rbody.innerHTML).toContain("เหลืออีก 3 ข้อ");
+  });
+
+  test("filling the last blank unlocks it without navigating away", () => {
+    const h = opened();
+    h.els.qInput.value = "a1"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
+    h.els.qInput.value = "a2"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
+    expect(h.els.qNext.disabled).toBe(true);
+    h.els.qInput.value = "a3"; h.els.qInput.fire("input");
+    expect(h.els.qNext.disabled).toBe(false);
+  });
+
+  // A chip or Enter can walk off the end with an earlier question still blank.
+  // Doing nothing there is indistinguishable from a broken button.
+  test("a blocked send jumps to the blank question rather than no-op", () => {
+    const h = opened();
+    h.els.qInput.value = "a1"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
+    h.els.qNext.fire("click");                    // leave Q-TWO blank, land on Q-THREE
+    h.els.rbody.querySelectorAll(".chip")[0].fire("click");   // answers Q-THREE, walks off
+    expect(h.els.rbody.innerHTML).toContain("Q-TWO");
+    expect(h.posted.filter((m) => m.type === "check").length).toBe(0);
+  });
+
+  // Both discard the same result, so two of them on one screen is a duplicate.
+  // The corner one covers the wizard, where the footer is hidden; the footer one
+  // covers the rewrite screen. Exactly one is reachable at any time.
+  test("exactly one discard button is on screen at a time", () => {
+    const h = opened();
+    expect(h.els.btnCloseReview.style.display).toBe("");
+    expect(h.els.btnDiscard.style.display).toBe("none");
+    const h2 = opened(NO_QUESTIONS);
+    expect(h2.els.btnCloseReview.style.display).toBe("none");
+    expect(h2.els.btnDiscard.style.display).toBe("");
+  });
+
+  test("a failed check always leaves a way to close the pane", () => {
+    const h = opened(NO_QUESTIONS);
+    expect(h.els.btnCloseReview.style.display).toBe("none");
+    h.receive({ type: "checkError", message: "พัง" });
+    expect(h.els.btnCloseReview.style.display).toBe("");
   });
 
   test("a typed answer survives navigating away and back", () => {
@@ -616,18 +685,15 @@ describe("Check button", () => {
     expect(h.els.rbody.innerHTML).toContain("Q-THREE");
   });
 
-  test("Apply/Discard/recheck are hidden while answering and back in the summary", () => {
+  test("Apply/Discard/recheck are hidden while answering and back on the rewrite", () => {
     const h = opened();
     expect(h.els.btnApply.style.display).toBe("none");
     expect(h.els.btnDiscard.style.display).toBe("none");
     expect(h.els.btnRecheck.style.display).toBe("none");
-    h.els.qNext.fire("click");
-    h.els.qNext.fire("click");
-    h.els.qNext.fire("click");
-    expect(h.els.btnApply.style.display).toBe("");
-    // ตรวจอีกรอบ is not offered on the decision screen — send / back / discard
-    // are the moves there, and the toolbar Check still re-runs it.
-    expect(h.els.btnRecheck.style.display).toBe("none");
+    const h2 = opened(NO_QUESTIONS);
+    expect(h2.els.btnApply.style.display).toBe("");
+    expect(h2.els.btnDiscard.style.display).toBe("");
+    expect(h2.els.btnRecheck.style.display).toBe("");
   });
 
   test("ตรวจอีกรอบ comes back once there is a rewrite to re-check", () => {
@@ -646,20 +712,25 @@ describe("Check button", () => {
     expect(h.els.rbody.innerHTML).toContain("ไม่มีอะไรต้องถาม");
   });
 
-  // Answering the last question lands on a decision, not a report: the user
-  // just typed those answers and the assumptions are still speculative until a
-  // rewrite exists.
-  test("finishing the questions shows a decision, not a recap", () => {
-    const h = opened();
-    h.els.qInput.value = "ตอบข้อ 1";
+  // The "you answered N of 3" step is gone: the user just typed those answers,
+  // and the assumptions behind them are speculative until a rewrite exists.
+  test("the answered-N-of-M step is gone for good", () => {
+    const { js } = extractClientScript();
+    expect(js).not.toContain("ตอบแล้ว ");
+    expect(js).not.toContain("ส่งไปให้แก้ร่างเลย");
+  });
+
+  // Ordering a second rewrite when one is already in hand would throw it away.
+  test("with a rewrite in hand the last question opens it instead of re-sending", () => {
+    const h = opened(WITH_REWRITE);
+    h.els.qInput.value = "a1"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
+    h.els.qInput.value = "a2"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
+    expect(h.els.rbody.innerHTML).toContain("ดูร่างใหม่");
+    h.els.qInput.value = "a3"; h.els.qInput.fire("input");
     h.els.qNext.fire("click");
-    h.els.qNext.fire("click");
-    h.els.qNext.fire("click");
-    expect(h.els.rbody.innerHTML).not.toContain("ตอบข้อ 1");
-    expect(h.els.rbody.innerHTML).not.toContain("A-ONE");   // assumption, not yet written
-    expect(h.els.rbody.innerHTML).toContain("ตอบแล้ว 1 จาก 3");
-    expect(h.els.btnApply.textContent).toBe("ส่งแก้เลย");
-    expect(h.els.btnDiscard.style.display).toBe("");
+    expect(h.posted.filter((m) => m.type === "check").length).toBe(0);
+    expect(h.els.rbody.innerHTML).toContain("A-ONE");
+    expect(h.els.btnApply.textContent).toBe("Apply");
   });
 
   test("assumptions do appear once a rewrite actually exists", () => {
@@ -669,10 +740,8 @@ describe("Check button", () => {
   });
 
   test("ก่อนหน้า is still there after the last question, and walks back into it", () => {
-    const h = opened();
-    h.els.qNext.fire("click");
-    h.els.qNext.fire("click");
-    h.els.qNext.fire("click");                    // -> summary
+    const h = opened(WITH_REWRITE);
+    answerAll(h);                                 // -> the rewrite screen
     expect(h.els.btnBack.style.display).toBe("");
     h.els.btnBack.fire("click");
     expect(h.els.rbody.innerHTML).toContain("Q-THREE");
@@ -686,18 +755,19 @@ describe("Check button", () => {
     expect(h2.els.btnBack.style.display).toBe("none");
   });
 
-  test("ตรวจอีกรอบ sends every question with its answer, skipped ones empty", () => {
+  // The wizard will not send with a hole in it, but the toolbar Check still can,
+  // so blanks must reach the prompt as blanks — that is what stops the model
+  // asking the same question a third time.
+  test("a toolbar re-check sends every question, the unanswered ones empty", () => {
     const h = opened();
     h.els.qInput.value = "ตอบหนึ่ง";
     h.els.qNext.fire("click");
-    h.els.qInput.value = "ตอบสอง";
-    h.els.qNext.fire("click");
-    h.els.qNext.fire("click");                    // skip q3 -> summary
-    h.els.btnRecheck.fire("click");
+    h.els.qNext.fire("click");                    // leave Q-TWO and Q-THREE blank
+    h.els.btnCheck.fire("click");
     const sent = h.posted.filter((m) => m.type === "check").pop();
     expect(sent.qa).toEqual([
       { q: "Q-ONE", a: "ตอบหนึ่ง" },
-      { q: "Q-TWO", a: "ตอบสอง" },
+      { q: "Q-TWO", a: "" },
       { q: "Q-THREE", a: "" },
     ]);
   });

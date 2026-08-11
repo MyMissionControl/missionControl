@@ -536,7 +536,6 @@ function renderShell(): string {
       <span id="tok">~0 tokens</span>
       <span class="spacer"></span>
       <span id="pathHint"></span>
-      <button class="lnk" id="btnUndo" style="display:none">undo ร่างเดิม</button>
       <button class="lnk" id="btnReset">reset template</button>
     </div>
   </div>
@@ -546,7 +545,7 @@ function renderShell(): string {
       <span class="verdict vwork" id="verdict">NEEDS-WORK</span>
       <span class="rtitle" id="rtitle">ผลตรวจ</span>
       <span class="spacer"></span>
-      <button class="btn sec" id="btnCloseReview">ปิด</button>
+      <button class="btn sec" id="btnCloseReview">Discard</button>
     </div>
     <div class="rbody" id="rbody"></div>
     <div class="rfoot">
@@ -628,7 +627,6 @@ function renderShell(): string {
     phase: "triage",      // which pass produced STATE.pending
     qi: 0,                // which question the wizard is on
     view: "ask",          // "ask" (one question at a time) or "summary"
-    undoText: null,       // one level of undo for Apply
     askOverwrite: false
   };
   var saveTimer = null;
@@ -796,12 +794,12 @@ function renderShell(): string {
     STATE.pending = null;
     review.classList.remove("on");
   });
-  document.getElementById("btnCloseReview").addEventListener("click", function () {
+  var btnCloseReview = document.getElementById("btnCloseReview");
+  btnCloseReview.addEventListener("click", function () {
     STATE.pending = null;
     review.classList.remove("on");
   });
 
-  var btnUndo = document.getElementById("btnUndo");
   btnApply.addEventListener("click", function () {
     if (!STATE.pending) return;
     // Triage never asks for a rewrite — that is the whole point of splitting the
@@ -810,25 +808,13 @@ function renderShell(): string {
       runCheck("rewrite");
       return;
     }
-    STATE.undoText = ta.value;
     var revised = STATE.pending.revised;
     STATE.pending = null;
     review.classList.remove("on");
+    // Ctrl+Z is the only way back now that the explicit undo link is gone, so
+    // the toast has to say which of the two happened rather than glossing it.
     var undoable = setTextUndoable(revised);
-    // Shown even when execCommand reported success. It can report success and
-    // still not push an undo entry, and there is no way to observe that from
-    // script — a hidden link would then leave a dead Ctrl+Z and no way back to
-    // the draft. One small link costs nothing next to losing the draft.
-    btnUndo.style.display = "";
-    showToast(undoable ? "ใส่ร่างใหม่แล้ว — กด Ctrl+Z ย้อนได้" : "ใส่ร่างใหม่แล้ว");
-  });
-  btnUndo.addEventListener("click", function () {
-    if (STATE.undoText === null) return;
-    var prev = STATE.undoText;
-    STATE.undoText = null;
-    btnUndo.style.display = "none";
-    setTextUndoable(prev);
-    showToast("กลับไปร่างก่อน Apply แล้ว");
+    showToast(undoable ? "ใส่ร่างใหม่แล้ว — กด Ctrl+Z ย้อนได้" : "ใส่ร่างใหม่แล้ว — Ctrl+Z ย้อนไม่ได้");
   });
 
   document.getElementById("btnReset").addEventListener("click", function () {
@@ -867,6 +853,10 @@ function renderShell(): string {
     var hasRewrite = !!(STATE.pending && STATE.pending.revised);
     btnApply.style.display = asking ? "none" : "";
     btnDiscard.style.display = asking ? "none" : "";
+    // The corner button and the footer one throw the same result away, so only
+    // one of them is on screen at a time: the corner while questions are being
+    // answered (the footer is hidden then), the footer once they are done.
+    btnCloseReview.style.display = asking ? "" : "none";
     btnBack.style.display = !asking && STATE.qs.length ? "" : "none";
     // After the last question the only sensible moves are send / go back /
     // discard. Re-running the check from here is still one click away on the
@@ -899,23 +889,42 @@ function renderShell(): string {
         + '" data-go="' + d + '" title="ข้อ ' + (d + 1) + '"></button>';
     }
     h += "</div>";
-    h += '<button class="btn pri" id="qNext">' + (STATE.qi === STATE.qs.length - 1 ? "ดูสรุป" : "ถัดไป") + "</button>";
+    // The last question's button IS the send button — there is no summary screen
+    // in between. It stays disabled while anything is blank, with the reason on
+    // the tooltip so a dead-looking button is never unexplained.
+    var last = STATE.qi === STATE.qs.length - 1;
+    var left = unansweredCount();
+    var blocked = last && left > 0;
+    h += '<button class="btn pri" id="qNext"' + (blocked ? " disabled" : "")
+      + (blocked ? ' title="ยังตอบไม่ครบ — เหลืออีก ' + left + ' ข้อ"' : "")
+      + ">" + (last ? sendLabel() : "ถัดไป") + "</button>";
     h += "</div></div>";
     return h;
   }
 
+  // A rewrite already in hand means the last button leads to it rather than
+  // ordering another one — that screen is where Apply lives.
+  function sendLabel() {
+    return STATE.pending && STATE.pending.revised ? "ดูร่างใหม่" : "ส่งแก้เลย";
+  }
+
+  function unansweredCount() {
+    var n = 0;
+    for (var i = 0; i < STATE.qs.length; i++) if (!String(STATE.answers[i] || "").trim()) n++;
+    return n;
+  }
+
+  function firstUnanswered() {
+    for (var i = 0; i < STATE.qs.length; i++) if (!String(STATE.answers[i] || "").trim()) return i;
+    return -1;
+  }
+
+  // Only ever the post-rewrite screen now: answering the last question sends
+  // straight off, so there is no "you answered N of M" step in between.
   function summaryHtml() {
     var r = STATE.pending || {};
-    var hasRewrite = !!r.revised;
     var h = "";
-    if (!hasRewrite) {
-      var answered = 0;
-      for (var i = 0; i < STATE.answers.length; i++) if (STATE.answers[i]) answered++;
-      h += '<div class="rsec"><div class="dsum">ตอบแล้ว ' + answered + " จาก " + STATE.qs.length
-        + " ข้อ — ส่งไปให้แก้ร่างเลย หรือกด ก่อนหน้า เพื่อกลับไปแก้คำตอบ</div></div>";
-      return h;
-    }
-    if (r.assumptions && r.assumptions.length) {
+    if (r.revised && r.assumptions && r.assumptions.length) {
       h += '<div class="rsec"><div class="slab">ตัดสินใจแทนให้แล้ว — เช็คว่าเดาถูกไหม</div>';
       for (var a = 0; a < r.assumptions.length; a++) {
         h += '<div class="acard"><div class="aw">' + esc(r.assumptions[a].what) + "</div>";
@@ -924,9 +933,9 @@ function renderShell(): string {
       }
       h += "</div>";
     }
-    if (!STATE.qs.length && !(r.assumptions && r.assumptions.length)) {
-      h += '<div class="dsum">ไม่มีอะไรต้องถามและไม่มีอะไรต้องเดาแทน</div>';
-    }
+    // Guard against an empty pane: a rewrite that guessed nothing would otherwise
+    // paint a blank body with an Apply button floating under it.
+    if (!h) h += '<div class="dsum">ไม่มีอะไรต้องถามและไม่มีอะไรต้องเดาแทน</div>';
     return h;
   }
 
@@ -938,11 +947,32 @@ function renderShell(): string {
   function goTo(i) {
     saveCurrentAnswer();
     if (i < 0) return;
-    // Reaching the summary persists what has been answered so far — closing the
-    // panel after working through ten questions used to lose all ten.
-    if (i >= STATE.qs.length) { mergeAnswers(); STATE.view = "summary"; paintReview(); return; }
+    if (i >= STATE.qs.length) {
+      // Walking off the end sends. A chip or Enter can reach here with an earlier
+      // question still blank, and doing nothing would read as a broken button —
+      // so jump to the hole instead of silently refusing.
+      var miss = firstUnanswered();
+      if (miss >= 0) { STATE.qi = miss; paintReview(); focusInput(); return; }
+      // A rewrite already exists: its screen is where Apply lives, so show it
+      // rather than ordering a second one.
+      if (STATE.pending && STATE.pending.revised) {
+        // Persists what was answered — closing the panel after working through
+        // ten questions used to lose all ten.
+        mergeAnswers();
+        STATE.view = "summary";
+        paintReview();
+        return;
+      }
+      review.classList.remove("on");
+      runCheck("rewrite");   // collectAnswers() inside persists the answers
+      return;
+    }
     STATE.qi = i;
     paintReview();
+    focusInput();
+  }
+
+  function focusInput() {
     var inp = document.getElementById("qInput");
     if (inp) inp.focus();
   }
@@ -971,6 +1001,17 @@ function renderShell(): string {
     if (next) next.addEventListener("click", function () { goTo(STATE.qi + 1); });
     var inp = document.getElementById("qInput");
     if (inp) {
+      // The send button unlocks the moment the last blank is filled, so typing
+      // has to update STATE (and the button) without waiting for a navigation.
+      inp.addEventListener("input", function () {
+        STATE.answers[STATE.qi] = inp.value;
+        var nx = document.getElementById("qNext");
+        if (!nx || STATE.qi !== STATE.qs.length - 1) return;
+        var left = unansweredCount();
+        nx.disabled = left > 0;
+        if (left > 0) nx.setAttribute("title", "ยังตอบไม่ครบ — เหลืออีก " + left + " ข้อ");
+        else nx.removeAttribute("title");
+      });
       inp.addEventListener("keydown", function (ev) {
         if (ev.key === "Enter") goTo(STATE.qi + 1);
         else if (ev.key === "ArrowUp") goTo(STATE.qi - 1);
@@ -1052,9 +1093,7 @@ function renderShell(): string {
     // reset template — same undo treatment as Apply, so a mis-click is one
     // Ctrl+Z away from the draft it just replaced.
     if (m.type === "setText") {
-      STATE.undoText = ta.value;
       setTextUndoable(m.text || "");
-      btnUndo.style.display = "";
       return;
     }
     if (m.type === "checkResult") {
@@ -1072,6 +1111,9 @@ function renderShell(): string {
     if (m.type === "checkError") {
       setChecking(false);
       review.classList.add("on");
+      // An error opens the pane without painting it, so the corner button has to
+      // be forced back on — a failed check must never be a pane with no way out.
+      btnCloseReview.style.display = "";
       rerr.textContent = m.message || "ตรวจไม่สำเร็จ";
       return;
     }
