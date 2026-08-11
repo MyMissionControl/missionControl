@@ -4,7 +4,7 @@
   "_step2_isolate": "isolateReads: ['<vault-dir>'] makes that oracle's MCP see ONLY its own tenant (+ nothing else). This is the switch that actually isolates. Remove the entry to un-isolate; no data changes.",
   "_off": "Set both back to empty. Undo the labels with: bun ~/.claude/oracle-tenant-migrate.ts --revert ~/.oracle/tenant-migrate-<stamp>.jsonl",
   "_example": "label mike-oracle as tenant 'mike', then add the same vault name to the isolate list below",
-  "_perf": "The PreToolUse guard hook fast-paths on a grep for a NON-empty isolate list at the start of a line — keep the real key at 2-space indent, and never write a filled-in example of it in this file or the hook pays a python start (~35ms) on every tool call for nothing.",
+  "_perf": "The PreToolUse ψ-guard hook gates on the marker file ~/.claude/oracle-isolation-ON (written from isolateReads on every map write and every --report/--json, so it self-heals). Do not make the hook parse this JSON — that was tried and failed both ways: it matched a filled-in example, then anchoring it silently missed a one-line map.",
   "vaults": {},
   "isolateReads": []
 }
