@@ -305,6 +305,48 @@ export function validateSaveDir(dir: string, stat: (p: string) => "dir" | "file"
   return { ok: false, error: "ยังไม่มีโฟลเดอร์นี้", missing: true };
 }
 
+// ── What a finished `claude -p` run actually means ───────────────────────────
+
+export type ExitVerdict =
+  | { kind: "ok"; out: string }
+  | { kind: "cancelled" }
+  | { kind: "error"; error: string };
+
+/** Decide what a closed child process means. Split out of the panel because the
+ *  obvious reading of the close event is wrong in two measured ways (2026-08-11,
+ *  this machine):
+ *
+ *  - A SIGTERM'd `claude` arrives as **code 143, signal null** — not
+ *    signal "SIGTERM". Cancellation therefore cannot be detected from the close
+ *    event at all; the caller's own intent has to be passed in.
+ *  - It prints **"Execution error" to STDOUT** (not stderr) when killed. Any
+ *    "did it print anything?" test reads that as a successful run, hands it to
+ *    parseCheckResult, and pops a parse-error panel on every single cancel.
+ *
+ *  Salvage still wins over everything: a run that printed its whole answer
+ *  before dying is a success no matter how it exited. */
+export function classifyCheckExit(x: {
+  code: number | null;
+  signal: string | null;
+  out: string;
+  err: string;
+  cancelRequested: boolean;
+}): ExitVerdict {
+  if (parseCheckResult(x.out).ok) return { kind: "ok", out: x.out };
+  if (x.cancelRequested || x.signal === "SIGTERM") return { kind: "cancelled" };
+  if (x.code !== 0) {
+    return {
+      kind: "error",
+      error:
+        x.err.trim().slice(0, 400) ||
+        x.out.trim().slice(0, 400) ||
+        "claude จบด้วย exit code " + x.code,
+    };
+  }
+  // Exited cleanly but unparseable — let the caller's parser say why.
+  return { kind: "ok", out: x.out };
+}
+
 // ── Download ⇄ Copy button ───────────────────────────────────────────────────
 
 export type ButtonMode = "download" | "copy";

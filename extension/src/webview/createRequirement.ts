@@ -9,6 +9,7 @@ import {
   REQUIREMENT_TEMPLATE,
   applyExtension,
   buildCheckPrompt,
+  classifyCheckExit,
   parseCheckResult,
   validateFileName,
   validateSaveDir,
@@ -100,8 +101,14 @@ function restoreQa(context: vscode.ExtensionContext, draft: string): QA[] {
     .map((x) => ({ q: x.q, a: x.a }));
 }
 
+// A killed `claude` does NOT report signal "SIGTERM" — it closes with code 143
+// and signal null — so cancellation has to be remembered here rather than read
+// off the close event. See classifyCheckExit().
+let _cancelRequested = false;
+
 function killCheck(): void {
   if (_proc && !_proc.killed) {
+    _cancelRequested = true;
     try {
       _proc.kill("SIGTERM");
     } catch {
@@ -119,6 +126,7 @@ function runCheck(
   phase: CheckPhase,
 ): Promise<{ ok: true; out: string } | { ok: false; error: string; cancelled?: boolean }> {
   return new Promise((resolve) => {
+    _cancelRequested = false;
     let done = false;
     const finish = (r: { ok: true; out: string } | { ok: false; error: string; cancelled?: boolean }) => {
       if (done) return;
@@ -167,20 +175,10 @@ function runCheck(
     });
     child.on("error", () => finish({ ok: false, error: "เรียก claude ไม่ได้ — ไม่มีใน PATH?" }));
     child.on("close", (code, signal) => {
-      if (signal === "SIGTERM" && !done) {
-        // Same salvage on cancel: if the answer already arrived, keep it.
-        if (parseCheckResult(out).ok) {
-          finish({ ok: true, out });
-          return;
-        }
-        finish({ ok: false, error: "ยกเลิกแล้ว", cancelled: true });
-        return;
-      }
-      if (code !== 0 && out.trim().length === 0) {
-        finish({ ok: false, error: err.trim().slice(0, 400) || "claude จบด้วย exit code " + code });
-        return;
-      }
-      finish({ ok: true, out });
+      const v = classifyCheckExit({ code, signal, out, err, cancelRequested: _cancelRequested });
+      if (v.kind === "cancelled") finish({ ok: false, error: "ยกเลิกแล้ว", cancelled: true });
+      else if (v.kind === "error") finish({ ok: false, error: v.error });
+      else finish({ ok: true, out: v.out });
     });
   });
 }
@@ -553,7 +551,6 @@ function renderShell(): string {
       <span class="spacer"></span>
       <button class="btn sec" id="btnBack">ก่อนหน้า</button>
       <button class="btn sec" id="btnRecheck">ตรวจอีกรอบ</button>
-      <button class="btn sec" id="btnDiscard">Discard</button>
       <button class="btn ok" id="btnApply">Apply</button>
     </div>
   </div>
@@ -775,7 +772,6 @@ function renderShell(): string {
   });
 
   var btnApply = document.getElementById("btnApply");
-  var btnDiscard = document.getElementById("btnDiscard");
   var btnRecheck = document.getElementById("btnRecheck");
   var btnBack = document.getElementById("btnBack");
 
@@ -790,10 +786,7 @@ function renderShell(): string {
 
   btnRecheck.addEventListener("click", function () { runCheck("triage"); });
 
-  btnDiscard.addEventListener("click", function () {
-    STATE.pending = null;
-    review.classList.remove("on");
-  });
+  // The one and only discard: top-right corner, on every screen the pane shows.
   var btnCloseReview = document.getElementById("btnCloseReview");
   btnCloseReview.addEventListener("click", function () {
     STATE.pending = null;
@@ -848,15 +841,11 @@ function renderShell(): string {
     var asking = STATE.view === "ask";
     rbody.innerHTML = asking ? askHtml() : summaryHtml();
     if (asking) wireAsk(); else wireSummary();
-    // Apply/Discard/recheck act on the whole result, so they belong to the
-    // summary only; the wizard carries its own nav.
+    // Apply/recheck act on the whole result, so they belong to the summary only;
+    // the wizard carries its own nav. Discard is not here at all — the corner
+    // button is the only one, and it is up on every screen.
     var hasRewrite = !!(STATE.pending && STATE.pending.revised);
     btnApply.style.display = asking ? "none" : "";
-    btnDiscard.style.display = asking ? "none" : "";
-    // The corner button and the footer one throw the same result away, so only
-    // one of them is on screen at a time: the corner while questions are being
-    // answered (the footer is hidden then), the footer once they are done.
-    btnCloseReview.style.display = asking ? "" : "none";
     btnBack.style.display = !asking && STATE.qs.length ? "" : "none";
     // After the last question the only sensible moves are send / go back /
     // discard. Re-running the check from here is still one click away on the
@@ -977,6 +966,21 @@ function renderShell(): string {
     if (inp) inp.focus();
   }
 
+  // Answering the LAST question must not send. Picking an option is "this is my
+  // answer", not "go", and the two used to be the same gesture — clicking the
+  // last chip fired the request with no chance to look it over. Only the send
+  // button sends now; here the answer is just recorded and the screen repainted
+  // so the button unlocks and the dots catch up.
+  function advance() {
+    if (STATE.qi >= STATE.qs.length - 1) {
+      saveCurrentAnswer();
+      paintReview();
+      focusInput();
+      return;
+    }
+    goTo(STATE.qi + 1);
+  }
+
   function wireAsk() {
     var chips = rbody.querySelectorAll(".chip");
     for (var c = 0; c < chips.length; c++) {
@@ -986,7 +990,7 @@ function renderShell(): string {
         STATE.answers[STATE.qi] = ev.currentTarget.getAttribute("data-fill") || "";
         var inp = document.getElementById("qInput");
         if (inp) inp.value = STATE.answers[STATE.qi];
-        goTo(STATE.qi + 1);
+        advance();
       });
     }
     var dots = rbody.querySelectorAll(".dot");
@@ -1013,7 +1017,7 @@ function renderShell(): string {
         else nx.removeAttribute("title");
       });
       inp.addEventListener("keydown", function (ev) {
-        if (ev.key === "Enter") goTo(STATE.qi + 1);
+        if (ev.key === "Enter") advance();
         else if (ev.key === "ArrowUp") goTo(STATE.qi - 1);
       });
       inp.focus();
@@ -1111,9 +1115,6 @@ function renderShell(): string {
     if (m.type === "checkError") {
       setChecking(false);
       review.classList.add("on");
-      // An error opens the pane without painting it, so the corner button has to
-      // be forced back on — a failed check must never be a pane with no way out.
-      btnCloseReview.style.display = "";
       rerr.textContent = m.message || "ตรวจไม่สำเร็จ";
       return;
     }

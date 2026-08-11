@@ -6,6 +6,7 @@ import {
   approxTokens,
   buildCheckPrompt,
   buttonModeFor,
+  classifyCheckExit,
   parseCheckResult,
   validateFileName,
   validateSaveDir,
@@ -224,6 +225,68 @@ describe("parseCheckResult", () => {
       expect(r.value.questions[0].q).toBe("ok?");
       expect(r.value.questions[0].id).toBeTruthy();
     }
+  });
+});
+
+describe("classifyCheckExit", () => {
+  const good = JSON.stringify({ verdict: "ok", revised: "# ร่างใหม่" });
+
+  // The bug this exists for, measured on this machine: pressing Cancel killed
+  // claude, which closed with code 143 / signal null and printed "Execution
+  // error" to STDOUT. The old check looked for signal "SIGTERM" and for empty
+  // stdout, so it matched neither branch, called the run a success, and popped
+  // a JSON parse error at the user on every single cancel.
+  test("a cancelled run reads as cancelled, not as output to parse", () => {
+    const v = classifyCheckExit({
+      code: 143, signal: null, out: "Execution error", err: "", cancelRequested: true,
+    });
+    expect(v.kind).toBe("cancelled");
+  });
+
+  test("still honours a real SIGTERM report, for hosts that send one", () => {
+    const v = classifyCheckExit({
+      code: null, signal: "SIGTERM", out: "", err: "", cancelRequested: false,
+    });
+    expect(v.kind).toBe("cancelled");
+  });
+
+  // Killing a run that already printed its answer must not throw the answer away.
+  test("salvage beats cancellation when the whole answer already arrived", () => {
+    const v = classifyCheckExit({
+      code: 143, signal: null, out: good, err: "", cancelRequested: true,
+    });
+    expect(v.kind).toBe("ok");
+    if (v.kind === "ok") expect(v.out).toBe(good);
+  });
+
+  test("a crash reports stderr", () => {
+    const v = classifyCheckExit({
+      code: 1, signal: null, out: "", err: "claude: command not found", cancelRequested: false,
+    });
+    expect(v.kind).toBe("error");
+    if (v.kind === "error") expect(v.error).toBe("claude: command not found");
+  });
+
+  // "Execution error" goes to stdout, so a silent stderr must not become a
+  // contentless "exit code 1" that tells the user nothing.
+  test("falls back to stdout when the failure was printed there", () => {
+    const v = classifyCheckExit({
+      code: 1, signal: null, out: "Execution error", err: "", cancelRequested: false,
+    });
+    expect(v.kind).toBe("error");
+    if (v.kind === "error") expect(v.error).toBe("Execution error");
+  });
+
+  test("reports the exit code when the process said nothing at all", () => {
+    const v = classifyCheckExit({ code: 7, signal: null, out: "", err: "", cancelRequested: false });
+    expect(v.kind).toBe("error");
+    if (v.kind === "error") expect(v.error).toContain("7");
+  });
+
+  test("a clean exit hands the output on, parseable or not", () => {
+    const v = classifyCheckExit({ code: 0, signal: null, out: "หวัดดี", err: "", cancelRequested: false });
+    expect(v.kind).toBe("ok");
+    if (v.kind === "ok") expect(v.out).toBe("หวัดดี");
   });
 });
 

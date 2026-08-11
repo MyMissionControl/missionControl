@@ -605,34 +605,67 @@ describe("Check button", () => {
     expect(h.els.qNext.disabled).toBe(false);
   });
 
-  // A chip or Enter can walk off the end with an earlier question still blank.
-  // Doing nothing there is indistinguishable from a broken button.
-  test("a blocked send jumps to the blank question rather than no-op", () => {
+  // Picking an option is "this is my answer", not "go". Clicking the last chip
+  // used to fire the request outright, with no chance to look it over.
+  test("a chip on the last question answers it without sending", () => {
     const h = opened();
     h.els.qInput.value = "a1"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
-    h.els.qNext.fire("click");                    // leave Q-TWO blank, land on Q-THREE
-    h.els.rbody.querySelectorAll(".chip")[0].fire("click");   // answers Q-THREE, walks off
-    expect(h.els.rbody.innerHTML).toContain("Q-TWO");
+    h.els.qInput.value = "a2"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
+    h.els.rbody.querySelectorAll(".chip")[0].fire("click");   // opt-c on Q-THREE
+    expect(h.posted.filter((m) => m.type === "check").length).toBe(0);
+    expect(h.els.review.classList.contains("on")).toBe(true);
+    expect(h.els.rbody.innerHTML).toContain("Q-THREE");       // still on it
+    expect(h.els.qInput.value).toBe("opt-c");                 // but answered
+    expect(h.els.qNext.disabled).toBe(false);                 // and the send unlocked
+    h.els.qNext.fire("click");
+    expect(h.posted.filter((m) => m.type === "check").length).toBe(1);
+  });
+
+  test("Enter on the last question does not send either", () => {
+    const h = opened();
+    h.els.qInput.value = "a1"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
+    h.els.qInput.value = "a2"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
+    h.els.qInput.value = "a3"; h.els.qInput.fire("input");
+    h.els.qInput.fire("keydown", { key: "Enter" });
+    expect(h.posted.filter((m) => m.type === "check").length).toBe(0);
+    expect(h.els.rbody.innerHTML).toContain("Q-THREE");
+  });
+
+  // The send button is the only way off the end, but it is reachable while an
+  // EARLIER question is blank (dots jump around). Doing nothing there is
+  // indistinguishable from a broken button.
+  test("a blocked send jumps to the blank question rather than no-op", () => {
+    const h = opened();
+    h.els.rbody.querySelectorAll(".dot")[2].fire("click");    // straight to Q-THREE
+    h.els.qInput.value = "a3"; h.els.qInput.fire("input");
+    h.els.qNext.fire("click");                                // Q-ONE/Q-TWO still blank
+    expect(h.els.rbody.innerHTML).toContain("Q-ONE");
     expect(h.posted.filter((m) => m.type === "check").length).toBe(0);
   });
 
-  // Both discard the same result, so two of them on one screen is a duplicate.
-  // The corner one covers the wizard, where the footer is hidden; the footer one
-  // covers the rewrite screen. Exactly one is reachable at any time.
-  test("exactly one discard button is on screen at a time", () => {
+  // There is exactly one discard now: the corner. The footer copy was removed,
+  // and nothing may bring it back or start hiding the corner one per-screen.
+  test("discard lives only in the corner, on every screen", () => {
+    const { js, html } = extractClientScript();
+    expect(html).not.toContain('id="btnDiscard"');
+    expect(js).not.toContain("btnDiscard");
+    expect(js).not.toContain("btnCloseReview.style");
+  });
+
+  test("the corner discard is up while answering and on the rewrite screen", () => {
     const h = opened();
-    expect(h.els.btnCloseReview.style.display).toBe("");
-    expect(h.els.btnDiscard.style.display).toBe("none");
+    expect(h.els.btnCloseReview.style.display).toBe(undefined);
     const h2 = opened(NO_QUESTIONS);
-    expect(h2.els.btnCloseReview.style.display).toBe("none");
-    expect(h2.els.btnDiscard.style.display).toBe("");
+    expect(h2.els.btnCloseReview.style.display).toBe(undefined);
   });
 
   test("a failed check always leaves a way to close the pane", () => {
     const h = opened(NO_QUESTIONS);
-    expect(h.els.btnCloseReview.style.display).toBe("none");
     h.receive({ type: "checkError", message: "พัง" });
-    expect(h.els.btnCloseReview.style.display).toBe("");
+    expect(h.els.review.classList.contains("on")).toBe(true);
+    expect(h.els.btnCloseReview.style.display).toBe(undefined);
+    h.els.btnCloseReview.fire("click");
+    expect(h.els.review.classList.contains("on")).toBe(false);
   });
 
   test("a typed answer survives navigating away and back", () => {
@@ -685,14 +718,12 @@ describe("Check button", () => {
     expect(h.els.rbody.innerHTML).toContain("Q-THREE");
   });
 
-  test("Apply/Discard/recheck are hidden while answering and back on the rewrite", () => {
+  test("Apply and recheck are hidden while answering and back on the rewrite", () => {
     const h = opened();
     expect(h.els.btnApply.style.display).toBe("none");
-    expect(h.els.btnDiscard.style.display).toBe("none");
     expect(h.els.btnRecheck.style.display).toBe("none");
     const h2 = opened(NO_QUESTIONS);
     expect(h2.els.btnApply.style.display).toBe("");
-    expect(h2.els.btnDiscard.style.display).toBe("");
     expect(h2.els.btnRecheck.style.display).toBe("");
   });
 
