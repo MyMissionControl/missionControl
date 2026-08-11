@@ -475,7 +475,11 @@ function renderShell(): string {
   .dot.ans { background: var(--good); }
   .dot.cur { background: var(--accent2); box-shadow: 0 0 0 3px var(--accentSoft); }
 
-  .rfoot { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+  /* Error strip only. Hidden by default: now that the buttons live in the wizard
+     body, an always-on footer would paint an empty bordered bar under every
+     question. */
+  .rfoot { display: none; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+  .rfoot.on { display: flex; }
   .rfoot .spacer { flex: 1; }
   .err { color: var(--danger); font-size: 12.5px; }
 
@@ -546,12 +550,8 @@ function renderShell(): string {
       <button class="btn sec" id="btnCloseReview">Discard</button>
     </div>
     <div class="rbody" id="rbody"></div>
-    <div class="rfoot">
+    <div class="rfoot" id="rfoot">
       <span class="err" id="rerr"></span>
-      <span class="spacer"></span>
-      <button class="btn sec" id="btnBack">ก่อนหน้า</button>
-      <button class="btn sec" id="btnRecheck">ตรวจอีกรอบ</button>
-      <button class="btn ok" id="btnApply">Apply</button>
     </div>
   </div>
 </div>
@@ -592,6 +592,7 @@ function renderShell(): string {
   var review = document.getElementById("review");
   var rbody = document.getElementById("rbody");
   var rerr = document.getElementById("rerr");
+  var rfoot = document.getElementById("rfoot");
   var verdictEl = document.getElementById("verdict");
   var rtitle = document.getElementById("rtitle");
   var btnCheck = document.getElementById("btnCheck");
@@ -623,7 +624,6 @@ function renderShell(): string {
     qaAll: [],
     phase: "triage",      // which pass produced STATE.pending
     qi: 0,                // which question the wizard is on
-    view: "ask",          // "ask" (one question at a time) or "summary"
     askOverwrite: false
   };
   var saveTimer = null;
@@ -758,6 +758,7 @@ function renderShell(): string {
   function runCheck(phase) {
     if (STATE.checking || ta.value.trim().length === 0) return;
     rerr.textContent = "";
+    rfoot.classList.remove("on");
     setChecking(true);
     STATE.phase = phase;
     vscode.postMessage({ type: "check", text: ta.value, qa: collectAnswers(), phase: phase });
@@ -771,21 +772,6 @@ function renderShell(): string {
     runCheck("triage");
   });
 
-  var btnApply = document.getElementById("btnApply");
-  var btnRecheck = document.getElementById("btnRecheck");
-  var btnBack = document.getElementById("btnBack");
-
-  // Reaching the last question must not strand the user: this walks back into
-  // the wizard at the question they just left.
-  btnBack.addEventListener("click", function () {
-    if (!STATE.qs.length) return;
-    STATE.view = "ask";
-    STATE.qi = STATE.qs.length - 1;
-    paintReview();
-  });
-
-  btnRecheck.addEventListener("click", function () { runCheck("triage"); });
-
   // The one and only discard: top-right corner, on every screen the pane shows.
   var btnCloseReview = document.getElementById("btnCloseReview");
   btnCloseReview.addEventListener("click", function () {
@@ -793,66 +779,64 @@ function renderShell(): string {
     review.classList.remove("on");
   });
 
-  btnApply.addEventListener("click", function () {
-    if (!STATE.pending) return;
-    // Triage never asks for a rewrite — that is the whole point of splitting the
-    // passes — so until one exists this button orders it instead of applying.
-    if (STATE.pending.revised === null || STATE.pending.revised === undefined) {
-      runCheck("rewrite");
-      return;
-    }
-    var revised = STATE.pending.revised;
+  // Drop the rewrite into the textarea. There is no confirmation screen in front
+  // of it any more, so the toast is the only thing that can say whether Ctrl+Z
+  // will work — execCommand can report success without pushing an undo entry.
+  function applyRevised(text) {
     STATE.pending = null;
     review.classList.remove("on");
-    // Ctrl+Z is the only way back now that the explicit undo link is gone, so
-    // the toast has to say which of the two happened rather than glossing it.
-    var undoable = setTextUndoable(revised);
+    var undoable = setTextUndoable(text);
     showToast(undoable ? "ใส่ร่างใหม่แล้ว — กด Ctrl+Z ย้อนได้" : "ใส่ร่างใหม่แล้ว — Ctrl+Z ย้อนไม่ได้");
-  });
+  }
 
   document.getElementById("btnReset").addEventListener("click", function () {
     vscode.postMessage({ type: "resetTemplate" });
   });
 
-  // ── Review: question wizard, then one summary ─────────────────────────────
+  // ── Review: a question wizard, and nothing else ───────────────────────────
   //
   // Questions arrive as a batch but are shown ONE AT A TIME with prev/next, the
   // way a REPL choice box works. Answers live in STATE.answers, not in the DOM,
-  // so navigating away and back keeps them. Only after the last question does
-  // the summary appear — one screen instead of a wall you have to scroll.
+  // so navigating away and back keeps them. There is no screen after the last
+  // question: its button IS the action — send the rewrite off, or, when one has
+  // already come back, drop it into the textarea.
 
+  /** Load a result into the wizard. Returns false when there is nothing to ask,
+   *  which leaves the pane shut and hands the decision back to the caller. */
   function renderReview(result) {
-    verdictEl.textContent = result.verdict === "ok" ? "OK" : "NEEDS-WORK";
-    verdictEl.className = "verdict " + (result.verdict === "ok" ? "vok" : "vwork");
-    rtitle.textContent = result.verdict === "ok"
-      ? "ร่างใช้ได้ — มีขัดเกลาให้เล็กน้อย"
-      : "ยังขาดรายละเอียดบางจุด";
     STATE.pending = result;
     STATE.qs = result.questions || [];
     STATE.answers = [];
     for (var i = 0; i < STATE.qs.length; i++) STATE.answers.push("");
     STATE.qi = 0;
-    STATE.view = STATE.qs.length ? "ask" : "summary";
+    if (!STATE.qs.length) return false;
+    verdictEl.textContent = result.verdict === "ok" ? "OK" : "NEEDS-WORK";
+    verdictEl.className = "verdict " + (result.verdict === "ok" ? "vok" : "vwork");
+    rtitle.textContent = result.verdict === "ok"
+      ? "ร่างใช้ได้ — มีขัดเกลาให้เล็กน้อย"
+      : "ยังขาดรายละเอียดบางจุด";
     paintReview();
     review.classList.add("on");
+    return true;
   }
 
   function paintReview() {
-    var asking = STATE.view === "ask";
-    rbody.innerHTML = asking ? askHtml() : summaryHtml();
-    if (asking) wireAsk(); else wireSummary();
-    // Apply/recheck act on the whole result, so they belong to the summary only;
-    // the wizard carries its own nav. Discard is not here at all — the corner
-    // button is the only one, and it is up on every screen.
-    var hasRewrite = !!(STATE.pending && STATE.pending.revised);
-    btnApply.style.display = asking ? "none" : "";
-    btnBack.style.display = !asking && STATE.qs.length ? "" : "none";
-    // After the last question the only sensible moves are send / go back /
-    // discard. Re-running the check from here is still one click away on the
-    // toolbar, so it is not offered twice.
-    btnRecheck.style.display = !asking && hasRewrite ? "" : "none";
-    btnApply.textContent = hasRewrite ? "Apply" : "ส่งแก้เลย";
+    rbody.innerHTML = askHtml();
+    wireAsk();
     rbody.scrollTop = 0;
+  }
+
+  // What the last question's button does. Answers are merged first so closing
+  // the panel mid-flight cannot lose them.
+  function finishWizard() {
+    mergeAnswers();
+    var revised = STATE.pending && STATE.pending.revised;
+    if (revised) {
+      applyRevised(revised);
+      return;
+    }
+    review.classList.remove("on");
+    runCheck("rewrite");   // collectAnswers() inside persists the answers again
   }
 
   function askHtml() {
@@ -878,9 +862,9 @@ function renderShell(): string {
         + '" data-go="' + d + '" title="ข้อ ' + (d + 1) + '"></button>';
     }
     h += "</div>";
-    // The last question's button IS the send button — there is no summary screen
-    // in between. It stays disabled while anything is blank, with the reason on
-    // the tooltip so a dead-looking button is never unexplained.
+    // The last question's button IS the action — there is no screen after it. It
+    // stays disabled while anything is blank, with the reason on the tooltip so a
+    // dead-looking button is never unexplained.
     var last = STATE.qi === STATE.qs.length - 1;
     var left = unansweredCount();
     var blocked = last && left > 0;
@@ -891,10 +875,10 @@ function renderShell(): string {
     return h;
   }
 
-  // A rewrite already in hand means the last button leads to it rather than
-  // ordering another one — that screen is where Apply lives.
+  // A rewrite already in hand means this button applies it rather than ordering
+  // a second one, which would throw the first away.
   function sendLabel() {
-    return STATE.pending && STATE.pending.revised ? "ดูร่างใหม่" : "ส่งแก้เลย";
+    return STATE.pending && STATE.pending.revised ? "Apply" : "ส่งแก้เลย";
   }
 
   function unansweredCount() {
@@ -908,26 +892,6 @@ function renderShell(): string {
     return -1;
   }
 
-  // Only ever the post-rewrite screen now: answering the last question sends
-  // straight off, so there is no "you answered N of M" step in between.
-  function summaryHtml() {
-    var r = STATE.pending || {};
-    var h = "";
-    if (r.revised && r.assumptions && r.assumptions.length) {
-      h += '<div class="rsec"><div class="slab">ตัดสินใจแทนให้แล้ว — เช็คว่าเดาถูกไหม</div>';
-      for (var a = 0; a < r.assumptions.length; a++) {
-        h += '<div class="acard"><div class="aw">' + esc(r.assumptions[a].what) + "</div>";
-        if (r.assumptions[a].why) h += '<div class="ay">' + esc(r.assumptions[a].why) + "</div>";
-        h += "</div>";
-      }
-      h += "</div>";
-    }
-    // Guard against an empty pane: a rewrite that guessed nothing would otherwise
-    // paint a blank body with an Apply button floating under it.
-    if (!h) h += '<div class="dsum">ไม่มีอะไรต้องถามและไม่มีอะไรต้องเดาแทน</div>';
-    return h;
-  }
-
   function saveCurrentAnswer() {
     var inp = document.getElementById("qInput");
     if (inp) STATE.answers[STATE.qi] = inp.value;
@@ -937,23 +901,12 @@ function renderShell(): string {
     saveCurrentAnswer();
     if (i < 0) return;
     if (i >= STATE.qs.length) {
-      // Walking off the end sends. A chip or Enter can reach here with an earlier
-      // question still blank, and doing nothing would read as a broken button —
-      // so jump to the hole instead of silently refusing.
+      // The send button is reachable while an EARLIER question is blank (the dots
+      // jump around), and doing nothing there would read as a broken button — so
+      // land on the hole instead of silently refusing.
       var miss = firstUnanswered();
       if (miss >= 0) { STATE.qi = miss; paintReview(); focusInput(); return; }
-      // A rewrite already exists: its screen is where Apply lives, so show it
-      // rather than ordering a second one.
-      if (STATE.pending && STATE.pending.revised) {
-        // Persists what was answered — closing the panel after working through
-        // ten questions used to lose all ten.
-        mergeAnswers();
-        STATE.view = "summary";
-        paintReview();
-        return;
-      }
-      review.classList.remove("on");
-      runCheck("rewrite");   // collectAnswers() inside persists the answers
+      finishWizard();
       return;
     }
     STATE.qi = i;
@@ -1022,10 +975,6 @@ function renderShell(): string {
       });
       inp.focus();
     }
-  }
-
-  function wireSummary() {
-    // Nothing to wire: the summary is buttons in the footer now.
   }
 
   // ── Save / Copy ────────────────────────────────────────────────────────────
@@ -1103,19 +1052,21 @@ function renderShell(): string {
     if (m.type === "checkResult") {
       setChecking(false);
       STATE.phase = m.phase === "rewrite" ? "rewrite" : "triage";
-      renderReview(m.result);
-      // Nothing to ask means there is nothing for the user to do between the two
-      // passes, so go straight on to the rewrite rather than making them press a
-      // button that has only one sensible answer.
-      if (STATE.phase === "triage" && STATE.qs.length === 0 && !STATE.pending.revised) {
-        runCheck("rewrite");
-      }
+      if (renderReview(m.result)) return;    // questions to answer — the wizard is up
+      // Nothing to ask. There is no screen left to park on, so the result decides
+      // for itself: a rewrite lands in the textarea, and a triage with nothing to
+      // ask goes straight on to the rewrite pass rather than making the user press
+      // a button that has only one sensible answer.
+      if (m.result.revised) { applyRevised(m.result.revised); return; }
+      if (STATE.phase === "triage") { runCheck("rewrite"); return; }
+      showToast("ไม่มีอะไรต้องแก้เพิ่ม");
       return;
     }
     if (m.type === "checkError") {
       setChecking(false);
       review.classList.add("on");
       rerr.textContent = m.message || "ตรวจไม่สำเร็จ";
+      rfoot.classList.add("on");
       return;
     }
     if (m.type === "checkCancelled") { setChecking(false); showToast("ยกเลิกการตรวจแล้ว"); return; }

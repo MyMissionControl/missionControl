@@ -281,22 +281,20 @@ describe("Ctrl+Z after a programmatic replace", () => {
     expect(h.els.ta.value).toBe("NEW");
   });
 
-  test("Apply routes the revised draft through the same undoable path", () => {
+  test("a rewrite routes through the same undoable path", () => {
     const h = loadPage();
     h.receive({ type: "init", text: "OLD", savedText: null, savedPath: null, defaultDir: "/d" });
     h.receive({ type: "checkResult", phase: "rewrite", result: { verdict: "ok", questions: [], assumptions: [], revised: "REVISED" } });
-    h.els.btnApply.fire("click");
     expect(h.execCalls.map((c) => c.text)).toEqual(["REVISED"]);
     expect(h.els.ta.value).toBe("REVISED");
   });
 
   // Losing the link means the toast is the only thing that can tell the user
   // whether Ctrl+Z will actually work, so it must not claim it does blindly.
-  test("Apply still lands the draft when the host refuses execCommand", () => {
+  test("a rewrite still lands when the host refuses execCommand", () => {
     const h = loadPage({ execOk: false });
     h.receive({ type: "init", text: "OLD", savedText: null, savedPath: null, defaultDir: "/d" });
     h.receive({ type: "checkResult", phase: "rewrite", result: { verdict: "ok", questions: [], assumptions: [], revised: "REVISED" } });
-    h.els.btnApply.fire("click");
     expect(h.els.ta.value).toBe("REVISED");
   });
 });
@@ -343,13 +341,12 @@ describe("Download to Copy button", () => {
     expect(h.posted.some((m) => m.type === "copyPath")).toBe(true);
   });
 
-  test("Apply counts as an edit, so a saved draft goes back to Download", () => {
+  test("a rewrite counts as an edit, so a saved draft goes back to Download", () => {
     const h = loadPage();
     h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
     h.receive({ type: "saved", path: "/p/a.md", text: "draft" });
     expect(h.els.saveLabel.textContent).toBe("Copy");
-    h.receive({ type: "checkResult", result: { verdict: "ok", gaps: [], questions: [], revised: "REVISED" }, diff: [] });
-    h.els.btnApply.fire("click");
+    h.receive({ type: "checkResult", phase: "rewrite", result: { verdict: "ok", questions: [], assumptions: [], revised: "REVISED" } });
     expect(h.els.saveLabel.textContent).toBe("Download");
   });
 });
@@ -389,8 +386,7 @@ describe("Check button", () => {
       result: { verdict: "needs-work", questions: [{ id: "q1", q: "Q-ROUND1", why: "", options: [] }], assumptions: [], revised: null },
     });
     h.els.qInput.value = "ตอบรอบ 1";
-    h.els.qNext.fire("click");
-    h.els.btnRecheck.fire("click");
+    h.els.btnCheck.fire("click");
     // round 2 asks something else entirely
     h.receive({
       type: "checkResult",
@@ -398,8 +394,7 @@ describe("Check button", () => {
       result: { verdict: "needs-work", questions: [{ id: "q2", q: "Q-ROUND2", why: "", options: [] }], assumptions: [], revised: null },
     });
     h.els.qInput.value = "ตอบรอบ 2";
-    h.els.qNext.fire("click");
-    h.els.btnRecheck.fire("click");
+    h.els.btnCheck.fire("click");
     expect(h.posted.filter((m) => m.type === "check").pop().qa).toEqual([
       { q: "Q-ROUND1", a: "ตอบรอบ 1" },
       { q: "Q-ROUND2", a: "ตอบรอบ 2" },
@@ -414,8 +409,7 @@ describe("Check button", () => {
       phase: "triage",
       result: { verdict: "needs-work", questions: [{ id: "q1", q: "Q-SKIP", why: "", options: [] }], assumptions: [], revised: null },
     });
-    h.els.qNext.fire("click");            // answered nothing -> summary
-    h.els.btnRecheck.fire("click");
+    h.els.btnCheck.fire("click");         // answered nothing, re-check anyway
     expect(h.posted.filter((m) => m.type === "check").pop().qa).toEqual([{ q: "Q-SKIP", a: "" }]);
   });
 
@@ -444,7 +438,7 @@ describe("Check button", () => {
     expect(h.posted.filter((m) => m.type === "check").pop().qa).toEqual([{ q: "Q-OLD", a: "ตอบไว้แล้ว" }]);
   });
 
-  test("with no rewrite yet the primary button orders one instead of applying", () => {
+  test("a triage with nothing to ask orders the rewrite without opening the pane", () => {
     const h = loadPage();
     h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
     h.receive({
@@ -452,12 +446,12 @@ describe("Check button", () => {
       phase: "triage",
       result: { verdict: "needs-work", questions: [], assumptions: [{ what: "A", why: "" }], revised: null },
     });
-    expect(h.els.btnApply.textContent).toBe("ส่งแก้เลย");
+    expect(h.els.review.classList.contains("on")).toBe(false);
     const sent = h.posted.filter((m) => m.type === "check").pop();
     expect(sent.phase).toBe("rewrite");   // auto-continued: nothing to ask
   });
 
-  test("once a rewrite exists the primary button applies it", () => {
+  test("a rewrite with nothing to ask lands in the textarea by itself", () => {
     const h = loadPage();
     h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
     h.receive({
@@ -465,9 +459,19 @@ describe("Check button", () => {
       phase: "rewrite",
       result: { verdict: "ok", questions: [], assumptions: [], revised: "REWRITTEN" },
     });
-    expect(h.els.btnApply.textContent).toBe("Apply");
-    h.els.btnApply.fire("click");
     expect(h.els.ta.value).toBe("REWRITTEN");
+    expect(h.els.review.classList.contains("on")).toBe(false);
+  });
+
+  // A rewrite pass that comes back with neither a draft nor a question would
+  // otherwise be a silent no-op — the spinner stops and nothing at all happens.
+  test("a rewrite with nothing at all says so instead of going quiet", () => {
+    const h = loadPage();
+    h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
+    h.receive({ type: "checkResult", phase: "rewrite", result: { verdict: "ok", questions: [], assumptions: [], revised: null } });
+    expect(h.els.ta.value).toBe("draft");
+    expect(h.els.toast.textContent).toBe("ไม่มีอะไรต้องแก้เพิ่ม");
+    expect(h.posted.filter((m) => m.type === "check").length).toBe(0);
   });
 
   test("a triage result WITH questions waits for the user, it does not auto-rewrite", () => {
@@ -668,6 +672,17 @@ describe("Check button", () => {
     expect(h.els.review.classList.contains("on")).toBe(false);
   });
 
+  // The footer holds nothing but the error text now, so leaving it mounted would
+  // paint an empty bordered strip under every single question.
+  test("the error strip is only up when there is an error", () => {
+    const h = opened();
+    expect(h.els.rfoot.classList.contains("on")).toBe(false);
+    h.receive({ type: "checkError", message: "พัง" });
+    expect(h.els.rfoot.classList.contains("on")).toBe(true);
+    h.els.btnCheck.fire("click");                 // a fresh run clears it again
+    expect(h.els.rfoot.classList.contains("on")).toBe(false);
+  });
+
   test("a typed answer survives navigating away and back", () => {
     const h = opened();
     h.els.qInput.value = "คำตอบข้อหนึ่ง";
@@ -718,72 +733,57 @@ describe("Check button", () => {
     expect(h.els.rbody.innerHTML).toContain("Q-THREE");
   });
 
-  test("Apply and recheck are hidden while answering and back on the rewrite", () => {
-    const h = opened();
-    expect(h.els.btnApply.style.display).toBe("none");
-    expect(h.els.btnRecheck.style.display).toBe("none");
-    const h2 = opened(NO_QUESTIONS);
-    expect(h2.els.btnApply.style.display).toBe("");
-    expect(h2.els.btnRecheck.style.display).toBe("");
-  });
-
-  test("ตรวจอีกรอบ comes back once there is a rewrite to re-check", () => {
-    const h = opened({ verdict: "ok", questions: [], assumptions: [], revised: "R" });
-    expect(h.els.btnRecheck.style.display).toBe("");
-  });
-
-  test("a result with no questions lands straight on the summary", () => {
-    const h = opened({ verdict: "ok", questions: [], assumptions: [{ what: "A-ONE", why: "" }], revised: "R" });
-    expect(h.els.rbody.innerHTML).toContain("A-ONE");
-    expect(h.els.btnApply.style.display).toBe("");
-  });
-
-  test("nothing to ask and nothing assumed says so rather than rendering blank", () => {
-    const h = opened({ verdict: "ok", questions: [], assumptions: [], revised: "R" });
-    expect(h.els.rbody.innerHTML).toContain("ไม่มีอะไรต้องถาม");
-  });
-
-  // The "you answered N of 3" step is gone: the user just typed those answers,
-  // and the assumptions behind them are speculative until a rewrite exists.
-  test("the answered-N-of-M step is gone for good", () => {
-    const { js } = extractClientScript();
+  // There is no screen after the last question at all: no recap, no assumptions
+  // report, no Apply/ตรวจอีกรอบ/ก่อนหน้า footer. Nothing may bring one back.
+  test("the pane has no screen but the wizard", () => {
+    const { js, html } = extractClientScript();
+    expect(html).not.toContain('id="btnApply"');
+    expect(html).not.toContain('id="btnRecheck"');
+    expect(html).not.toContain('id="btnBack"');
+    expect(js).not.toContain("summaryHtml");
     expect(js).not.toContain("ตอบแล้ว ");
-    expect(js).not.toContain("ส่งไปให้แก้ร่างเลย");
+    expect(js).not.toContain("ตัดสินใจแทนให้แล้ว");
+  });
+
+  test("a result with no questions never opens the pane", () => {
+    const h = opened(NO_QUESTIONS);
+    expect(h.els.review.classList.contains("on")).toBe(false);
+    expect(h.els.ta.value).toBe("R");             // applied instead
   });
 
   // Ordering a second rewrite when one is already in hand would throw it away.
-  test("with a rewrite in hand the last question opens it instead of re-sending", () => {
+  test("with a rewrite in hand the last question applies it instead of re-sending", () => {
     const h = opened(WITH_REWRITE);
     h.els.qInput.value = "a1"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
     h.els.qInput.value = "a2"; h.els.qInput.fire("input"); h.els.qNext.fire("click");
-    expect(h.els.rbody.innerHTML).toContain("ดูร่างใหม่");
+    expect(h.els.rbody.innerHTML).toContain("Apply");
     h.els.qInput.value = "a3"; h.els.qInput.fire("input");
     h.els.qNext.fire("click");
     expect(h.posted.filter((m) => m.type === "check").length).toBe(0);
-    expect(h.els.rbody.innerHTML).toContain("A-ONE");
-    expect(h.els.btnApply.textContent).toBe("Apply");
+    expect(h.els.ta.value).toBe("R");
+    expect(h.els.review.classList.contains("on")).toBe(false);
   });
 
-  test("assumptions do appear once a rewrite actually exists", () => {
-    const h = opened({ verdict: "ok", questions: [], assumptions: [{ what: "A-ONE", why: "because" }], revised: "R" });
-    expect(h.els.rbody.innerHTML).toContain("A-ONE");
-    expect(h.els.btnApply.textContent).toBe("Apply");
-  });
-
-  test("ก่อนหน้า is still there after the last question, and walks back into it", () => {
+  // Apply belongs to the last question only — everywhere else the button moves on.
+  test("only the last question shows the action; the rest say ถัดไป", () => {
     const h = opened(WITH_REWRITE);
-    answerAll(h);                                 // -> the rewrite screen
-    expect(h.els.btnBack.style.display).toBe("");
-    h.els.btnBack.fire("click");
-    expect(h.els.rbody.innerHTML).toContain("Q-THREE");
-    expect(h.els.rbody.innerHTML).toContain("ข้อ 3 จาก 3");
+    expect(h.els.rbody.innerHTML).toContain("ถัดไป");
+    expect(h.els.rbody.innerHTML).not.toContain("Apply");
+    h.els.qNext.fire("click");
+    expect(h.els.rbody.innerHTML).toContain("ถัดไป");
+    expect(h.els.rbody.innerHTML).not.toContain("Apply");
+    h.els.qNext.fire("click");
+    expect(h.els.rbody.innerHTML).toContain("Apply");
+    expect(h.els.rbody.innerHTML).not.toContain("ถัดไป");
   });
 
-  test("ก่อนหน้า is hidden while answering, and when there were no questions", () => {
+  test("the wizard keeps its own ก่อนหน้า on the last question", () => {
     const h = opened();
-    expect(h.els.btnBack.style.display).toBe("none");
-    const h2 = opened({ verdict: "ok", questions: [], assumptions: [], revised: "R" });
-    expect(h2.els.btnBack.style.display).toBe("none");
+    h.els.qNext.fire("click");
+    h.els.qNext.fire("click");
+    expect(h.els.qPrev.disabled).toBe(false);
+    h.els.qPrev.fire("click");
+    expect(h.els.rbody.innerHTML).toContain("Q-TWO");
   });
 
   // The wizard will not send with a hole in it, but the toolbar Check still can,
@@ -816,10 +816,10 @@ describe("Check button", () => {
     h.receive({
       type: "checkResult",
       result: {
-        verdict: "ok",
-        questions: [],
-        assumptions: [{ what: '<img src=x onerror="boom">', why: "" }],
-        revised: "R",
+        verdict: "needs-work",
+        questions: [{ id: "q1", q: '<img src=x onerror="boom">', why: "", options: ['<b>opt</b>'] }],
+        assumptions: [],
+        revised: null,
       },
     });
     expect(h.els.rbody.innerHTML).not.toContain("<img");
