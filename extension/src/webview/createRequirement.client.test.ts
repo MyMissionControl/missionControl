@@ -284,7 +284,7 @@ describe("Ctrl+Z after a programmatic replace", () => {
   test("Apply routes the revised draft through the same undoable path", () => {
     const h = loadPage();
     h.receive({ type: "init", text: "OLD", savedText: null, savedPath: null, defaultDir: "/d" });
-    h.receive({ type: "checkResult", result: { verdict: "ok", gaps: [], questions: [], revised: "REVISED" }, diff: [] });
+    h.receive({ type: "checkResult", phase: "rewrite", result: { verdict: "ok", questions: [], assumptions: [], revised: "REVISED" } });
     h.els.btnApply.fire("click");
     expect(h.execCalls.map((c) => c.text)).toEqual(["REVISED"]);
     expect(h.els.ta.value).toBe("REVISED");
@@ -454,7 +454,7 @@ describe("Check button", () => {
       phase: "triage",
       result: { verdict: "needs-work", questions: [], assumptions: [{ what: "A", why: "" }], revised: null },
     });
-    expect(h.els.btnApply.textContent).toBe("สร้างร่างใหม่");
+    expect(h.els.btnApply.textContent).toBe("ส่งแก้เลย");
     const sent = h.posted.filter((m) => m.type === "check").pop();
     expect(sent.phase).toBe("rewrite");   // auto-continued: nothing to ask
   });
@@ -519,7 +519,7 @@ describe("Check button", () => {
       { id: "q3", q: "Q-THREE", why: "", options: ["opt-c"] },
     ],
     assumptions: [{ what: "A-ONE", why: "because" }],
-    revised: "REVISED",
+    revised: null,          // triage never returns one; the rewrite pass does
   };
 
   function opened(res: any = RESULT) {
@@ -537,14 +537,13 @@ describe("Check button", () => {
     expect(h.els.rbody.innerHTML).toContain("ข้อ 1 จาก 3");
   });
 
-  test("holds the assumptions back until the questions are done", () => {
+  test("never shows assumptions while they are still only intentions", () => {
     const h = opened();
     expect(h.els.rbody.innerHTML).not.toContain("A-ONE");
     h.els.qNext.fire("click");
     h.els.qNext.fire("click");
-    h.els.qNext.fire("click"); // last one says ดูสรุป
-    expect(h.els.rbody.innerHTML).toContain("A-ONE");
-    expect(h.els.rbody.innerHTML).toContain("because");
+    h.els.qNext.fire("click"); // last one -> the decision screen
+    expect(h.els.rbody.innerHTML).not.toContain("A-ONE");
   });
 
   test("next and prev walk the questions", () => {
@@ -584,10 +583,19 @@ describe("Check button", () => {
     expect(h.els.qInput.value).toBe("opt-a");
   });
 
-  test("ข้ามข้อนี้ leaves the answer empty and still advances", () => {
+  // The skip CHIP is gone, but skipping is not: leaving the box empty and
+  // pressing next still records "asked and declined", which is what stops the
+  // model re-asking it.
+  test("no skip chip is rendered — only the model's own options", () => {
     const h = opened();
     const chips = h.els.rbody.querySelectorAll(".chip");
-    chips[chips.length - 1].fire("click");        // the skip chip
+    expect(chips.length).toBe(2);                 // opt-a, opt-b — nothing else
+    expect(h.els.rbody.innerHTML).not.toContain("ข้ามข้อนี้");
+  });
+
+  test("an empty answer still advances and is still recorded as skipped", () => {
+    const h = opened();
+    h.els.qNext.fire("click");
     expect(h.els.rbody.innerHTML).toContain("Q-TWO");
     h.els.qPrev.fire("click");
     expect(h.els.qInput.value).toBe("");
@@ -617,6 +625,13 @@ describe("Check button", () => {
     h.els.qNext.fire("click");
     h.els.qNext.fire("click");
     expect(h.els.btnApply.style.display).toBe("");
+    // ตรวจอีกรอบ is not offered on the decision screen — send / back / discard
+    // are the moves there, and the toolbar Check still re-runs it.
+    expect(h.els.btnRecheck.style.display).toBe("none");
+  });
+
+  test("ตรวจอีกรอบ comes back once there is a rewrite to re-check", () => {
+    const h = opened({ verdict: "ok", questions: [], assumptions: [], revised: "R" });
     expect(h.els.btnRecheck.style.display).toBe("");
   });
 
@@ -631,25 +646,44 @@ describe("Check button", () => {
     expect(h.els.rbody.innerHTML).toContain("ไม่มีอะไรต้องถาม");
   });
 
-  test("the summary recaps answers, marking skipped ones", () => {
+  // Answering the last question lands on a decision, not a report: the user
+  // just typed those answers and the assumptions are still speculative until a
+  // rewrite exists.
+  test("finishing the questions shows a decision, not a recap", () => {
     const h = opened();
     h.els.qInput.value = "ตอบข้อ 1";
     h.els.qNext.fire("click");
     h.els.qNext.fire("click");
     h.els.qNext.fire("click");
-    expect(h.els.rbody.innerHTML).toContain("ตอบข้อ 1");
-    expect(h.els.rbody.innerHTML).toContain("— ข้ามไว้");
-    expect(h.els.rbody.innerHTML).toContain("1 จาก 3");
+    expect(h.els.rbody.innerHTML).not.toContain("ตอบข้อ 1");
+    expect(h.els.rbody.innerHTML).not.toContain("A-ONE");   // assumption, not yet written
+    expect(h.els.rbody.innerHTML).toContain("ตอบแล้ว 1 จาก 3");
+    expect(h.els.btnApply.textContent).toBe("ส่งแก้เลย");
+    expect(h.els.btnDiscard.style.display).toBe("");
   });
 
-  test("กลับไปแก้คำตอบ returns to the wizard at question one", () => {
+  test("assumptions do appear once a rewrite actually exists", () => {
+    const h = opened({ verdict: "ok", questions: [], assumptions: [{ what: "A-ONE", why: "because" }], revised: "R" });
+    expect(h.els.rbody.innerHTML).toContain("A-ONE");
+    expect(h.els.btnApply.textContent).toBe("Apply");
+  });
+
+  test("ก่อนหน้า is still there after the last question, and walks back into it", () => {
     const h = opened();
     h.els.qNext.fire("click");
     h.els.qNext.fire("click");
-    h.els.qNext.fire("click");
-    h.els.qBack.fire("click");
-    expect(h.els.rbody.innerHTML).toContain("Q-ONE");
-    expect(h.els.rbody.innerHTML).toContain("ข้อ 1 จาก 3");
+    h.els.qNext.fire("click");                    // -> summary
+    expect(h.els.btnBack.style.display).toBe("");
+    h.els.btnBack.fire("click");
+    expect(h.els.rbody.innerHTML).toContain("Q-THREE");
+    expect(h.els.rbody.innerHTML).toContain("ข้อ 3 จาก 3");
+  });
+
+  test("ก่อนหน้า is hidden while answering, and when there were no questions", () => {
+    const h = opened();
+    expect(h.els.btnBack.style.display).toBe("none");
+    const h2 = opened({ verdict: "ok", questions: [], assumptions: [], revised: "R" });
+    expect(h2.els.btnBack.style.display).toBe("none");
   });
 
   test("ตรวจอีกรอบ sends every question with its answer, skipped ones empty", () => {

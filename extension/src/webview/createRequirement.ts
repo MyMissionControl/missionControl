@@ -552,6 +552,7 @@ function renderShell(): string {
     <div class="rfoot">
       <span class="err" id="rerr"></span>
       <span class="spacer"></span>
+      <button class="btn sec" id="btnBack">ก่อนหน้า</button>
       <button class="btn sec" id="btnRecheck">ตรวจอีกรอบ</button>
       <button class="btn sec" id="btnDiscard">Discard</button>
       <button class="btn ok" id="btnApply">Apply</button>
@@ -778,6 +779,16 @@ function renderShell(): string {
   var btnApply = document.getElementById("btnApply");
   var btnDiscard = document.getElementById("btnDiscard");
   var btnRecheck = document.getElementById("btnRecheck");
+  var btnBack = document.getElementById("btnBack");
+
+  // Reaching the last question must not strand the user: this walks back into
+  // the wizard at the question they just left.
+  btnBack.addEventListener("click", function () {
+    if (!STATE.qs.length) return;
+    STATE.view = "ask";
+    STATE.qi = STATE.qs.length - 1;
+    paintReview();
+  });
 
   btnRecheck.addEventListener("click", function () { runCheck("triage"); });
 
@@ -853,11 +864,15 @@ function renderShell(): string {
     if (asking) wireAsk(); else wireSummary();
     // Apply/Discard/recheck act on the whole result, so they belong to the
     // summary only; the wizard carries its own nav.
+    var hasRewrite = !!(STATE.pending && STATE.pending.revised);
     btnApply.style.display = asking ? "none" : "";
     btnDiscard.style.display = asking ? "none" : "";
-    btnRecheck.style.display = asking ? "none" : "";
-    var hasRewrite = !!(STATE.pending && STATE.pending.revised);
-    btnApply.textContent = hasRewrite ? "Apply" : "สร้างร่างใหม่";
+    btnBack.style.display = !asking && STATE.qs.length ? "" : "none";
+    // After the last question the only sensible moves are send / go back /
+    // discard. Re-running the check from here is still one click away on the
+    // toolbar, so it is not offered twice.
+    btnRecheck.style.display = !asking && hasRewrite ? "" : "none";
+    btnApply.textContent = hasRewrite ? "Apply" : "ส่งแก้เลย";
     rbody.scrollTop = 0;
   }
 
@@ -872,7 +887,6 @@ function renderShell(): string {
     for (var k = 0; k < (q.options || []).length; k++) {
       h += '<button class="chip" data-fill="' + esc(q.options[k]) + '">' + esc(q.options[k]) + "</button>";
     }
-    h += '<button class="chip skip" data-fill="">ข้ามข้อนี้</button>';
     h += "</div>";
     h += '<input id="qInput" type="text" placeholder="พิมพ์คำตอบเอง หรือกดตัวเลือกด้านบน แล้วกด Enter" value="'
       + esc(STATE.answers[STATE.qi]) + '" />';
@@ -892,18 +906,14 @@ function renderShell(): string {
 
   function summaryHtml() {
     var r = STATE.pending || {};
+    var hasRewrite = !!r.revised;
     var h = "";
-    if (STATE.qs.length) {
+    if (!hasRewrite) {
       var answered = 0;
       for (var i = 0; i < STATE.answers.length; i++) if (STATE.answers[i]) answered++;
-      h += '<div class="rsec"><div class="slab">คำตอบของคุณ · ' + answered + " จาก " + STATE.qs.length + "</div>";
-      for (var j = 0; j < STATE.qs.length; j++) {
-        h += '<div class="acard"><div class="aw">' + esc(STATE.qs[j].q) + "</div>";
-        h += '<div class="ay">' + (STATE.answers[j] ? esc(STATE.answers[j]) : "— ข้ามไว้") + "</div></div>";
-      }
-      h += '<div class="qnav"><button class="btn sec" id="qBack">กลับไปแก้คำตอบ</button>'
-        + '<div class="dots"></div></div>';
-      h += "</div>";
+      h += '<div class="rsec"><div class="dsum">ตอบแล้ว ' + answered + " จาก " + STATE.qs.length
+        + " ข้อ — ส่งไปให้แก้ร่างเลย หรือกด ก่อนหน้า เพื่อกลับไปแก้คำตอบ</div></div>";
+      return h;
     }
     if (r.assumptions && r.assumptions.length) {
       h += '<div class="rsec"><div class="slab">ตัดสินใจแทนให้แล้ว — เช็คว่าเดาถูกไหม</div>';
@@ -970,12 +980,7 @@ function renderShell(): string {
   }
 
   function wireSummary() {
-    var back = document.getElementById("qBack");
-    if (back) back.addEventListener("click", function () {
-      STATE.view = "ask";
-      STATE.qi = 0;
-      paintReview();
-    });
+    // Nothing to wire: the summary is buttons in the footer now.
   }
 
   // ── Save / Copy ────────────────────────────────────────────────────────────
