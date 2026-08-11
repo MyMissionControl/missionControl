@@ -83,6 +83,36 @@ export function buildKickoffPrompt(
   return lines.join(" ");
 }
 
+/** ต่อท้าย kickoff ของ build ใหม่ที่ **clone มาจาก repo ที่มีอยู่แล้ว** (MC clone ให้
+ *  เสร็จก่อนปลุก แล้ว rewire remote ทิ้งไปแล้ว — ดู commands/repoClone.ts).
+ *
+ *  ⛔ ทำไมต้องสั่ง "อ่านให้จบก่อนถาม": kickoff ปกติสั่งให้ถาม requirement ทันที ซึ่งกับ
+ *  โปรเจคเปล่าถูกแล้ว แต่กับ repo ที่มีโค้ดอยู่ = ถามโดยไม่รู้ว่ามีอะไรอยู่ แล้วจะเสนอ sprint
+ *  ที่ทับของเดิม. user สั่งตรง ๆ 2026-08-11: ให้อ่าน .md + project wiki ให้เข้าใจจริงก่อนถาม.
+ *  ⛔⛔ และห้าม push กลับขึ้นต้นทาง — remote ถูกตัดไว้แล้วในระดับ git แต่ต้องบอกด้วย
+ *  ไม่ให้ไปเติม remote คืนเอง. */
+export function buildCloneKickoffNote(
+  projectName: string,
+  projectPath: string,
+  cloneUrl: string,
+): string {
+  return [
+    ``,
+    ``,
+    `⭐ โปรเจคนี้ **ไม่ใช่ของเปล่า** — ผม clone repo ที่มีอยู่แล้วมาให้เรียบร้อยแล้วที่ ${projectPath}` +
+      ` ชื่อโปรเจคคือ '${projectName}' (เช็คว่างมาแล้ว · ⛔ ห้ามตั้งชื่อใหม่ · ห้าม clone/สร้างซ้ำที่อื่น).`,
+    `⛔ อย่าถาม requirement ทันที — **อ่านให้เข้าใจจริงก่อน**: README ทุกตัว, docs/**/*.md,` +
+      ` docs/wiki/ ทั้งโฟลเดอร์ถ้ามี, package.json/ไฟล์ config, แล้วไล่โครงโค้ดพอให้รู้ว่าอะไรอยู่ไหน.` +
+      ` จากนั้น **สรุปให้ผมฟังสั้น ๆ** ว่า repo นี้ทำอะไร มีอะไรอยู่แล้ว ใช้ stack อะไร แล้วค่อยถามว่าผมอยากเพิ่ม/แก้อะไร.`,
+    `ถ้ายังไม่มี docs/wiki/ สร้างได้เลย แต่ **เขียนแค่ที่มั่นใจจากโค้ดจริง — ห้ามเดา**` +
+      ` (คนอ่านรอบหน้าจะเชื่อไฟล์นี้ · ไม่แน่ใจก็เว้นไว้ดีกว่าเขียนผิด).`,
+    `⛔⛔ ต้นทางที่ clone มาคือ ${cloneUrl} — ถูกเก็บเป็น remote ชื่อ \`upstream\` ที่ push ไม่ได้.` +
+      ` **ห้าม push งานขึ้น upstream และห้ามเติม remote คืนเอง** ไม่ว่าด้วยเหตุผลใด` +
+      ` (จะ push ขึ้นต้นทางเมื่อผมสั่งเองเท่านั้น). ที่เก็บงาน default ยังเป็น repo ของเราเองใต้ org เหมือนเดิม —` +
+      ` ปล่อยให้ orches-integrate.sh สร้าง origin ให้ตามปกติ.`,
+  ].join(" ");
+}
+
 /** Resume kickoff — injected when the user picks "⏮ ทำต่อ" instead of a fresh
  *  build. Unlike buildKickoffPrompt (which tells the orchestrator to ASK for a
  *  new requirement), this points it at an EXISTING project and tells it to read

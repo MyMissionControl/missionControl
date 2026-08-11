@@ -7,6 +7,7 @@ import * as vscode from "vscode";
 
 import {
   buildContinueKickoff,
+  buildCloneKickoffNote,
   buildKickoffPrompt,
   buildResumeKickoff,
   buildTmuxLaunchCommand,
@@ -642,8 +643,10 @@ export async function launchOrchestrator(opts: {
   mode: "new" | "resume";
   project?: ResumableProject;
   projectName?: string;
+  /** โปรเจคใหม่ที่ MC clone มาให้แล้ว (path + ต้นทาง) — เปลี่ยน kickoff เป็นแบบ brownfield */
+  cloned?: { url: string; path: string };
 }): Promise<{ error?: string; cancelled?: boolean; session?: string; terminal?: vscode.Terminal }> {
-  const { orch, team, mode, project, projectName } = opts;
+  const { orch, team, mode, project, projectName, cloned } = opts;
   if (!isSafeOracleName(orch)) return { error: `ชื่อ orchestrator ไม่ปลอดภัย: ${orch}` };
   if (mode === "resume" && !project) return { error: "resume แต่ไม่มี project" };
 
@@ -687,6 +690,9 @@ export async function launchOrchestrator(opts: {
       : buildKickoffPrompt(team.name, orch, workers);
   if (mode === "new" && projectName && projectName.trim())
     kickoff += `\n\nโปรเจคชื่อ '${projectName.trim()}' — ใช้ชื่อนี้เป๊ะเป็นชื่อ project/repo (ผ่านการเช็คว่างแล้ว) · ⛔ ห้ามตั้งชื่อใหม่/ห้าม bump -vN เอง`;
+  // clone มาแล้ว = โฟลเดอร์มีโค้ดของคนอื่นอยู่ → ต้องอ่านก่อนถาม และห้าม push กลับต้นทาง
+  if (mode === "new" && cloned)
+    kickoff += buildCloneKickoffNote(projectName?.trim() || path.basename(cloned.path), cloned.path, cloned.url);
 
   const baseSession = readSessionPin(orch)?.trim() || `claude-${orch}`;
   let session = baseSession;

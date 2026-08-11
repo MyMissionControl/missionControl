@@ -20,6 +20,7 @@ import {
   reapSession,
   scanProjects,
   sessionCreatedAt,
+  resolveOwnerRoot,
   tmuxHasSession,
 } from "../commands/startOrchestrator";
 import { partitionStarred, sortResumable, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
@@ -50,6 +51,7 @@ import {
 } from "../commands/continueRun";
 import type { OracleTeam } from "../commands/teams";
 import { ORG, checkProjectName, suggestDefaultName, sanitizeName, type NameCheck } from "../commands/projectName";
+import { cloneRepoInto, parseRepoUrl } from "../commands/repoClone";
 import * as cp from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -67,6 +69,8 @@ interface WizState {
   project?: ResumableProject; // set → resume that project; unset → fresh build
   team?: OracleTeam;
   newName?: string; // ชื่อ project ที่ user ตั้งใน name-popup (mode "new") → ส่งเข้า kickoff
+  // repo ที่ clone มาให้แล้ว (name-popup กรอก URL) — เปลี่ยน kickoff เป็น brownfield
+  newClone?: { url: string; path: string };
   archivedView?: boolean; // showing the deleted-projects list instead of live projects
   archived?: boolean; // currently viewing a deleted project's docs (read-only)
   backups?: BackupEntry[]; // cached deleted-projects list for pick_archived
@@ -504,6 +508,7 @@ async function doLaunch(panel: vscode.WebviewPanel, orch: string) {
     mode: _st.project ? "resume" : "new",
     project: _st.project,
     projectName: _st.newName,
+    cloned: _st.newClone,
   });
   if (r.cancelled) return; // user backed out of the twin/inject choice — keep the wizard
   if (r.error) {
@@ -561,6 +566,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         _st.project = undefined;
         _st.team = undefined;
         _st.newName = undefined;
+        _st.newClone = undefined;
         const def = suggestDefaultName(
           sortResumable(scanProjects()).map((p) => p.name),
           localProjectNames(),
@@ -572,13 +578,41 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
       case "check_name": {
         const name = sanitizeName(typeof msg.name === "string" ? msg.name : "");
         const check: NameCheck = checkProjectName(name, localProjectNames(), ghView);
-        panel.webview.postMessage({ type: "name_result", name, check });
+        // ช่อง URL ว่าง = สร้างโปรเจคเปล่าเหมือนเดิม (url: undefined) — ไม่ใช่ "ไม่ถูกต้อง"
+        const rawUrl = typeof msg.url === "string" ? msg.url.trim() : "";
+        const url = rawUrl ? parseRepoUrl(rawUrl) : undefined;
+        panel.webview.postMessage({ type: "name_result", name, check, url });
         return;
       }
       case "name_confirmed": {
         const name = sanitizeName(typeof msg.name === "string" ? msg.name : "");
         if (!checkProjectName(name, localProjectNames(), ghView).valid) return;
+        const rawUrl = typeof msg.url === "string" ? msg.url.trim() : "";
         _st.newName = name;
+        _st.newClone = undefined;
+        if (rawUrl) {
+          // ⛔ clone ที่นี่ ไม่ใช่ปล่อยให้ oracle ทำ: error (URL ผิด/auth ไม่ผ่าน) ต้องเด้ง
+          //    ให้ user เห็นทันที และห้ามเดินหน้าไป team-picker ถ้ายังไม่มีโค้ดจริงบนดิสก์
+          const root = resolveOwnerRoot();
+          if (!root) {
+            vscode.window.showErrorMessage("Clone: หา owner-root ไม่เจอ (ลอง `maw oracle scan`)");
+            return;
+          }
+          const dest = path.join(root, "projects", name);
+          const out = await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: `clone ${rawUrl} …` },
+            async () => cloneRepoInto(rawUrl, dest),
+          );
+          if (!out.ok) {
+            vscode.window.showErrorMessage(`Clone ไม่สำเร็จ: ${out.error}`);
+            panel.webview.postMessage({ type: "open_namemodal", default: name, url: rawUrl });
+            return;
+          }
+          _st.newClone = { url: rawUrl, path: dest };
+          vscode.window.showInformationMessage(
+            `Clone แล้ว: ${name} (branch ${out.branch}) · ต้นทางเก็บเป็น upstream ที่ push ไม่ได้`,
+          );
+        }
         await pushTeamsScreen(panel);
         return;
       }
@@ -1259,6 +1293,9 @@ function renderShell(): string {
       <div class="mh">พิมพ์ชื่อ (เช็คว่างทั้งในเครื่องและ GitHub org) — แก้ได้</div>
       <input id="nm-input" type="text" placeholder="ชื่อโปรเจค" />
       <div class="merr" id="nm-status"></div>
+      <div class="mh" style="margin-top:10px">เริ่มจาก repo ที่มีอยู่แล้ว (ไม่ใส่ = สร้างโปรเจคเปล่าเหมือนเดิม)</div>
+      <input id="nm-url" type="text" placeholder="https://github.com/org/repo.git · https://dev.azure.com/org/project/_git/repo" />
+      <div class="merr" id="nm-urlstatus"></div>
       <div class="mact">
         <button class="mbtn" id="nm-cancel">ยกเลิก</button>
         <button class="mbtn primary" id="nm-ok">ถัดไป</button>
@@ -1340,9 +1377,13 @@ function renderShell(): string {
 
   // ── ตั้งชื่อโปรเจคใหม่ modal — พิมพ์ + เช็คว่าง (local+github) debounce 400ms ──
   var _nmTimer=null;
-  function openNameModal(def){
+  var _nmUrlOk=true;     // ว่าง = ถือว่าโอเค (สร้างเปล่า)
+  var _nmNameTouched=false;
+  function openNameModal(def,url){
     el('nm-input').value=def||''; el('nm-ok').disabled=true;
     el('nm-status').textContent=''; el('nm-status').className='merr';
+    el('nm-url').value=url||''; el('nm-urlstatus').textContent=''; el('nm-urlstatus').className='merr';
+    _nmUrlOk=!url; _nmNameTouched=!!def;
     el('namemodal').style.display='flex'; el('nm-input').focus(); el('nm-input').select();
     nmSchedule();
   }
@@ -1350,7 +1391,7 @@ function renderShell(): string {
   function nmSchedule(){
     el('nm-ok').disabled=true; el('nm-status').textContent='กำลังเช็ค…'; el('nm-status').className='merr';
     if(_nmTimer) clearTimeout(_nmTimer);
-    _nmTimer=setTimeout(function(){ post('check_name',{name:el('nm-input').value}); }, 400);
+    _nmTimer=setTimeout(function(){ post('check_name',{name:el('nm-input').value,url:el('nm-url').value}); }, 400);
   }
   function nmResult(m){
     var c=m.check||{}, s=el('nm-status');
@@ -1361,12 +1402,25 @@ function renderShell(): string {
     else if(c.githubChecked && c.githubTaken){ s.textContent='ซ้ำ: มีบน GitHub org แล้ว'+used; s.className='merr bad'; }
     else if(!c.githubChecked){ s.textContent='ว่างในเครื่อง · เช็ค GitHub ไม่ได้ (gh ไม่พร้อม)'+used; s.className='merr warn'; }
     else { s.textContent='ว่าง ใช้ได้'+used; s.className='merr ok'; }
-    el('nm-ok').disabled=!free;
+    // ── verdict ของช่อง URL (ไม่ใส่ = สร้างเปล่า ไม่ใช่ error) ──
+    var u=m.url, us=el('nm-urlstatus');
+    if(!u){ us.textContent=''; us.className='merr'; _nmUrlOk=true; }
+    else if(u.valid){ us.textContent='clone จาก '+u.providerLabel+' → repo "'+u.repo+'"'; us.className='merr ok'; _nmUrlOk=true; }
+    else { us.textContent=u.reason||'URL ใช้ไม่ได้'; us.className='merr bad'; _nmUrlOk=false; }
+    // URL พา repo มาแล้วและ user ยังไม่ได้ตั้งชื่อเอง → เติมชื่อจาก repo ให้ แล้วเช็คใหม่
+    if(u && u.valid && !_nmNameTouched && el('nm-input').value!==u.repo){
+      el('nm-input').value=u.repo; nmSchedule(); return;
+    }
+    el('nm-ok').disabled=!(free && _nmUrlOk);
   }
-  function nmConfirm(){ if(el('nm-ok').disabled) return; var n=el('nm-input').value; closeNameModal(); post('name_confirmed',{name:n}); }
+  function nmConfirm(){ if(el('nm-ok').disabled) return; var n=el('nm-input').value, u=el('nm-url').value; closeNameModal(); post('name_confirmed',{name:n,url:u}); }
   el('nm-cancel').addEventListener('click', closeNameModal);
   el('nm-ok').addEventListener('click', nmConfirm);
-  el('nm-input').addEventListener('input', nmSchedule);
+  el('nm-input').addEventListener('input', function(){ _nmNameTouched=true; nmSchedule(); });
+  el('nm-url').addEventListener('input', nmSchedule);
+  el('nm-url').addEventListener('keydown', function(e){
+    if(e.key==='Enter'){ e.preventDefault(); nmConfirm(); }
+    else if(e.key==='Escape'){ e.preventDefault(); closeNameModal(); } });
   el('namemodal').addEventListener('click', function(e){ if(e.target===el('namemodal')) closeNameModal(); });
   el('nm-input').addEventListener('keydown', function(e){
     if(e.key==='Enter'){ e.preventDefault(); nmConfirm(); }
@@ -1958,7 +2012,7 @@ function renderShell(): string {
     else if(m.type==="preview_state") handlePreviewState(m.running);
     else if(m.type==="disarm_all") disarmAll();  // panel ถูกซ่อน/สลับ tab (backend แจ้งมา) → เลิก arm ค้าง
     else if(m.type==="git_auto_result") handleAutoResult(m.path,m.message,m.gen);
-    else if(m.type==="open_namemodal") openNameModal(m.default);
+    else if(m.type==="open_namemodal") openNameModal(m.default, m.url);
     else if(m.type==="name_result") nmResult(m);
   });
   post("ready");

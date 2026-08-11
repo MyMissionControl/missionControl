@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+  buildCloneKickoffNote,
   buildContinueKickoff,
   buildKickoffPrompt,
   buildPaneLayoutInitCommand,
@@ -278,4 +279,34 @@ test("kickoff ทั้งสองแบบไม่พา trigger โหมด
     expect(p).not.toContain("grilling");
     expect(p).not.toContain("scrutinize");
   }
+});
+
+test("buildCloneKickoffNote: บังคับ 'อ่านให้เข้าใจก่อนถาม' ไม่ใช่ถามทันที", () => {
+  const n = buildCloneKickoffNote("my-proj", "/p/projects/my-proj", "https://github.com/o/r.git");
+  expect(n).toContain("/p/projects/my-proj"); // path เป๊ะ — ห้าม prep ที่อื่น
+  expect(n).toContain("README");
+  expect(n).toContain("docs/wiki");
+  expect(n).toMatch(/สรุป/); // สรุปให้ user ฟังก่อน
+  // ลำดับต้องถูก ไม่ใช่แค่มีคำ: "อ่านก่อน" ต้องมาก่อน "ค่อยถาม" ในข้อความเดียวกัน
+  expect(n).toContain("อย่าถาม requirement ทันที");
+  expect(n.indexOf("อ่านให้เข้าใจจริงก่อน")).toBeLessThan(n.indexOf("ค่อยถาม"));
+});
+
+test("⛔ buildCloneKickoffNote: ต้องห้าม push ขึ้นต้นทางที่ clone มา", () => {
+  const n = buildCloneKickoffNote("p", "/p/projects/p", "https://dev.azure.com/o/pr/_git/r");
+  expect(n).toContain("upstream");
+  expect(n).toMatch(/ห้าม.*push|push.*ห้าม/);
+  expect(n).toContain("https://dev.azure.com/o/pr/_git/r"); // บอกด้วยว่าต้นทางคืออะไร
+});
+
+test("buildCloneKickoffNote: wiki สร้างได้แต่เขียนแค่ที่มั่นใจ", () => {
+  const n = buildCloneKickoffNote("p", "/x", "https://github.com/o/r");
+  expect(n).toMatch(/มั่นใจ/);
+  expect(n).toMatch(/ห้ามเดา|อย่าเดา|ไม่เดา/);
+});
+
+test("buildCloneKickoffNote: ห้ามตั้งชื่อใหม่ / ห้าม prep ซ้ำที่อื่น", () => {
+  const n = buildCloneKickoffNote("keep-this-name", "/x", "https://github.com/o/r");
+  expect(n).toContain("keep-this-name");
+  expect(n).toMatch(/ห้ามตั้งชื่อใหม่|ห้ามเปลี่ยนชื่อ/);
 });
