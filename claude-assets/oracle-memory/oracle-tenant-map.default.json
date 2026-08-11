@@ -1,0 +1,10 @@
+{
+  "_doc": "Per-vault Oracle memory isolation. BOTH lists empty = OFF (one shared memory, tenant_id='default').",
+  "_step1_label": "vaults: {'<vault-dir>': '<tenant>'} tags that vault's docs on the next reindex. Tagging alone hides NOTHING — readers without ORACLE_TENANT_ID still see every tenant. Backfill old docs: bun ~/.claude/oracle-tenant-migrate.ts --report (dry-run) then --apply.",
+  "_step2_isolate": "isolateReads: ['<vault-dir>'] makes that oracle's MCP see ONLY its own tenant (+ nothing else). This is the switch that actually isolates. Remove the entry to un-isolate; no data changes.",
+  "_off": "Set both back to empty. Undo the labels with: bun ~/.claude/oracle-tenant-migrate.ts --revert ~/.oracle/tenant-migrate-<stamp>.jsonl",
+  "_example": "label mike-oracle as tenant 'mike', then add the same vault name to the isolate list below",
+  "_perf": "The PreToolUse guard hook fast-paths on a grep for a NON-empty isolate list at the start of a line — keep the real key at 2-space indent, and never write a filled-in example of it in this file or the hook pays a python start (~35ms) on every tool call for nothing.",
+  "vaults": {},
+  "isolateReads": []
+}

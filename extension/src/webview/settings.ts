@@ -19,6 +19,13 @@ import {
 } from "./searchSection";
 import { graphifyRefreshCommand } from "../commands/graphifyRefresh"; // [graphify-temp]
 import { availableModels } from "../commands/teamsOps";
+import { confirmIsolateMessage, setMode } from "../commands/oracleMemoryOps";
+import {
+  buildOracleMemoryState,
+  oracleMemorySectionBody,
+  oracleMemorySectionScript,
+  oracleMemorySectionStyle,
+} from "./oracleMemorySection";
 
 // Editor-area Settings page. Singleton panel + a display-ready postMessage + a
 // small message switch — mirrors accounts.ts / teams.ts. All fs lives in
@@ -86,6 +93,13 @@ async function pushSearch(panel: vscode.WebviewPanel): Promise<void> {
   if (enriched) panel.webview.postMessage({ type: "searchState", state: enriched });
 }
 
+/** Oracle memory (shared vs isolated per oracle). Reads the ~/.claude CLI's
+ *  --json status; null → the section renders "not installed" instead of an empty
+ *  list that would read as "everything is shared". */
+function pushOracleMemory(panel: vscode.WebviewPanel): void {
+  panel.webview.postMessage({ type: "oracleMemoryState", state: buildOracleMemoryState() });
+}
+
 let _indexPoll: ReturnType<typeof setInterval> | undefined;
 function pollSearchWhileIndexing(panel: vscode.WebviewPanel): void {
   if (_indexPoll) return;
@@ -135,7 +149,44 @@ export function openSettingsPanel(): vscode.WebviewPanel {
       case "reload":
         void pushListEnriched(panel);
         void pushSearch(panel);
+        pushOracleMemory(panel);
         return;
+
+      case "oracleMemoryReload":
+        pushOracleMemory(panel);
+        return;
+
+      case "oracleMemorySet": {
+        if (typeof msg.vault !== "string") return;
+        const isolate = msg.isolated === true;
+        const state = buildOracleMemoryState();
+        const row = state?.vaults.find((v) => v.vault === msg.vault);
+        // Isolating writes the DB (relabels that vault's docs), so confirm it.
+        // Going back to shared only drops the read filter — no prompt.
+        if (isolate && row) {
+          const go = await vscode.window.showWarningMessage(
+            confirmIsolateMessage(row),
+            { modal: true },
+            "Isolate",
+          );
+          if (go !== "Isolate") {
+            pushOracleMemory(panel);
+            return;
+          }
+        }
+        const res = setMode(msg.vault, isolate);
+        if (!res.ok) {
+          vscode.window.showErrorMessage(`Oracle memory: ${res.error ?? "failed"}`);
+        } else {
+          vscode.window.showInformationMessage(
+            isolate
+              ? `${msg.vault}: isolated — เปิด session ใหม่ของ oracle ตัวนี้เพื่อให้มีผล`
+              : `${msg.vault}: shared again — มีผลกับ session ที่เปิดใหม่`,
+          );
+        }
+        pushOracleMemory(panel);
+        return;
+      }
 
       case "set": {
         if (typeof msg.key !== "string") return;
@@ -311,6 +362,7 @@ function renderShell(): string {
   }
   .note b { opacity: 0.95; }
   ${searchSectionStyle()}
+  ${oracleMemorySectionStyle()}
 </style>
 </head>
 <body>
@@ -319,6 +371,7 @@ function renderShell(): string {
   <div class="path" id="path"></div>
   <div id="groups"></div>
   ${searchSectionBody()}
+  ${oracleMemorySectionBody()}
   <div class="note">
     <b>เก็บที่ไหน:</b> ทุกค่าเขียนลงไฟล์ <b id="path2"></b> ตรงๆ (local เครื่องนี้เท่านั้น ไม่ push git) · เปลี่ยนแล้วมีผลกับงานที่ <b>เริ่มใหม่</b> หลังจากนี้<br />
     <b>legacy:</b> คีย์ที่ติดป้าย legacy ยังบันทึกได้ แต่ไม่มีผลกับ runtime แล้ว (ของเดิมที่ backend/orchestrator ถูกถอดออก) — เก็บไว้เผื่อกลับมาใช้
@@ -443,6 +496,9 @@ function renderShell(): string {
 </script>
 <script>
   ${searchSectionScript()}
+</script>
+<script>
+  ${oracleMemorySectionScript()}
 </script>
 </body></html>`;
 }
