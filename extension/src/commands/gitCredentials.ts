@@ -269,3 +269,70 @@ export async function testGitCredential(
     return { ok: false, text: `ต่อ Azure DevOps ไม่ได้: ${(e as Error).message}` };
   }
 }
+
+// ── สถานะฝั่ง ssh (โซน Git ต้องไม่โชว์ "ยังไม่มี credential" ตอนที่ ssh ใช้งานได้อยู่) ──
+//
+// ⛔ ทำไมต้องมี: โซนนี้เดิมอ่านจาก ~/.git-credentials เท่านั้น → ใครใช้ ssh จะเห็นหน้าจอว่าง
+//    ทั้งที่ clone ได้ปกติ = หน้าจอโกหก. ที่นี่รายงาน 3 อย่างที่ทำให้ ssh ใช้ได้จริง:
+//    มี private key ไหม · host key ของ provider อยู่ใน known_hosts ไหม · key นั้นใช้ auth ผ่านไหม
+export interface SshState {
+  /** ชื่อไฟล์ private key ที่มี (⛔ ชื่อไฟล์เท่านั้น ไม่เคยอ่านเนื้อใน) */
+  keys: string[];
+  hosts: { host: string; known: boolean }[];
+}
+
+const SSH_HOSTS = ["ssh.dev.azure.com", "github.com"];
+
+export function listSshState(): SshState {
+  const dir = path.join(os.homedir(), ".ssh");
+  let keys: string[] = [];
+  try {
+    keys = fs
+      .readdirSync(dir)
+      .filter((f) => /^id_/.test(f) && !f.endsWith(".pub"))
+      .sort();
+  } catch {
+    /* ไม่มี ~/.ssh */
+  }
+  let kh = "";
+  try {
+    kh = fs.readFileSync(path.join(dir, "known_hosts"), "utf8");
+  } catch {
+    /* ยังไม่รู้จัก host ไหนเลย */
+  }
+  const hosts = SSH_HOSTS.map((h) => ({
+    host: h,
+    known: kh.split(/\r?\n/).some((l) => {
+      const first = l.trim().split(/[\s,]+/)[0];
+      return first === h || first.startsWith("[" + h + "]");
+    }),
+  }));
+  return { keys, hosts };
+}
+
+/** `ssh -T git@<host>` — provider ทั้งสองตอบด้วย banner ที่บอกว่า auth ผ่านแล้ว
+ *  (GitHub: "successfully authenticated" · Azure DevOps: "Shell access is not supported")
+ *  ⛔ ทั้งคู่ **exit code ไม่ใช่ 0** ทั้งที่ผ่าน — ตัดสินจากข้อความ ไม่ใช่จาก rc */
+export function testSshHost(host: string): { ok: boolean; text: string } {
+  if (!isSafeCredHost(host)) return { ok: false, text: "host ไม่ถูกต้อง" };
+  let out = "";
+  try {
+    out = cp
+      .execFileSync("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-T", `git@${host}`], {
+        timeout: 25000,
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      .toString();
+  } catch (e) {
+    const err = e as { stdout?: Buffer; stderr?: Buffer };
+    out = String(err.stdout ?? "") + String(err.stderr ?? "");
+  }
+  const s = out.replace(/\s+/g, " ").trim();
+  if (/successfully authenticated|shell access is not supported|authenticated via/i.test(s))
+    return { ok: true, text: "ssh auth ผ่าน" };
+  if (/host key verification|remote host identification/i.test(s))
+    return { ok: false, text: "ยังไม่รู้จัก host key — กด 'เตรียม host key'" };
+  if (/permission denied|publickey/i.test(s))
+    return { ok: false, text: "key ยังไม่ได้ลงทะเบียนที่ provider (User settings → SSH public keys)" };
+  return { ok: false, text: s.slice(0, 140) || "ssh ไม่ตอบอะไรเลย" };
+}

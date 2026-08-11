@@ -17,11 +17,14 @@ import {
   CRED_FILE,
   credTargetFromUrl,
   listGitCredentials,
+  listSshState,
   providerLabelForHost,
   removeGitCredential,
   setGitCredential,
   testGitCredential,
+  testSshHost,
 } from "../commands/gitCredentials";
+import { ensureKnownHost } from "../commands/repoClone";
 
 // Editor-area panel for managing multiple subscription logins across AI CLIs.
 // Singleton _panel, a display-ready postMessage + a message switch — mirrors
@@ -94,6 +97,19 @@ function pushGit(panel: vscode.WebviewPanel): void {
         (r.helper ? "" : " · ⛔ ยังไม่ได้ตั้ง credential helper ของ host นี้ (git จะไม่อ่านไฟล์)"),
       testable: r.provider === "Azure DevOps",
     })),
+    ssh: (() => {
+      const st = listSshState();
+      return {
+        keys: st.keys,
+        // ⛔ โซนนี้เคยอ่านแต่ ~/.git-credentials → ใช้ ssh อยู่แต่หน้าจอบอก "ยังไม่มี credential"
+        //    (หน้าจอโกหก) · ตอนนี้รายงาน 3 อย่างที่ทำให้ ssh ใช้ได้จริง: key · host key · auth
+        hosts: st.hosts.map((h) => ({
+          host: h.host,
+          known: h.known,
+          provider: providerLabelForHost(h.host),
+        })),
+      };
+    })(),
   });
 }
 
@@ -244,6 +260,28 @@ export function openAccountsPanel(): vscode.WebviewPanel {
         if (pick !== "ลบ") return;
         notify(removeGitCredential(host, user), `ลบ '${user}' แล้ว`);
         pushGit(panel);
+        return;
+      }
+
+      case "ssh_prepare": {
+        const host = String(msg.host ?? "");
+        panel.webview.postMessage({ type: "ssh_result", host, text: "กำลังเตรียม…" });
+        const r = ensureKnownHost(host);
+        panel.webview.postMessage({ type: "ssh_result", host, ok: r.ok, text: (r.ok ? "" : "FAIL: ") + r.text });
+        pushGit(panel);
+        return;
+      }
+
+      case "ssh_test": {
+        const host = String(msg.host ?? "");
+        panel.webview.postMessage({ type: "ssh_result", host, text: "กำลังเช็ค…" });
+        const r = testSshHost(host);
+        panel.webview.postMessage({
+          type: "ssh_result",
+          host,
+          ok: r.ok,
+          text: (r.ok ? "PASS: " : "FAIL: ") + r.text,
+        });
         return;
       }
 
@@ -443,6 +481,10 @@ function renderShell(): string {
     <section class="prov">
       <div class="ph"><div><h2>GitHub</h2><div class="live" id="gh-live"></div></div></div>
     </section>
+    <section class="prov">
+      <div class="ph"><div><h2>SSH</h2><div class="live" id="ssh-keys"></div></div></div>
+      <div id="ssh-rows"></div>
+    </section>
     <div class="note">
       <b>ทำไมต้องมี:</b> ปุ่ม clone ของหน้า Projects ใช้ credential ของเครื่องนี้ (MC ไม่เก็บ secret เอง) — repo ที่ private จะ clone ไม่ผ่านถ้า host นั้นยังไม่มี credential<br />
       <b>หลาย organization:</b> Azure DevOps ทุก org ใช้ host เดียวกัน แยกกันด้วยชื่อ org (= username ของ URL) → 1 แถวต่อ 1 org · ต้องวาง URL แบบมี <b>ORG@dev.azure.com</b> ตอน clone ไม่งั้น git หยิบแถวแรกมาใช้<br />
@@ -579,6 +621,34 @@ function renderShell(): string {
     document.getElementById("git-rows").innerHTML = html;
   }
 
+  const sshMsg = {};
+  function renderSsh() {
+    const v = gitView;
+    if (!v || !v.ssh) return;
+    const keys = v.ssh.keys || [];
+    document.getElementById("ssh-keys").textContent = keys.length
+      ? "private key ในเครื่อง: " + keys.join(", ") + " — key เดียวครอบทุก org ของบัญชีนั้น"
+      : "ยังไม่มี ssh key — สร้าง: ssh-keygen -t ed25519 -C mission-control (ไม่ต้องใส่ passphrase ไม่งั้น extension เรียกใช้ไม่ได้)";
+    const hosts = v.ssh.hosts || [];
+    let html = '<div class="rows">';
+    for (let i = 0; i < hosts.length; i++) {
+      const h = hosts[i];
+      const m = sshMsg[h.host];
+      const cls = m == null ? "tres" : m.ok === true ? "tres good" : m.ok === false ? "tres bad" : "tres";
+      html +=
+        '<div class="row"><div class="ri">' +
+          '<div class="rl">' + esc(h.host) + (h.known ? ' <span class="badge">host key พร้อม</span>' : ' <span class="badge warn">ยังไม่มี host key</span>') + '</div>' +
+          '<div class="rs">' + esc(h.provider) + ' · ' + (h.known ? 'อยู่ใน known_hosts แล้ว' : '⛔ clone ผ่าน ssh จะล้มทันที (BatchMode ไม่ถามยอมรับ key)') + '</div>' +
+          (m ? '<div class="' + cls + '">' + esc(m.text) + '</div>' : "") +
+        '</div><div class="ra">' +
+          (h.known ? "" : '<button class="b sprep" data-hh="' + esc(h.host) + '">เตรียม host key</button>') +
+          '<button class="b stest" data-hh="' + esc(h.host) + '">ทดสอบ ssh</button>' +
+        '</div></div>';
+    }
+    html += "</div>";
+    document.getElementById("ssh-rows").innerHTML = html;
+  }
+
   function showZone(z) {
     document.getElementById("zone-ai").style.display = z === "ai" ? "" : "none";
     document.getElementById("zone-git").style.display = z === "git" ? "" : "none";
@@ -596,6 +666,9 @@ function renderShell(): string {
     if (z) { showZone(z); return; }
     const h = t.getAttribute("data-h");
     const u = t.getAttribute("data-u");
+    const hh = t.getAttribute("data-hh");
+    if (t.classList.contains("sprep")) { post("ssh_prepare", { host: hh }); return; }
+    if (t.classList.contains("stest")) { post("ssh_test", { host: hh }); return; }
     if (t.classList.contains("git-add")) { post("git_add"); return; }
     if (t.classList.contains("gtest")) { post("git_test", { host: h, user: u }); return; }
     // เปลี่ยน PAT = เขียนทับคู่ host+user เดิม → ใช้เส้นเดียวกับ add แต่ส่ง host/user มาให้เลย
@@ -616,7 +689,8 @@ function renderShell(): string {
     if (!m) return;
     if (m.type === "accounts") { lastView = m; render(); }
     else if (m.type === "usage") { usageMap = m.results || {}; render(); }
-    else if (m.type === "git") { gitView = m; renderGit(); }
+    else if (m.type === "git") { gitView = m; renderGit(); renderSsh(); }
+    else if (m.type === "ssh_result") { sshMsg[m.host] = { ok: m.ok, text: m.text }; renderSsh(); }
     else if (m.type === "git_test_result") { testMap[key(m.host, m.user)] = { ok: m.ok, text: m.text }; renderGit(); }
   });
 

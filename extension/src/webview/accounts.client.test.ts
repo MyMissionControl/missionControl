@@ -18,6 +18,18 @@ test("client script ของหน้า Connections ยัง parse ได้"
   expect(() => new Function(js)).not.toThrow();
 });
 
+test("โซน SSH: ปุ่มเตรียม host key / ทดสอบ ต่อสายจริง + แถวบอกสถานะ", () => {
+  const js = clientScript();
+  expect(js).toContain('t.classList.contains("sprep")');
+  expect(js).toContain('t.classList.contains("stest")');
+  expect(SRC).toContain('id="ssh-rows"');
+  expect(SRC).toContain('id="ssh-keys"');
+  // ⛔ ปุ่ม "เตรียม host key" ต้องโผล่เฉพาะตอนยังไม่มี — มีแล้วยังโชว์ = ชวนกดของที่ไม่ต้องกด
+  expect(js).toContain('(h.known ? "" : ');
+  // ⛔ ห้ามส่งชื่อไฟล์ key ไปเป็นเนื้อ key — โชว์แค่ชื่อ
+  expect(js).toContain("v.ssh.keys");
+});
+
 test("โซน Git: ปุ่มทุกตัวมี handler จริง (ไม่ใช่ปุ่มตาย)", () => {
   const js = clientScript();
   for (const cls of ["git-add", "gtest", "gedit", "gdel"]) {
