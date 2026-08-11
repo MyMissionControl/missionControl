@@ -357,13 +357,130 @@ describe("Download to Copy button", () => {
 });
 
 describe("Check button", () => {
-  test("sends the draft with no answers on the first round", () => {
+  test("the first round is a triage pass with no answers yet", () => {
     const h = loadPage();
     h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
     h.els.btnCheck.fire("click");
     const sent = h.posted.filter((m) => m.type === "check");
     expect(sent.length).toBe(1);
-    expect(sent[0]).toEqual({ type: "check", text: "draft", qa: [] });
+    expect(sent[0]).toEqual({ type: "check", text: "draft", qa: [], phase: "triage" });
+  });
+
+  // The toolbar button used to hardcode qa: [] while the footer button sent the
+  // answers, so reaching for the wrong one silently discarded them all.
+  test("the toolbar Check keeps the answers, exactly like ตรวจอีกรอบ", () => {
+    const h = loadPage();
+    h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
+    h.receive({
+      type: "checkResult",
+      phase: "triage",
+      result: { verdict: "needs-work", questions: [{ id: "q1", q: "Q1", why: "", options: [] }], assumptions: [], revised: null },
+    });
+    h.els.qInput.value = "คำตอบ";
+    h.els.qNext.fire("click");            // -> summary
+    h.els.btnCheck.fire("click");
+    expect(h.posted.filter((m) => m.type === "check").pop().qa).toEqual([{ q: "Q1", a: "คำตอบ" }]);
+  });
+
+  test("answers from earlier rounds survive into later ones", () => {
+    const h = loadPage();
+    h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
+    h.receive({
+      type: "checkResult",
+      phase: "triage",
+      result: { verdict: "needs-work", questions: [{ id: "q1", q: "Q-ROUND1", why: "", options: [] }], assumptions: [], revised: null },
+    });
+    h.els.qInput.value = "ตอบรอบ 1";
+    h.els.qNext.fire("click");
+    h.els.btnRecheck.fire("click");
+    // round 2 asks something else entirely
+    h.receive({
+      type: "checkResult",
+      phase: "triage",
+      result: { verdict: "needs-work", questions: [{ id: "q2", q: "Q-ROUND2", why: "", options: [] }], assumptions: [], revised: null },
+    });
+    h.els.qInput.value = "ตอบรอบ 2";
+    h.els.qNext.fire("click");
+    h.els.btnRecheck.fire("click");
+    expect(h.posted.filter((m) => m.type === "check").pop().qa).toEqual([
+      { q: "Q-ROUND1", a: "ตอบรอบ 1" },
+      { q: "Q-ROUND2", a: "ตอบรอบ 2" },
+    ]);
+  });
+
+  test("a skipped question is still reported, with an empty answer", () => {
+    const h = loadPage();
+    h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
+    h.receive({
+      type: "checkResult",
+      phase: "triage",
+      result: { verdict: "needs-work", questions: [{ id: "q1", q: "Q-SKIP", why: "", options: [] }], assumptions: [], revised: null },
+    });
+    h.els.qNext.fire("click");            // answered nothing -> summary
+    h.els.btnRecheck.fire("click");
+    expect(h.posted.filter((m) => m.type === "check").pop().qa).toEqual([{ q: "Q-SKIP", a: "" }]);
+  });
+
+  test("answers are handed to the host to persist with the draft", () => {
+    const h = loadPage();
+    h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
+    h.receive({
+      type: "checkResult",
+      phase: "triage",
+      result: { verdict: "needs-work", questions: [{ id: "q1", q: "Q1", why: "", options: [] }], assumptions: [], revised: null },
+    });
+    h.els.qInput.value = "ตอบ";
+    h.els.qNext.fire("click");
+    const saved = h.posted.filter((m) => m.type === "qaChanged").pop();
+    expect(saved.text).toBe("draft");
+    expect(saved.qa).toEqual([{ q: "Q1", a: "ตอบ" }]);
+  });
+
+  test("restored answers from a previous visit are sent on the first check", () => {
+    const h = loadPage();
+    h.receive({
+      type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d",
+      qa: [{ q: "Q-OLD", a: "ตอบไว้แล้ว" }],
+    });
+    h.els.btnCheck.fire("click");
+    expect(h.posted.filter((m) => m.type === "check").pop().qa).toEqual([{ q: "Q-OLD", a: "ตอบไว้แล้ว" }]);
+  });
+
+  test("with no rewrite yet the primary button orders one instead of applying", () => {
+    const h = loadPage();
+    h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
+    h.receive({
+      type: "checkResult",
+      phase: "triage",
+      result: { verdict: "needs-work", questions: [], assumptions: [{ what: "A", why: "" }], revised: null },
+    });
+    expect(h.els.btnApply.textContent).toBe("สร้างร่างใหม่");
+    const sent = h.posted.filter((m) => m.type === "check").pop();
+    expect(sent.phase).toBe("rewrite");   // auto-continued: nothing to ask
+  });
+
+  test("once a rewrite exists the primary button applies it", () => {
+    const h = loadPage();
+    h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
+    h.receive({
+      type: "checkResult",
+      phase: "rewrite",
+      result: { verdict: "ok", questions: [], assumptions: [], revised: "REWRITTEN" },
+    });
+    expect(h.els.btnApply.textContent).toBe("Apply");
+    h.els.btnApply.fire("click");
+    expect(h.els.ta.value).toBe("REWRITTEN");
+  });
+
+  test("a triage result WITH questions waits for the user, it does not auto-rewrite", () => {
+    const h = loadPage();
+    h.receive({ type: "init", text: "draft", savedText: null, savedPath: null, defaultDir: "/d" });
+    h.receive({
+      type: "checkResult",
+      phase: "triage",
+      result: { verdict: "needs-work", questions: [{ id: "q1", q: "Q1", why: "", options: [] }], assumptions: [], revised: null },
+    });
+    expect(h.posted.filter((m) => m.type === "check").length).toBe(0);
   });
 
   test("while running, the button cancels instead of starting a second run", () => {

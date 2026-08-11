@@ -53,6 +53,21 @@ export function approxTokens(text: string): number {
 
 export type QA = { q: string; a: string };
 
+/** Which pass we are asking for.
+ *
+ *  "triage"  — questions + assumptions only, NO rewrite. This is what the user
+ *              waits on before the wizard can open, so it is kept cheap.
+ *  "rewrite" — the full rewritten draft, asked ONCE after the answers are in.
+ *
+ *  Measured 2026-08-07 on a real 3.2KB Thai draft, same prompt otherwise:
+ *    triage,  effort low     37s   2,086 output tokens   $0.12
+ *    rewrite, effort medium 171s  12,914 output tokens   $0.39
+ *    (what shipped before: one pass, default effort, 405s / 33,684 tok / $0.70,
+ *     and its rewrite was discarded the moment the user answered and re-checked)
+ *  77% of the old wait was pre-first-token thinking (ttft 311s of 405s), which
+ *  is why effort — not output length — is the lever that matters here. */
+export type CheckPhase = "triage" | "rewrite";
+
 /** Prompt for `claude -p`.
  *
  *  ⛔ Deliberately does NOT tell the model to invoke the `grilling` skill.
@@ -63,9 +78,17 @@ export type QA = { q: string; a: string };
  *  nobody to answer, so naming it made `claude -p` run past 6 minutes without
  *  ever printing (measured 2026-08-07; a plain `claude -p` round-trips in ~7s).
  *  So both skills' STANCE is inlined here instead, and the panel spawns claude
- *  with the exploration tools disabled — one turn in, one JSON out. */
-export function buildCheckPrompt(draft: string, qa: QA[]): string {
+ *  with the tool set emptied — one turn in, one JSON out. */
+export function buildCheckPrompt(draft: string, qa: QA[], phase: CheckPhase = "rewrite"): string {
+  const wantsRewrite = phase === "rewrite";
   const answered = (qa || []).filter((x) => x && typeof x.a === "string" && x.a.trim().length > 0);
+  // Skipped questions are NOT dropped. Silently omitting them told the model
+  // nothing, so it happily asked them again next round and the user paid another
+  // full pass to dismiss the same question twice.
+  const skipped = (qa || []).filter(
+    (x) => x && typeof x.q === "string" && x.q.trim().length > 0 &&
+      !(typeof x.a === "string" && x.a.trim().length > 0),
+  );
   const parts: string[] = [
     "ตรวจร่าง requirement ข้างล่างนี้ แล้วตอบกลับครั้งเดียวจบ",
     "",
@@ -91,28 +114,55 @@ export function buildCheckPrompt(draft: string, qa: QA[]): string {
     "ถามเฉพาะจุดที่ 'กำกวมจริง' — จุดที่ตอบคนละแบบแล้วโค้ดออกมาคนละอย่าง",
     "อย่าถามเรื่องที่เดาแทนได้อย่างปลอดภัย ให้เขียนสมมติฐานลงร่างแทน",
     "",
-    'ตอบเป็น JSON วัตถุเดียวเท่านั้น ห้ามมีข้อความอื่นนอก JSON ห้ามใส่ code fence รูปแบบ:',
+    "ตอบเป็น JSON วัตถุเดียวเท่านั้น ห้ามมีข้อความอื่นนอก JSON ห้ามใส่ code fence รูปแบบ:",
     '{"verdict":"ok|needs-work",',
     '"questions":[{"id":"q1","q":"คำถาม","why":"ทำไมต้องรู้","options":["ตัวเลือก1","ตัวเลือก2"]}],',
-    '"assumptions":[{"what":"สิ่งที่ตัดสินใจแทนแล้วเขียนลงร่างเลย","why":"ทำไมถึงเลือกแบบนี้"}],',
-    '"revised":"ร่างฉบับแก้แล้วเต็มฉบับเป็น markdown"}',
+  ];
+  if (wantsRewrite) {
+    parts.push(
+      '"assumptions":[{"what":"สิ่งที่ตัดสินใจแทนแล้วเขียนลงร่างเลย","why":"ทำไมถึงเลือกแบบนี้"}],',
+      '"revised":"ร่างฉบับแก้แล้วเต็มฉบับเป็น markdown"}',
+    );
+  } else {
+    parts.push('"assumptions":[{"what":"สิ่งที่จะตัดสินใจแทนให้","why":"ทำไมถึงเลือกแบบนี้"}]}');
+  }
+  parts.push(
     "",
     "ทุกประเด็นที่เจอ ต้องลงได้ที่เดียวเท่านั้น — questions หรือ assumptions:",
     "- questions = เรื่องที่ตัดสินใจแทนไม่ได้ ต้องให้ผู้ใช้ตอบ",
-    "- assumptions = เรื่องที่ตัดสินใจแทนไปแล้วและเขียนลงร่างเรียบร้อย",
+    "- assumptions = เรื่องที่ตัดสินใจแทนได้เองอย่างปลอดภัย",
     "⛔ เรื่องเดียวกันห้ามอยู่ทั้งสองที่ และห้ามมีลิสต์ 'สิ่งที่ยังขาด' ลอยๆ แยกอีกกอง",
-    "",
-    "revised ต้องเป็นร่างเต็มฉบับพร้อมใช้เสมอ (ไม่ใช่ diff ไม่ใช่ข้อเสนอแนะ)",
-    "เขียน revised เป็นภาษาไทยแบบเดียวกับร่างเดิม และคง heading เดิมไว้",
-    "ถ้าร่างดีอยู่แล้วให้ verdict=ok, questions=[] และ revised = ร่างเดิมที่ขัดเกลาแล้ว",
-  ];
+  );
+  if (wantsRewrite) {
+    parts.push(
+      "",
+      "revised ต้องเป็นร่างเต็มฉบับพร้อมใช้เสมอ (ไม่ใช่ diff ไม่ใช่ข้อเสนอแนะ)",
+      "เขียน revised เป็นภาษาไทยแบบเดียวกับร่างเดิม และคง heading เดิมไว้",
+      "ถ้าร่างดีอยู่แล้วให้ verdict=ok, questions=[] และ revised = ร่างเดิมที่ขัดเกลาแล้ว",
+    );
+  } else {
+    parts.push(
+      "",
+      "⛔ รอบนี้ห้ามส่ง field revised และห้ามเขียนร่างฉบับแก้กลับมา",
+      "เอาแค่ questions กับ assumptions — ร่างจริงจะขอในรอบถัดไปหลังผู้ใช้ตอบคำถามแล้ว",
+    );
+  }
   if (answered.length > 0) {
     parts.push(
       "",
-      "รอบก่อนถามไปแล้ว และผู้ใช้ตอบมาแบบนี้ — ใส่คำตอบพวกนี้ลงใน revised",
-      "และห้ามถามซ้ำ:",
+      wantsRewrite
+        ? "รอบก่อนถามไปแล้ว และผู้ใช้ตอบมาแบบนี้ — ใส่คำตอบพวกนี้ลงใน revised และห้ามถามซ้ำ:"
+        : "รอบก่อนถามไปแล้ว และผู้ใช้ตอบมาแบบนี้ — ห้ามถามซ้ำ:",
     );
     answered.forEach((x) => parts.push("- ถาม: " + x.q, "  ตอบ: " + x.a.trim()));
+  }
+  if (skipped.length > 0) {
+    parts.push(
+      "",
+      "ข้อพวกนี้ถามไปแล้วและผู้ใช้เลือก 'ข้าม' — แปลว่าเขาไม่อยากตัดสินใจเอง",
+      "⛔ ห้ามถามซ้ำ ให้ตัดสินใจแทนแล้วใส่ลงใน assumptions พร้อมเหตุผล:",
+    );
+    skipped.forEach((x) => parts.push("- " + x.q.trim()));
   }
   parts.push("", "--- ร่าง requirement ---", draft);
   return parts.join("\n");
@@ -132,7 +182,12 @@ export type CheckResult = {
   verdict: "ok" | "needs-work";
   questions: Question[];
   assumptions: Assumption[];
-  revised: string;
+  /** null on a triage pass, and also when a rewrite pass came back without one.
+   *  It used to be required, which meant a reply carrying eight good questions
+   *  but a truncated rewrite was thrown away whole and the user paid another
+   *  full pass to get back what was already on screen. The page gates Apply on
+   *  this being non-null instead. */
+  revised: string | null;
 };
 export type ParseOutcome =
   | { ok: true; value: CheckResult }
@@ -167,9 +222,16 @@ export function parseCheckResult(raw: string): ParseOutcome {
     }
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) continue;
     const o = obj as Record<string, unknown>;
-    // A result without `revised` is useless and dangerous — applying it would
-    // blank the user's draft. Treat it as a parse failure, not an empty rewrite.
-    if (typeof o.revised !== "string" || o.revised.trim().length === 0) continue;
+    // `revised` is optional. A payload is usable as long as it carries findings;
+    // a missing rewrite only means Apply has nothing to apply, which the page
+    // handles by disabling the button — it is not a reason to discard the
+    // questions. Reject only a payload with nothing in it at all.
+    const revised =
+      typeof o.revised === "string" && o.revised.trim().length > 0 ? o.revised : null;
+    const hasFindings =
+      (Array.isArray(o.questions) && o.questions.length > 0) ||
+      (Array.isArray(o.assumptions) && o.assumptions.length > 0);
+    if (revised === null && !hasFindings && o.verdict !== "ok") continue;
 
     const questions: Question[] = (Array.isArray(o.questions) ? o.questions : [])
       .map((q, i): Question | null => {
@@ -200,7 +262,7 @@ export function parseCheckResult(raw: string): ParseOutcome {
         verdict: o.verdict === "ok" ? "ok" : "needs-work",
         questions,
         assumptions,
-        revised: o.revised,
+        revised,
       },
     };
   }

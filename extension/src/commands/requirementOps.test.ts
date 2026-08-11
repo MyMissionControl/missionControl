@@ -76,14 +76,45 @@ describe("buildCheckPrompt", () => {
     expect(p).toContain("questions");
   });
 
-  test("round two replays the answered questions and drops skipped ones", () => {
+  test("round two replays the answered questions", () => {
+    const p = buildCheckPrompt("ร่าง", [{ q: "ใช้ DB อะไร", a: "sqlite" }]);
+    expect(p).toContain("ใช้ DB อะไร");
+    expect(p).toContain("sqlite");
+    expect(p).toContain("ห้ามถามซ้ำ");
+  });
+
+  // Dropping skipped questions told the model nothing, so it asked them again
+  // and the user paid another full pass to dismiss the same question twice.
+  test("a skipped question is reported as skipped, not omitted", () => {
     const p = buildCheckPrompt("ร่าง", [
       { q: "ใช้ DB อะไร", a: "sqlite" },
       { q: "รองรับกี่ภาษา", a: "" },
     ]);
-    expect(p).toContain("ใช้ DB อะไร");
-    expect(p).toContain("sqlite");
-    expect(p).not.toContain("รองรับกี่ภาษา");
+    expect(p).toContain("รองรับกี่ภาษา");
+    expect(p).toContain("ผู้ใช้เลือก 'ข้าม'");
+    expect(p).toContain("ใส่ลงใน assumptions");
+  });
+
+  describe("two-phase", () => {
+    test("triage forbids the rewrite and drops it from the JSON shape", () => {
+      const p = buildCheckPrompt("ร่าง", [], "triage");
+      expect(p).not.toContain('"revised"');
+      expect(p).toContain("ห้ามส่ง field revised");
+      expect(p).toContain('"questions"');
+      expect(p).toContain('"assumptions"');
+    });
+
+    test("rewrite asks for the full draft back", () => {
+      const p = buildCheckPrompt("ร่าง", [], "rewrite");
+      expect(p).toContain('"revised"');
+      expect(p).toContain("ร่างเต็มฉบับ");
+      expect(p).not.toContain("ห้ามส่ง field revised");
+    });
+
+    test("triage is shorter than rewrite — that is the point of splitting", () => {
+      expect(buildCheckPrompt("ร่าง", [], "triage").length)
+        .toBeLessThan(buildCheckPrompt("ร่าง", [], "rewrite").length);
+    });
   });
 });
 
@@ -118,8 +149,30 @@ describe("parseCheckResult", () => {
     expect(r.ok).toBe(false);
   });
 
-  test("returns an error when revised is missing — never silently blanks the draft", () => {
-    const r = parseCheckResult(JSON.stringify({ verdict: "ok", gaps: [], questions: [] }));
+  // `revised` used to be mandatory, so a reply carrying eight good questions but
+  // a truncated rewrite was thrown away whole and the user paid another full
+  // pass. It is optional now; the page gates Apply on it instead.
+  test("keeps the findings when the rewrite is absent, and reports revised as null", () => {
+    const r = parseCheckResult(
+      JSON.stringify({ verdict: "needs-work", questions: [{ q: "ใครใช้" }], assumptions: [] }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.revised).toBeNull();
+      expect(r.value.questions.length).toBe(1);
+    }
+  });
+
+  test("an empty-string rewrite is treated as absent, not applied over the draft", () => {
+    const r = parseCheckResult(
+      JSON.stringify({ verdict: "needs-work", revised: "   ", questions: [{ q: "ใครใช้" }] }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.revised).toBeNull();
+  });
+
+  test("still rejects a payload carrying nothing at all", () => {
+    const r = parseCheckResult(JSON.stringify({ verdict: "needs-work", questions: [], assumptions: [] }));
     expect(r.ok).toBe(false);
   });
 

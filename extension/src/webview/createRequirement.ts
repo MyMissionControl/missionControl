@@ -12,6 +12,7 @@ import {
   parseCheckResult,
   validateFileName,
   validateSaveDir,
+  type CheckPhase,
   type QA,
 } from "../commands/requirementOps";
 
@@ -34,40 +35,42 @@ let _proc: ChildProcess | undefined;
 const DRAFT_KEY = "mc.requirement.draft";
 const SAVED_PATH_KEY = "mc.requirement.savedPath";
 const SAVED_TEXT_KEY = "mc.requirement.savedText";
-// 900s, not 300s. The 300s ceiling was set from a 15-line test draft (sonnet
-// answered in 117-143s), but a real requirement runs several hundred lines and
-// the reply carries the WHOLE rewritten draft — output length, not thinking
-// time, is what dominates here, and 300s timed out on a live draft.
+// Answers are stored WITH the draft they were given for, and only restored
+// when that draft is still byte-identical — otherwise reopening the panel on
+// an edited draft would silently feed the model answers to questions that no
+// longer apply.
+const QA_KEY = "mc.requirement.qa";
+// A ceiling, not an expectation: triage lands in ~37s and a rewrite in ~171s.
+// (An earlier comment here claimed the rewritten draft was what dominated the
+// wall clock. Measured: it is 21%. Thinking before the first token is 77% —
+// see EFFORT below. The claim was wrong and is recorded so it is not restored.)
 const CHECK_TIMEOUT_MS = 900_000;
 
-// The review is a pure text transform: draft in, JSON out. Nothing here needs a
-// tool, and letting the run keep them invites it to go exploring instead of
-// answering, so they are off.
-const NO_TOOLS = [
-  "--disallowedTools",
-  "Bash",
-  "Read",
-  "Glob",
-  "Grep",
-  "Edit",
-  "Write",
-  "WebFetch",
-  "WebSearch",
-  "Task",
-  "Skill",
-];
+// The review is a pure text transform: draft in, JSON out — nothing here needs
+// a tool or an MCP server. `--disallowedTools` was the wrong instrument: it only
+// denies CALLS, the schemas still ship in the system prompt and the configured
+// MCP servers still start. Measured on a "reply OK1" probe (2026-08-07):
+//   --disallowedTools <11 names>        28,871 input tokens   (what shipped)
+//   --tools ""                          20,690
+//   --tools "" --strict-mcp-config      11,505   ← 60% less, same answer
+//   --safe-mode                         34,034   ← worse, do not use
+const NO_TOOLS = ["--tools", "", "--strict-mcp-config"];
 
-// Pinned, NOT inherited from the user's default. Measured on this box
-// (2026-08-07) with a short Thai draft, asking for gaps + questions + a full
-// rewritten markdown draft inside JSON:
-//   opus   >330s, never returned  ← the session default; the feature would only
-//                                   ever time out
-//   sonnet  143s, bare JSON
-//   haiku    62s, JSON in a ```json fence (parseCheckResult strips it)
-// Sonnet is the quality/latency pick. Scale those numbers with draft length —
-// see CHECK_TIMEOUT_MS; a real draft is much slower than this test one.
-// This is a per-process flag — it does not touch the user's global model.
+// Pinned, NOT inherited from the user's default — per-process flags, they do not
+// touch the user's global model. On a real 3.2KB Thai draft opus never returned
+// inside 330s; sonnet is the quality/latency pick.
+//
+// Effort is the lever that actually matters. 77% of the old wait was spent
+// thinking BEFORE the first output token (ttft 311s of 405s), so on the same
+// prompt: default 405s / $0.70, medium 171s / $0.39, low 118s / $0.32.
+// Low surfaced 4-5 questions where default and medium surfaced 6, so the cheap
+// triage pass takes low and the one rewrite that has to be good takes medium —
+// rather than dropping the whole feature to low.
 const CHECK_MODEL = ["--model", "sonnet"];
+const EFFORT: Record<CheckPhase, string[]> = {
+  triage: ["--effort", "low"],
+  rewrite: ["--effort", "medium"],
+};
 
 function statKind(p: string): "dir" | "file" | "missing" {
   try {
@@ -84,6 +87,19 @@ function defaultSaveDir(): string {
   return statKind(downloads) === "dir" ? downloads : os.homedir();
 }
 
+/** Answers saved on a previous visit, but only if the draft has not changed
+ *  since. Returns [] on any mismatch or malformed store. */
+function restoreQa(context: vscode.ExtensionContext, draft: string): QA[] {
+  const box = context.globalState.get<{ draft?: unknown; qa?: unknown } | null>(QA_KEY, null);
+  if (!box || typeof box !== "object") return [];
+  if (typeof box.draft !== "string" || box.draft !== draft) return [];
+  if (!Array.isArray(box.qa)) return [];
+  return box.qa
+    .filter((x): x is QA => !!x && typeof x === "object" &&
+      typeof (x as QA).q === "string" && typeof (x as QA).a === "string")
+    .map((x) => ({ q: x.q, a: x.a }));
+}
+
 function killCheck(): void {
   if (_proc && !_proc.killed) {
     try {
@@ -98,7 +114,10 @@ function killCheck(): void {
 /** Run `claude -p` with the review prompt. Resolves with stdout, or an error
  *  string the page can show verbatim. Cancellation kills the process and
  *  resolves as cancelled so the UI never hangs on a spinner. */
-function runCheck(prompt: string): Promise<{ ok: true; out: string } | { ok: false; error: string; cancelled?: boolean }> {
+function runCheck(
+  prompt: string,
+  phase: CheckPhase,
+): Promise<{ ok: true; out: string } | { ok: false; error: string; cancelled?: boolean }> {
   return new Promise((resolve) => {
     let done = false;
     const finish = (r: { ok: true; out: string } | { ok: false; error: string; cancelled?: boolean }) => {
@@ -112,8 +131,10 @@ function runCheck(prompt: string): Promise<{ ok: true; out: string } | { ok: fal
     try {
       // stdin is closed on purpose: a piped-but-never-written stdin would let
       // any prompt claude decides to ask hang the panel forever.
-      child = spawn("claude", ["-p", ...CHECK_MODEL, ...NO_TOOLS, "--", prompt], {
-        cwd: os.homedir(),
+      child = spawn("claude", ["-p", ...CHECK_MODEL, ...EFFORT[phase], ...NO_TOOLS, "--", prompt], {
+        // A scratch dir, not the home directory: nothing about reviewing a draft
+        // should pick up whatever project context the cwd happens to carry.
+        cwd: os.tmpdir(),
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch {
@@ -122,7 +143,16 @@ function runCheck(prompt: string): Promise<{ ok: true; out: string } | { ok: fal
     }
     _proc = child;
     const timer = setTimeout(() => {
+      // Salvage first. stdout has been filling the whole time, and a run that
+      // printed its JSON but has not exited yet (session write, wedged child)
+      // would otherwise burn the full ceiling and then throw away a complete
+      // answer. Only report the timeout when there is genuinely nothing usable.
+      const salvaged = out;
       killCheck();
+      if (parseCheckResult(salvaged).ok) {
+        finish({ ok: true, out: salvaged });
+        return;
+      }
       // Derived from the constant so the number in the message can never drift.
       finish({ ok: false, error: "claude ใช้เวลาเกิน " + CHECK_TIMEOUT_MS / 1000 + " วินาที — ยกเลิกแล้ว" });
     }, CHECK_TIMEOUT_MS);
@@ -138,6 +168,11 @@ function runCheck(prompt: string): Promise<{ ok: true; out: string } | { ok: fal
     child.on("error", () => finish({ ok: false, error: "เรียก claude ไม่ได้ — ไม่มีใน PATH?" }));
     child.on("close", (code, signal) => {
       if (signal === "SIGTERM" && !done) {
+        // Same salvage on cancel: if the answer already arrived, keep it.
+        if (parseCheckResult(out).ok) {
+          finish({ ok: true, out });
+          return;
+        }
         finish({ ok: false, error: "ยกเลิกแล้ว", cancelled: true });
         return;
       }
@@ -181,12 +216,20 @@ export function openCreateRequirementPanel(context: vscode.ExtensionContext): vs
           savedText: context.globalState.get<string | null>(SAVED_TEXT_KEY, null),
           savedPath: context.globalState.get<string | null>(SAVED_PATH_KEY, null),
           defaultDir: defaultSaveDir(),
+          qa: restoreQa(context, draft),
         });
         return;
       }
 
       case "draftChanged":
         if (typeof msg.text === "string") await context.globalState.update(DRAFT_KEY, msg.text);
+        return;
+
+      case "qaChanged":
+        await context.globalState.update(QA_KEY, {
+          draft: typeof msg.text === "string" ? msg.text : "",
+          qa: Array.isArray(msg.qa) ? msg.qa : [],
+        });
         return;
 
       case "check": {
@@ -199,7 +242,8 @@ export function openCreateRequirementPanel(context: vscode.ExtensionContext): vs
                 a: typeof x.a === "string" ? x.a : "",
               }))
           : [];
-        const res = await runCheck(buildCheckPrompt(msg.text, qa));
+        const phase: CheckPhase = msg.phase === "rewrite" ? "rewrite" : "triage";
+        const res = await runCheck(buildCheckPrompt(msg.text, qa, phase), phase);
         if (!res.ok) {
           void panel.webview.postMessage({
             type: res.cancelled ? "checkCancelled" : "checkError",
@@ -215,7 +259,7 @@ export function openCreateRequirementPanel(context: vscode.ExtensionContext): vs
         // No diff is sent: the page shows what the model DECIDED (assumptions)
         // rather than every reworded line, and the full rewrite is readable in
         // the textarea after Apply.
-        void panel.webview.postMessage({ type: "checkResult", result: parsed.value });
+        void panel.webview.postMessage({ type: "checkResult", result: parsed.value, phase });
         return;
       }
 
@@ -573,8 +617,14 @@ function renderShell(): string {
     dir: "",              // folder chosen in the save form (picker only)
     checking: false,
     pending: null,        // last checkResult, waiting for Apply/Discard
-    qs: [],               // questions from that result
+    qs: [],               // questions from THIS round
     answers: [],          // parallel to qs; "" means skipped
+    // Every question ever asked for this draft, with its answer ("" = skipped).
+    // Kept OUTSIDE the per-round state on purpose: it used to be reset with the
+    // round, so by round three the model no longer saw round one's answers and
+    // cheerfully asked them all over again.
+    qaAll: [],
+    phase: "triage",      // which pass produced STATE.pending
     qi: 0,                // which question the wizard is on
     view: "ask",          // "ask" (one question at a time) or "summary"
     undoText: null,       // one level of undo for Apply
@@ -659,13 +709,26 @@ function renderShell(): string {
 
   // ── Check ──────────────────────────────────────────────────────────────────
 
-  // Only one question card is mounted at a time now, so answers cannot be
-  // scraped off the DOM — they are read back from STATE.
-  function collectAnswers() {
+  // Fold this round's answers into the cumulative store, newest wins. Skipped
+  // questions are kept with an empty answer — the model needs to be told they
+  // were asked and declined, or it just asks them again.
+  function mergeAnswers() {
     saveCurrentAnswer();
-    var out = [];
-    for (var i = 0; i < STATE.qs.length; i++) out.push({ q: STATE.qs[i].q, a: STATE.answers[i] });
-    return out;
+    for (var i = 0; i < STATE.qs.length; i++) {
+      var q = STATE.qs[i].q;
+      var hit = -1;
+      for (var j = 0; j < STATE.qaAll.length; j++) if (STATE.qaAll[j].q === q) { hit = j; break; }
+      if (hit >= 0) STATE.qaAll[hit].a = STATE.answers[i];
+      else STATE.qaAll.push({ q: q, a: STATE.answers[i] });
+    }
+    vscode.postMessage({ type: "qaChanged", text: ta.value, qa: STATE.qaAll });
+  }
+
+  // Only one question card is mounted at a time, so answers cannot be scraped
+  // off the DOM — they come from STATE, and from every earlier round too.
+  function collectAnswers() {
+    mergeAnswers();
+    return STATE.qaAll;
   }
 
   // A real review runs 1-3 minutes (sonnet, measured). A label that never moves
@@ -693,27 +756,30 @@ function renderShell(): string {
     }
   }
 
+  // Both re-run affordances go through here. The toolbar Check used to hardcode
+  // qa: [] while the footer button sent the answers, so reaching for the wrong
+  // one silently threw away everything the user had just typed.
+  function runCheck(phase) {
+    if (STATE.checking || ta.value.trim().length === 0) return;
+    rerr.textContent = "";
+    setChecking(true);
+    STATE.phase = phase;
+    vscode.postMessage({ type: "check", text: ta.value, qa: collectAnswers(), phase: phase });
+  }
+
   btnCheck.addEventListener("click", function () {
     if (btnCheck.getAttribute("data-mode") === "cancel") {
       vscode.postMessage({ type: "cancelCheck" });
       return;
     }
-    if (ta.value.trim().length === 0) return;
-    rerr.textContent = "";
-    setChecking(true);
-    vscode.postMessage({ type: "check", text: ta.value, qa: [] });
+    runCheck("triage");
   });
 
   var btnApply = document.getElementById("btnApply");
   var btnDiscard = document.getElementById("btnDiscard");
   var btnRecheck = document.getElementById("btnRecheck");
 
-  btnRecheck.addEventListener("click", function () {
-    if (STATE.checking) return;
-    rerr.textContent = "";
-    setChecking(true);
-    vscode.postMessage({ type: "check", text: ta.value, qa: collectAnswers() });
-  });
+  btnRecheck.addEventListener("click", function () { runCheck("triage"); });
 
   btnDiscard.addEventListener("click", function () {
     STATE.pending = null;
@@ -727,6 +793,12 @@ function renderShell(): string {
   var btnUndo = document.getElementById("btnUndo");
   btnApply.addEventListener("click", function () {
     if (!STATE.pending) return;
+    // Triage never asks for a rewrite — that is the whole point of splitting the
+    // passes — so until one exists this button orders it instead of applying.
+    if (STATE.pending.revised === null || STATE.pending.revised === undefined) {
+      runCheck("rewrite");
+      return;
+    }
     STATE.undoText = ta.value;
     var revised = STATE.pending.revised;
     STATE.pending = null;
@@ -784,6 +856,8 @@ function renderShell(): string {
     btnApply.style.display = asking ? "none" : "";
     btnDiscard.style.display = asking ? "none" : "";
     btnRecheck.style.display = asking ? "none" : "";
+    var hasRewrite = !!(STATE.pending && STATE.pending.revised);
+    btnApply.textContent = hasRewrite ? "Apply" : "สร้างร่างใหม่";
     rbody.scrollTop = 0;
   }
 
@@ -854,7 +928,9 @@ function renderShell(): string {
   function goTo(i) {
     saveCurrentAnswer();
     if (i < 0) return;
-    if (i >= STATE.qs.length) { STATE.view = "summary"; paintReview(); return; }
+    // Reaching the summary persists what has been answered so far — closing the
+    // panel after working through ten questions used to lose all ten.
+    if (i >= STATE.qs.length) { mergeAnswers(); STATE.view = "summary"; paintReview(); return; }
     STATE.qi = i;
     paintReview();
     var inp = document.getElementById("qInput");
@@ -959,6 +1035,7 @@ function renderShell(): string {
       STATE.savedText = m.savedText === undefined ? null : m.savedText;
       STATE.savedPath = m.savedPath || null;
       STATE.defaultDir = m.defaultDir || "";
+      STATE.qaAll = Array.isArray(m.qa) ? m.qa : [];
       setDir(STATE.defaultDir);
       onEdit();
       return;
@@ -977,7 +1054,14 @@ function renderShell(): string {
     }
     if (m.type === "checkResult") {
       setChecking(false);
+      STATE.phase = m.phase === "rewrite" ? "rewrite" : "triage";
       renderReview(m.result);
+      // Nothing to ask means there is nothing for the user to do between the two
+      // passes, so go straight on to the rewrite rather than making them press a
+      // button that has only one sensible answer.
+      if (STATE.phase === "triage" && STATE.qs.length === 0 && !STATE.pending.revised) {
+        runCheck("rewrite");
+      }
       return;
     }
     if (m.type === "checkError") {
