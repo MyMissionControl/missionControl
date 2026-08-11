@@ -18,6 +18,7 @@ import {
   sessionIsIdle,
   sessionClients,
   pickAttachAction,
+  killFailureMessage,
 } from "./sessions";
 
 test("parseTmuxWindows: parses index/name/cmd, preserves spaces in cmd", () => {
@@ -276,4 +277,27 @@ test("pickAttachAction: reuse ได้เฉพาะตอนยัง attach 
   // session ไม่อยู่ในลิสต์แล้ว = ตายไปแล้ว -> ห้าม attach (จะขึ้น can't find session)
   expect(pickAttachAction(true, -1)).toBe("gone");
   expect(pickAttachAction(false, -1)).toBe("gone");
+});
+
+test("killFailureMessage: บอกเหตุผลจาก stderr ของ tmux", () => {
+  const m = killFailureMessage("09-foreman-2", "can't find session: 09-foreman-2\n");
+  // ต้องมีชื่อ session + เหตุผลจริง ๆ ที่ tmux พูด (ไม่ใช่ข้อความ generic)
+  expect(m).toContain("09-foreman-2");
+  expect(m).toContain("can't find session");
+  expect(m).not.toContain("\n"); // showWarningMessage โชว์บรรทัดเดียว
+});
+
+test("killFailureMessage: stderr ว่าง = บอกว่าหมดเวลา/ไม่ตอบ ไม่ใช่เงียบ", () => {
+  const m = killFailureMessage("09-foreman-2", "");
+  expect(m).toContain("09-foreman-2");
+  expect(m.length).toBeGreaterThan("09-foreman-2".length + 10);
+  // ⛔ ห้ามลงท้ายด้วย ": " เปล่า ๆ (อาการ "ขึ้น popup แต่ไม่บอกอะไร")
+  expect(m.trimEnd().endsWith(":")).toBe(false);
+});
+
+test("killFailureMessage: stderr ยาว/หลายบรรทัดถูกยุบเป็นบรรทัดเดียวและตัดสั้น", () => {
+  const m = killFailureMessage("s", "line one\nline two\n" + "x".repeat(500));
+  expect(m).not.toContain("\n");
+  expect(m.length).toBeLessThan(300);
+  expect(m).toContain("line one line two");
 });

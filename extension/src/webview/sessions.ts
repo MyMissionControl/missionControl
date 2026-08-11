@@ -98,6 +98,20 @@ export function pickAttachAction(hasLiveTerminal: boolean, clients: number): Att
   return clients > 0 ? "focus" : "reattach";
 }
 
+/** ข้อความตอน `tmux kill-session` "สำเร็จ" แต่ session ยังอยู่ (เช็คด้วย has-session
+ *  หลังยิง). ⛔ ทำไมต้องมี: เดิม callback ของ execFile ทิ้ง err ทั้งก้อน แล้วรีเฟรช
+ *  รายการเฉย ๆ — ถ้า tmux ไม่ทัน/ถูก timeout ตัด session จะรอดมา และ UI ก็แค่โชว์แถวเดิม
+ *  ต่อ = แยกไม่ออกจาก "กด ✕ แล้วปุ่มเสีย" (อาการที่ user รายงาน 2026-08-11).
+ *  ยุบเป็นบรรทัดเดียว (showWarningMessage โชว์บรรทัดเดียว) + ตัดสั้น และเมื่อ tmux
+ *  ไม่พูดอะไรเลยต้องเดาแทนว่า "ไม่ตอบ/หมดเวลา" — ห้ามลงท้ายด้วย ":" เปล่า. */
+export function killFailureMessage(name: string, stderr: string): string {
+  const why = stderr.replace(/\s+/g, " ").trim().slice(0, 160);
+  return (
+    `tmux session '${name}' ยังไม่ตาย — kill-session ไม่สำเร็จ: ` +
+    (why || "tmux ไม่ตอบ/หมดเวลา (ลองอีกครั้ง หรือ kill จาก terminal เอง)")
+  );
+}
+
 export interface TmuxWindow {
   index: number;
   name: string;
