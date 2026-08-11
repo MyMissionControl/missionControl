@@ -441,6 +441,59 @@ function bumpNested(
   bump(m, inner, cost, tokens);
 }
 
+/**
+ * Feed a JSONL file to `onLine` one line at a time, never holding the whole file.
+ *
+ * It used to be `await fs.promises.readFile(file, "utf8")` + `raw.split(/\r?\n/)`,
+ * which materialises the file AND an array of every line at once. Measured
+ * 2026-08-11 on this box: the corpus is 1,920 files / 775.8 MiB, a cold scan
+ * peaked at 690 MiB RSS, and — the recurring half — the ACTIVE session transcript
+ * is 61.5 MiB and its mtime changes every tick, so the mtime+size cache always
+ * misses and it was re-read WHOLE (825 ms, +151 MB) roughly every 20 s for as long
+ * as the dashboard stayed open, on a box with a documented OOM history.
+ *
+ * Streaming also hands the event loop back between chunks, so the same work no
+ * longer lands as one synchronous-feeling block on the extension host.
+ *
+ * \n is 0x0a, which never appears inside a multibyte UTF-8 sequence, so splitting
+ * on it can never cut a Thai codepoint in half (the same reasoning mirror.ts uses).
+ */
+export function forEachLine(
+  file: string,
+  onError: () => void,
+  onLine: (line: string) => void,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    // BUFFERS, not { encoding: "utf8" }. A string chunk forces `leftover + chunk`
+    // rope concatenation, and every V8 sliced string RETAINS its parent — measured
+    // on the 61.6 MiB transcript that version peaked HIGHER than readFile (359 vs
+    // 191 MiB). Decoding each complete line straight out of the buffer produces an
+    // independent string and lets the chunk go.
+    const stream = fs.createReadStream(file, { highWaterMark: 1 << 20 });
+    let leftover: Buffer = Buffer.alloc(0);
+    stream.on("data", (chunk: string | Buffer) => {
+      const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      const buf = leftover.length ? Buffer.concat([leftover, bytes]) : bytes;
+      let start = 0;
+      for (;;) {
+        const nl = buf.indexOf(0x0a, start);
+        if (nl === -1) break;
+        // drop a trailing \r so behaviour matches the old /\r?\n/ split exactly
+        const end = nl > start && buf[nl - 1] === 0x0d ? nl - 1 : nl;
+        onLine(buf.toString("utf8", start, end));
+        start = nl + 1;
+      }
+      // copy, never subarray — a view would pin the whole 1 MiB chunk in memory
+      leftover = start < buf.length ? Buffer.from(buf.subarray(start)) : Buffer.alloc(0);
+    });
+    stream.on("error", () => { onError(); resolve(); });
+    stream.on("end", () => {
+      if (leftover.length) onLine(leftover.toString("utf8")); // last line, no \n
+      resolve();
+    });
+  });
+}
+
 async function aggregateFile(file: string): Promise<FileAgg | null> {
   const agg: FileAgg = {
     mtimeMs: 0,
@@ -454,19 +507,12 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
     byProjectDetail: {},
     byProjectDayDetail: {},
   };
-  let raw: string;
-  try {
-    raw = await fs.promises.readFile(file, "utf8");
-  } catch {
-    // null = "don't know", NOT "$0" — caching an empty agg here would freeze a
-    // finished session at $0 forever (its mtime never changes again).
-    return null;
-  }
   // Dedupe within a file on requestId:message.id — compaction re-logs assistant
   // lines, and counting them twice would inflate the bill (ccusage does the same).
   const seen = new Set<string>();
-  for (const line of raw.split(/\r?\n/)) {
-    if (!line || line.indexOf('"usage"') === -1) continue;
+  let readFailed = false;
+  await forEachLine(file, () => { readFailed = true; }, (line) => {
+    if (!line || line.indexOf('"usage"') === -1) return;
     let d: {
       type?: string;
       requestId?: string;
@@ -490,21 +536,21 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
     try {
       d = JSON.parse(line);
     } catch {
-      continue;
+      return;
     }
-    if (d.type !== "assistant") continue;
+    if (d.type !== "assistant") return;
     const msg = d.message;
     const usage = msg && msg.usage;
-    if (!msg || !usage) continue;
+    if (!msg || !usage) return;
     if (d.requestId || msg.id) {
       const key = `${d.requestId ?? ""}:${msg.id ?? ""}`;
-      if (seen.has(key)) continue;
+      if (seen.has(key)) return;
       seen.add(key);
     }
     // Parsed once: the line's own clock decides which list price applied.
     const tsMs = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : Number.NaN;
     const pl = priceLine(String(msg.model ?? ""), usage, Number.isNaN(tsMs) ? undefined : tsMs);
-    if (!pl) continue;
+    if (!pl) return;
     agg.cost += pl.cost;
     agg.tokens += pl.tokens;
     const day = typeof d.timestamp === "string" ? localDayKey(d.timestamp) : "unknown";
@@ -522,7 +568,10 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
     if (!Number.isNaN(tsMs) && tsMs > (agg.projectLastMs[proj] ?? 0)) {
       agg.projectLastMs[proj] = tsMs;
     }
-  }
+  });
+  // null = "don't know", NOT "$0" — caching an empty agg here would freeze a
+  // finished session at $0 forever (its mtime never changes again).
+  if (readFailed) return null;
   return agg;
 }
 

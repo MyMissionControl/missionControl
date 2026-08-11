@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { type Breakdown, filesTouchingProject, priceLine, resolveProject } from "../usage";
+import { type Breakdown, filesTouchingProject, forEachLine, priceLine, resolveProject } from "../usage";
 
 // On-demand, single-project scan for the Project Usage drill-down page. Kept OUT
 // of the global UsageSummary/cache (which the dashboard polls every 10s) so the
@@ -206,22 +206,25 @@ export async function scanProjectUsage(root: string): Promise<ProjectUsage> {
   const files = [...set];
 
   const records: UsageRecord[] = [];
+  // ⛔ This used to be `fs.readFileSync` inside this loop — SYNCHRONOUS, on the
+  // extension host thread, over 4-79 files / 57-136 MB per project. Measured
+  // 2026-08-11 by replaying the real file list with a 10 ms RSS sampler: the
+  // sampler recorded ZERO samples, i.e. the event loop got no ticks at all for
+  // 1.9-2.4 s while maxRSS hit 331 MiB. And it is not once per project —
+  // budget-detail-page.ts has no result cache and calls this on every reveal, so
+  // every open of a project's Budget page froze the UI again. Same streaming
+  // reader as usage.ts, plus the setImmediate yield usage.ts already uses.
   for (const f of files) {
-    let raw: string;
-    try {
-      raw = fs.readFileSync(f, "utf8");
-    } catch {
-      continue;
-    }
-    for (const line of raw.split(/\r?\n/)) {
-      if (!line || line.indexOf('"usage"') === -1) continue;
+    await forEachLine(f, () => { /* unreadable file: skip, same as before */ }, (line) => {
+      if (!line || line.indexOf('"usage"') === -1) return;
       try {
         const o = JSON.parse(line) as UsageRecord;
         if (o.type === "assistant") records.push(o);
       } catch {
         /* skip malformed line */
       }
-    }
+    });
+    await new Promise((r) => setImmediate(r)); // let the host paint between files
   }
   return buildProjectUsage(records, root);
 }
