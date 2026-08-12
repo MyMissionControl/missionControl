@@ -207,8 +207,10 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
     type: "screen_projects",
     // Full inventory — every dir under projects/, no filter, no view toggle.
     title: "โปรเจกต์ทั้งหมด",
+    // No legend when projects exist (the client leaves the subtitle empty); only
+    // the empty-list message is still shown.
     subtitle: projects.length
-      ? "⠋ กำลังทำ = worker run อยู่ตอนนี้ · 🔨 ค้าง = sprint ที่ยังไม่เสร็จ (จากแผน หรือ worktree ที่เปิดค้าง) · 'ทำไปแล้ว X' = เสร็จกี่ sprint · ปุ่มขวา = git"
+      ? ""
       : "ไม่พบโปรเจกต์เลยใต้ projects/ — สร้างใหม่ด้วยปุ่ม '+ new project'",
     items: ordered.map((p) => {
       // continue-button state derived purely (marker + tmux liveness) — the
@@ -417,16 +419,15 @@ async function pushTeamsScreen(panel: vscode.WebviewPanel) {
   const githubUrl = _st?.project ? await gitOps.getGithubWebUrl(_st.project.path) : null;
   panel.webview.postMessage({
     type: "screen_teams",
-    title: (_st?.project ? "⏮ ทำต่อ" : "▶ เริ่มใหม่") + " — เลือกทีม",
+    title: (_st?.project ? "ทำต่อ" : "เริ่มใหม่") + " — เลือกทีม",
     subtitle: _st?.project ? `project: ${_st.project.name}` : "เลือก oracle-team",
     canBack: true, // มาจากหน้า Projects เสมอ → กลับได้ตลอด
     githubUrl, // null → the client hides the GitHub button
     items: ordered.map((t) => ({
       name: t.name,
-      isDefault: t.name === def,
-      sub: `${t.members.length} members · orchestrator: ${
-        t.orchestrators.join(", ") || "(none)"
-      }`,
+      isDefault: t.name === def, // most-recently-used on this project → the "ล่าสุด" card
+      memberCount: t.members.length,
+      orchestrator: t.orchestrators.join(", ") || "(none)",
     })),
   });
 }
@@ -1003,6 +1004,32 @@ function renderShell(): string {
   .card.default { border-color: #3fb950; background: rgba(63,185,80,0.12); }
   .card.default:hover { background: rgba(63,185,80,0.18); }
   .card.default .cname { color: #56d364; }
+
+  /* ── Team Select grid (TEAM_SELECT.md) — scoped Bento tokens like .proj-track,
+       so it doesn't disturb the other .card screens that use vscode vars ── */
+  .tsgrid { max-width: 640px; margin: 0 auto; display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;
+    --accent:#2f9dc4; --accentSoft:rgba(47,157,196,.15);
+    --tcard:#161f28; --tborder:rgba(255,255,255,.08); --ttxt:#e7eef5; --tmuted:#8a97a4; --tfaint:#5c6773;
+    --tmono:'JetBrains Mono', var(--vscode-editor-font-family), ui-monospace, monospace; }
+  body.vscode-light .tsgrid, body.vscode-high-contrast-light .tsgrid {
+    --accent:#0e88ad; --accentSoft:rgba(14,136,173,.10);
+    --tcard:#ffffff; --tborder:rgba(15,30,45,.12); --ttxt:#132029; --tmuted:#5a6b78; --tfaint:#94a1ad; }
+  .tscard { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center;
+    gap: 10px; padding: 22px 16px 18px; border-radius: 14px; cursor: pointer;
+    background: var(--tcard); border: 1px solid var(--tborder); color: var(--ttxt); }
+  .tscard:hover { border-color: var(--accent); }
+  .tscard.last { background: var(--accentSoft); border-color: var(--accent); }
+  .tscard.solo { grid-column: 1 / -1; width: calc(50% - 6px); margin: 0 auto; }
+  .tsbadge { position: absolute; top: 12px; right: 12px; display: inline-flex; align-items: center; gap: 5px;
+    font-family: var(--tmono); font-size: 9px; font-weight: 700; letter-spacing: .6px; color: #3fd39a;
+    background: rgba(63,211,154,.14); border: 1px solid rgba(63,211,154,.35); padding: 2px 7px; border-radius: 999px; }
+  .tsdot { width: 5px; height: 5px; border-radius: 50%; background: #3fd39a; box-shadow: 0 0 5px #3fd39a; }
+  .tsav { width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-family: var(--tmono); font-size: 18px; font-weight: 700; color: #fff; }
+  .tsname { font-size: 15px; font-weight: 700; }
+  .tsmeta { display: flex; flex-direction: column; gap: 4px; }
+  .tsmeta .tsm1 { font-size: 11.5px; color: var(--tmuted); }
+  .tsmeta .tsm2 { font-family: var(--tmono); font-size: 10.5px; color: var(--tfaint); }
   .del { display:none; background:none; border:1px solid #f85149; cursor:pointer; font-size:11px;
          font-weight:600; padding:3px 12px; border-radius:6px; color:#f85149; margin:0 6px; white-space:nowrap; }
   #content.edit .del { display:inline-flex; align-items:center; }
@@ -1229,6 +1256,7 @@ function renderShell(): string {
   .proj-track .hero .h-bar { max-width: 420px; height: 6px; border-radius: 3px; background: var(--pborder); margin-top: 12px; overflow: hidden; }
   .proj-track .hero .h-bar > span { display: block; height: 100%; background: linear-gradient(90deg,var(--accent),var(--accent2)); box-shadow: 0 0 8px var(--accentGlow); }
   .proj-track .hero .h-cta { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .proj-track .hero .h-cta > span { margin-right: 8px; } /* git badge (e.g. "✓ up to date") — keep it off the action buttons */
   .proj-track .resume { height: 36px; padding: 0 18px; border-radius: 9px; border: none; color: #fff; font-size: 13px; font-weight: 700;
     background: linear-gradient(180deg,var(--accent2),var(--accent)); box-shadow: 0 2px 12px var(--accentGlow); cursor: pointer; white-space: nowrap; }
   .proj-track .resume:hover { filter: brightness(1.06); }
@@ -1714,9 +1742,9 @@ function renderShell(): string {
     if (_lastProjKey !== null && _key === _lastProjKey) return;
     _lastProjKey = _key;
     el("title").textContent = m.title;
-    // Header legend = the color-coded key (green = running, amber = pending) — shown
-    // when there are projects; the plain "no work" line otherwise.
-    el("subtitle").innerHTML = (m.items && m.items.length) ? headerLegend() : esc(m.subtitle);
+    // No legend when there are projects (keeps the header clean); the plain
+    // "no projects" line still shows when the list is empty.
+    el("subtitle").innerHTML = (m.items && m.items.length) ? "" : esc(m.subtitle);
     el("actions").innerHTML = actionsHtml(false, true, true, true, false, true, 'active'); wireActions(false);
     var items = m.items||[];
     // การ์ด project ที่หลุดจาก list (เสร็จ/หาย) ระหว่างที่ยัง arm ค้าง → เลิก arm+timer ทิ้ง (กันยิงตอนการ์ดไม่อยู่แล้ว)
@@ -1775,10 +1803,6 @@ function renderShell(): string {
       return '<div class="rail">'+segs+'</div><div class="railcap"><span>S1</span><span>'+pd+' / '+pt+' sprint · '+pct+'%</span><span>S'+pt+'</span></div>';
     }
     function runBadge(it){ return (it.driven||it.doing) ? '<span class="runbadge"><span class="dot"></span>RUN</span>' : ''; }
-    function headerLegend(){
-      return '<span class="hdr-legend"><span class="d run"></span>กำลังทำ = worker run อยู่ตอนนี้<span class="sep">·</span>'
-        +'<span class="d wait"></span>ค้าง = sprint ที่ยังไม่เสร็จ<span class="sep">·</span>ปุ่มขวา = สถานะ git</span>';
-    }
     function heroHtml(it){
       var c = controls(it);
       var star = '<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>';
@@ -1978,16 +2002,27 @@ function renderShell(): string {
     }
     applyAutoUi(p); fillAuto(p, message); }
 
+  // Deterministic avatar hue from the team name (hash % 360) — a team is always the
+  // same color, and the color space is effectively unlimited (not a fixed palette).
+  function tsHue(s){ var h=0; s=String(s||''); for(var i=0;i<s.length;i++){ h=(h*31 + s.charCodeAt(i))>>>0; } return h%360; }
   function renderTeams(m){ disarmAll(); _lastProjKey=null;  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด (+invalidate skip-guard)
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
     el("actions").innerHTML=actionsHtml(m.canBack, false, false, false, m.githubUrl); wireActions(m.canBack);
     var items=m.items||[];
-    el("content").innerHTML = items.length ? items.map(function(it){
-      return '<div class="card teamcard'+(it.isDefault?' default':'')+'" data-name="'+esc(it.name)+'"><button class="pick">'
-        +'<span class="cname">'+esc(it.name)+(it.isDefault?'<span class="badge-last">⭐ ทำล่าสุด</span>':'')+'</span>'
-        +'<span class="csub">'+esc(it.sub)+'</span></button></div>';
-    }).join('') : '<div class="empty">ยังไม่มีทีม — สร้างในหน้า Teams ก่อน</div>';
-    el("content").querySelectorAll('.card').forEach(function(c){
+    if(!items.length){ el("content").innerHTML='<div class="empty">ยังไม่มีทีม — สร้างในหน้า Teams ก่อน</div>'; return; }
+    var odd = items.length % 2 === 1;
+    var cards = items.map(function(it, i){
+      var solo = odd && i === items.length-1; // odd count → last card centered on its own row
+      return '<div class="tscard'+(it.isDefault?' last':'')+(solo?' solo':'')+'" data-name="'+esc(it.name)+'">'
+        +(it.isDefault?'<span class="tsbadge"><span class="tsdot"></span>ล่าสุด</span>':'')
+        +'<span class="tsav" style="background:hsl('+tsHue(it.name)+',62%,54%)">'+esc(String(it.name||'?').slice(0,1).toUpperCase())+'</span>'
+        +'<span class="tsname">'+esc(it.name)+'</span>'
+        +'<span class="tsmeta"><span class="tsm1">'+(it.memberCount||0)+' members</span>'
+        +'<span class="tsm2">orchestrator: '+esc(it.orchestrator||'(none)')+'</span></span>'
+        +'</div>';
+    }).join('');
+    el("content").innerHTML='<div class="tsgrid">'+cards+'</div>';
+    el("content").querySelectorAll('.tscard').forEach(function(c){
       c.addEventListener('click',function(){post('pick_team',{name:c.dataset.name});});});
   }
   function renderOrch(m){ disarmAll(); _lastProjKey=null;  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด (+invalidate skip-guard)
