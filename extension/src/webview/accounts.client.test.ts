@@ -110,10 +110,14 @@ test("⛔ ห้าม emoji/สัญลักษณ์ในข้อควา
   }
 });
 
-test("คำอธิบายยาวต้องพับไว้ (หน้าจอไม่ใช่กำแพงตัวอักษร)", () => {
-  expect(SRC).toContain('<details class="note">');
-  expect(SRC).toContain("<summary>");
-  // ยังต้องเก็บเนื้อหาไว้ ไม่ใช่ลบทิ้ง
-  expect(SRC).toContain("ทำไมต้องมี");
-  expect(SRC).toContain("หลาย organization");
+// user สั่งลบบล็อกคำอธิบายของโซน Git ทิ้ง 2026-08-13 ("อะไรเยอะจัง อ่านแล้วงง" → "ลบในรูปออก")
+// สิ่งที่มันบอกย้ายไปอยู่จุดที่ผู้ใช้เจอตอนต้องใช้: prompt ของช่องกรอก, สถานะในแถว, error ของ clone
+test("โซน Git ต้องไม่มีบล็อกคำอธิบายกลับมา", () => {
+  const b = SRC.indexOf('<div id="zone-git"');
+  const en = SRC.indexOf("<script>", b);
+  const zone = SRC.slice(b, en);
+  expect(b).toBeGreaterThan(0);
+  for (const gone of ["ทำไมต้องมี", "หลาย organization", "ความปลอดภัย", "<details"]) {
+    expect(zone).not.toContain(gone);
+  }
 });

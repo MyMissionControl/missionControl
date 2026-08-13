@@ -423,6 +423,13 @@ export function openAccountsPanel(): vscode.WebviewPanel {
 // FREE of backslashes and backticks — both are processed when the literal is
 // evaluated and would silently corrupt the client script (a known foot-gun in
 // this codebase). Regexes used here (/&/g etc.) contain no backslashes.
+//
+// ⛔ โซน Git เคยมีบล็อกคำอธิบาย 5 บรรทัดท้ายโซน — user สั่งลบทิ้ง 2026-08-13
+//    ("อะไรเยอะจัง อ่านแล้วงง" → "ลบในรูปออก") ห้ามเอากลับมา. ที่มันบอกไปอยู่จุดที่ผู้ใช้
+//    เจอตอนต้องใช้จริงแล้ว: prompt ของช่องกรอกวันหมดอายุ · สถานะหมดอายุในแถวเอง ·
+//    ข้อความ error ของ clone ที่บอกวิธีแก้ตรงจุด. อยากอธิบายยาว = เขียนใน docs/
+//    ⛔ และห้ามใส่ HTML comment ในเทมเพลตนี้: เทสกัน emoji สแกนช่วง <body> ทั้งก้อน
+//       (คอมเมนต์อยู่ในนั้นด้วย) — คอมเมนต์ที่มีสัญลักษณ์จะทำเทสแดงทั้งที่ไม่มีใครเห็น
 function renderShell(): string {
   return `<!DOCTYPE html><html lang="th"><head>
 <meta charset="utf-8" />
@@ -532,16 +539,6 @@ function renderShell(): string {
       <div class="ph"><div><h2>SSH</h2><div class="live" id="ssh-keys"></div></div></div>
       <div id="ssh-rows"></div>
     </section>
-    <details class="note">
-      <summary>รายละเอียด (กดดูเมื่อสงสัย)</summary>
-      <div class="nb">
-        <b>ทำไมต้องมี:</b> ปุ่ม clone ของหน้า Projects ใช้ credential ของเครื่องนี้ (MC ไม่เก็บ secret เอง) — repo ที่ private จะ clone ไม่ผ่านถ้า host นั้นยังไม่มี credential<br />
-        <b>หลาย organization:</b> Azure DevOps ทุก org ใช้ host เดียวกัน แยกกันด้วยชื่อ org (= username ของ URL) → 1 แถวต่อ 1 org · ต้องวาง URL แบบมี <b>ORG@dev.azure.com</b> ตอน clone ไม่งั้น git หยิบแถวแรกมาใช้<br />
-        <b>PAT:</b> ผูกกับ <b>บัญชี</b> + เลือก <b>org</b> ตอนสร้าง (ไม่ใช่ต่อ project) · scope <b>Code (Read)</b> พอ<br />
-        <b>วันหมดอายุ:</b> Azure ไม่ยอมให้ถามอายุของ PAT ด้วยตัว PAT เอง จึงต้องกรอกวันที่หน้าเว็บโชว์ตอนสร้าง token (ข้ามได้) · MC เตือนล่วงหน้า 14 วัน<br />
-        <b>ความปลอดภัย:</b> เก็บใน ~/.git-credentials (สิทธิ์ 0600, เครื่องนี้เท่านั้น) · MC ไม่เคยส่งค่า PAT เข้าหน้าจอ · ปุ่ม <b>ทดสอบ</b> ยิง REST ของ Azure จริง
-      </div>
-    </details>
   </div>
 
 <script>
