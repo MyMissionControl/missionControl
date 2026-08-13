@@ -21,7 +21,13 @@ export interface AzPat {
   /** YYYY-MM-DD (ตัดเวลาออก — ที่ UI ใช้คือวัน) */
   expiresAt: string;
   scope: string;
+  /** Global PAT = ครอบทุก org (`targetAccounts: null`) — ⛔ Microsoft เลิกรองรับ 1 ธ.ค. 2026 */
+  global: boolean;
 }
+
+/** วันที่ Microsoft เลิกรองรับ Global PAT (ประกาศบนหน้า PAT ของ Azure DevOps) */
+export const GLOBAL_PAT_SUNSET = "2026-12-01";
+
 export interface AzPatList {
   ok: boolean;
   pats: AzPat[];
@@ -43,13 +49,22 @@ export function parsePatList(body: unknown): AzPat[] {
   if (!Array.isArray(raw)) return [];
   const out: AzPat[] = [];
   for (const t of raw) {
-    const o = t as { displayName?: unknown; validTo?: unknown; scope?: unknown };
+    const o = t as {
+      displayName?: unknown;
+      validTo?: unknown;
+      scope?: unknown;
+      targetAccounts?: unknown;
+    };
     const day = dayOf(String(o?.validTo ?? ""));
     if (!day) continue;
     out.push({
       name: typeof o?.displayName === "string" && o.displayName ? o.displayName : "(ไม่มีชื่อ)",
       expiresAt: day,
       scope: typeof o?.scope === "string" ? o.scope : "",
+      // ⛔ เอกสาร MS: targetAccounts = "null if the token applies to all of the user's accessible
+      //    organizations" ⇒ null/ไม่มีคีย์ = Global PAT · เป็นค่าที่ใช้เตือนเรื่อง sunset ได้ฟรี
+      //    (ห้ามเดาจากชื่อ token — ชื่อเป็นข้อความอิสระที่ user ตั้งเอง)
+      global: !Array.isArray(o?.targetAccounts) || o.targetAccounts.length === 0,
     });
   }
   return out.sort((a, b) => (a.expiresAt < b.expiresAt ? 1 : a.expiresAt > b.expiresAt ? -1 : 0));

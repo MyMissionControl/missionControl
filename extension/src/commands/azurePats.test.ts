@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { AZDO_RESOURCE, dayOf, isSafeOrg, parsePatList } from "./azurePats";
+import { AZDO_RESOURCE, GLOBAL_PAT_SUNSET, dayOf, isSafeOrg, parsePatList } from "./azurePats";
 
 // ⛔ บริบทที่ทำให้ไฟล์นี้มีอยู่ (ยืนยันของจริง 2026-08-13): เอา PAT ไปถามอายุของ PAT ไม่ได้
 //    (MS: "the PAT Management Lifecycle APIs support only Microsoft Entra tokens") แต่ Entra token
@@ -43,7 +43,32 @@ test("⛔ parsePatList: ตัวที่อ่านวันไม่ออ�
 
 test("parsePatList: token ไม่มีชื่อยังต้องเลือกได้ (ไม่หายไปเงียบ ๆ)", () => {
   const p = parsePatList({ patTokens: [{ validTo: "2026-12-01T00:00:00Z" }] });
-  expect(p).toEqual([{ name: "(ไม่มีชื่อ)", expiresAt: "2026-12-01", scope: "" }]);
+  expect(p).toEqual([{ name: "(ไม่มีชื่อ)", expiresAt: "2026-12-01", scope: "", global: true }]);
+});
+
+// ⛔ ประกาศบนหน้า PAT ของ Azure (user เห็นเอง 2026-08-13): "Beginning December 1, 2026, Global
+//    Personal Access Tokens (PATs) scoped to all accessible organizations will no longer be
+//    supported." · เอกสาร MS: targetAccounts = null แปลว่า token ครอบทุก org = Global PAT
+//    ⇒ ต้องตรวจจาก targetAccounts เท่านั้น ห้ามเดาจากชื่อ (ชื่อ user ตั้งเองอิสระ)
+test("GLOBAL_PAT_SUNSET ตรงกับวันที่ Azure ประกาศ", () => {
+  expect(GLOBAL_PAT_SUNSET).toBe("2026-12-01");
+});
+
+test("parsePatList: targetAccounts มี org = org-scoped (ไม่ใช่ global)", () => {
+  const p = parsePatList({
+    patTokens: [{ displayName: "mc", validTo: "2027-01-01T00:00:00Z", targetAccounts: ["38aaa865-2c70-4bf7-a308-0c6539c38c1a"] }],
+  });
+  expect(p[0].global).toBe(false);
+});
+
+test("⛔ parsePatList: targetAccounts null / ไม่มีคีย์ / ลิสต์ว่าง = Global PAT", () => {
+  for (const t of [
+    { displayName: "g1", validTo: "2027-01-01T00:00:00Z", targetAccounts: null },
+    { displayName: "g2", validTo: "2027-01-01T00:00:00Z" },
+    { displayName: "g3", validTo: "2027-01-01T00:00:00Z", targetAccounts: [] },
+  ]) {
+    expect(parsePatList({ patTokens: [t] })[0].global).toBe(true);
+  }
 });
 
 test("parsePatList: response รูปแบบอื่น = ลิสต์ว่าง ไม่ throw", () => {

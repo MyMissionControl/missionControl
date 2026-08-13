@@ -219,3 +219,20 @@ test("ห้ามมีลิงก์ 'กรอกวันหมดอาย
   expect(seg).toContain('cmEl("cm-expstatus").textContent = "";');
   expect(seg).not.toContain("จะดึงจาก Azure");
 });
+
+// Azure ประกาศบนหน้า PAT: Global PAT (ครอบทุก org) เลิกรองรับ 1 ธ.ค. 2026
+// ⇒ ต้องเห็นก่อนเลือก ไม่ใช่รู้ตอน clone ล้มวันนั้น
+test("dropdown ติดป้าย Global PAT + เตือนเมื่อเลือกตัวนั้น", () => {
+  const js = clientScript();
+  expect(js).toContain("pats[i].global");
+  expect(js).toContain("Global PAT");
+  expect(js).toContain("1 ธ.ค. 2026");
+  expect(js).toContain('data-g="');
+  expect(js).toContain("function cmGlobalWarn()");
+  // เตือนทั้งตอนรายการมาถึง และตอน user เปลี่ยนตัวเลือก
+  expect(js.match(/cmGlobalWarn\(\)/g)?.length).toBeGreaterThanOrEqual(3);
+  // ⛔ เตือนแล้วต้องยังบันทึกได้ (ตอนนี้ token ยังใช้งานได้จริง) — ห้ามไปแตะปุ่มบันทึก
+  const i = js.indexOf("function cmGlobalWarn()");
+  const seg = js.slice(i, i + 600);
+  expect(seg).not.toContain("cm-ok");
+});

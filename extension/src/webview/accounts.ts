@@ -738,10 +738,13 @@ function renderShell(): string {
       st.className = "merr warn";
       return;
     }
+    // ⛔ ติดป้าย Global PAT: Microsoft เลิกรองรับ token ที่ครอบทุก org ตั้งแต่ 1 ธ.ค. 2026
+    //    (ประกาศบนหน้า PAT ของ Azure เอง) → ต้องเห็นก่อนเลือก ไม่ใช่รู้ตอน clone ล้มวันนั้น
     var html = '<option value="">— เลือกเอง / ไม่ระบุ —</option>';
     for (var i = 0; i < pats.length; i++) {
-      html += '<option value="' + esc(pats[i].expiresAt) + '">' + esc(pats[i].name) +
-              "  ·  หมด " + esc(pats[i].expiresAt) + "</option>";
+      html += '<option value="' + esc(pats[i].expiresAt) + '" data-g="' + (pats[i].global ? "1" : "") + '">' +
+              esc(pats[i].name) + "  ·  หมด " + esc(pats[i].expiresAt) +
+              (pats[i].global ? "  ·  Global PAT (เลิกรองรับ 1 ธ.ค. 2026)" : "") + "</option>";
     }
     sel.innerHTML = html;
     wrap.style.display = "";
@@ -751,6 +754,7 @@ function renderShell(): string {
       ? "เจอ token เดียว ใส่วันให้แล้ว"
       : "เจอ " + pats.length + " token — เลือกตัวที่กำลังวาง";
     st.className = "merr ok";
+    cmGlobalWarn();
   }
   function closeCred() {
     // ⛔ ล้าง PAT ออกจาก DOM ทุกครั้งที่ปิด ไม่ปล่อยค้างในหน้าที่ซ่อนอยู่
@@ -804,7 +808,16 @@ function renderShell(): string {
   cmEl("cm-pat").addEventListener("input", cmSync);
   cmEl("cm-pick").addEventListener("change", function () {
     if (cmEl("cm-pick").value) cmEl("cm-exp").value = cmEl("cm-pick").value;
+    cmGlobalWarn();
   });
+  // เตือนถ้า token ที่เลือกเป็น Global PAT — ยังบันทึกได้ (ตอนนี้ยังใช้งานได้จริง) แต่ต้องรู้ตัว
+  function cmGlobalWarn() {
+    var sel = cmEl("cm-pick"), o = sel.options[sel.selectedIndex];
+    if (!o || o.getAttribute("data-g") !== "1") return;
+    cmEl("cm-expstatus").textContent =
+      "token นี้เป็น Global PAT (ครอบทุก org) — Azure เลิกรองรับ 1 ธ.ค. 2026 ควรสร้างใหม่แบบเลือก org เดียว";
+    cmEl("cm-expstatus").className = "merr warn";
+  }
   cmEl("cmodal").addEventListener("click", function (e) { if (e.target === cmEl("cmodal")) closeCred(); });
   cmEl("cmodal").addEventListener("keydown", function (e) {
     if (e.key === "Enter") { e.preventDefault(); cmSave(); }
