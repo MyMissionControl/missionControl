@@ -15,14 +15,15 @@ describe("projectPeriods", () => {
     inTok, outTok, cacheReadTok: crTok, cacheWriteTok: cwTok,
     inCost: inC, outCost: outC, cacheReadCost: crC, cacheWriteCost: cwC,
   });
-  test("buckets days into today / week / month / all with cat + cost sums", () => {
+  // Both windows are ROLLING: weekStartKey = today-6d, monthStartKey = today-29d.
+  test("buckets days into today / last-7d / last-30d / all with cat + cost sums", () => {
     const dayDetail = {
       "2026-07-24": bd(1, 2, 3, 4, 0.1, 0.2, 0.3, 0.4), // today
-      "2026-07-20": bd(1, 1, 1, 1, 1, 1, 1, 1),          // in week (>= 07-18) + month
-      "2026-07-10": bd(2, 2, 2, 2, 2, 2, 2, 2),          // month only
-      "2026-06-30": bd(5, 5, 5, 5, 5, 5, 5, 5),          // all only
+      "2026-07-20": bd(1, 1, 1, 1, 1, 1, 1, 1),          // in 7d (>= 07-18) + 30d
+      "2026-07-10": bd(2, 2, 2, 2, 2, 2, 2, 2),          // 30d only (>= 06-25)
+      "2026-06-01": bd(5, 5, 5, 5, 5, 5, 5, 5),          // all only — outside 30d
     };
-    const p = projectPeriods(dayDetail, "2026-07-24", "2026-07-18", "2026-07");
+    const p = projectPeriods(dayDetail, "2026-07-24", "2026-07-18", "2026-06-25");
     expect(p.today.cost).toBeCloseTo(1.0, 9);
     expect(p.today.tokens).toBe(10);
     expect(p.today.cats.cacheRead.usd).toBeCloseTo(0.3, 9);
@@ -33,20 +34,34 @@ describe("projectPeriods", () => {
     expect(p.all.cats.input.tokens).toBe(9);
     expect(p.all.cats.output.usd).toBeCloseTo(0.2 + 1 + 2 + 5, 9);
   });
+  test("the 30-day window is inclusive of its start day, exclusive of the day before", () => {
+    const p = projectPeriods(
+      {
+        "2026-06-25": bd(1, 0, 0, 0, 1, 0, 0, 0), // exactly on the boundary → counts
+        "2026-06-24": bd(1, 0, 0, 0, 2, 0, 0, 0), // one day earlier → all-time only
+      },
+      "2026-07-24",
+      "2026-07-18",
+      "2026-06-25",
+    );
+    expect(p.month.cost).toBeCloseTo(1, 9);
+    expect(p.week.cost).toBe(0);
+    expect(p.all.cost).toBeCloseTo(3, 9);
+  });
   test("empty day detail → all-zero periods", () => {
-    const p = projectPeriods({}, "2026-07-24", "2026-07-18", "2026-07");
+    const p = projectPeriods({}, "2026-07-24", "2026-07-18", "2026-06-25");
     expect(p.all.cost).toBe(0);
     expect(p.today.tokens).toBe(0);
     expect(p.month.cats.cacheWrite.usd).toBe(0);
   });
-  test('an "unknown" day counts in all-time only, never in the week', () => {
-    // The week test is a lexical compare, and "unknown" sorts above every real
-    // YYYY-MM-DD — without an explicit skip it would land in "this week".
+  test('an "unknown" day counts in all-time only, never in a rolling window', () => {
+    // Both window tests are lexical compares, and "unknown" sorts above every real
+    // YYYY-MM-DD — without an explicit skip it would land in BOTH windows.
     const p = projectPeriods(
       { unknown: bd(1, 1, 1, 1, 1, 1, 1, 1) },
       "2026-07-24",
       "2026-07-18",
-      "2026-07",
+      "2026-06-25",
     );
     expect(p.all.cost).toBeCloseTo(4, 9);
     expect(p.week.cost).toBe(0);

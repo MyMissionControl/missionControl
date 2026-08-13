@@ -48,7 +48,7 @@ export interface UsageSummary {
 
 // ── Local-day helpers ────────────────────────────────────────────────────────
 // Transcript timestamps are UTC ISO. Budgets should align to the user's wall
-// clock, so we bucket by LOCAL date and derive "today"/"this month" the same way
+// clock, so we bucket by LOCAL date and derive "today" + the rolling windows the same way
 // — otherwise late-evening work (after 00:00 local = 17:00 UTC for UTC+7) would
 // land on the wrong UTC day.
 function fmtLocalDay(d: Date): string {
@@ -73,10 +73,6 @@ function localHourKey(iso: string): string {
 /** Local "YYYY-MM-DD" for now. */
 export function localTodayKey(): string {
   return fmtLocalDay(new Date());
-}
-/** Local "YYYY-MM" for now. */
-export function localMonthKey(): string {
-  return localTodayKey().slice(0, 7);
 }
 
 // Per-token USD rates by model family. Anthropic list pricing (per MTok):
@@ -998,8 +994,8 @@ export interface PeriodBreakdown {
 }
 export interface ProjectPeriods {
   today: PeriodBreakdown;
-  week: PeriodBreakdown;
-  month: PeriodBreakdown;
+  week: PeriodBreakdown; // rolling last 7 days (incl. today)
+  month: PeriodBreakdown; // rolling last 30 days (incl. today) — NOT the calendar month
   all: PeriodBreakdown;
 }
 function emptyPeriod(): PeriodBreakdown {
@@ -1023,17 +1019,19 @@ function addToPeriod(p: PeriodBreakdown, bd: Breakdown): void {
   p.tokens += bd.inTok + bd.outTok + bd.cacheReadTok + bd.cacheWriteTok;
 }
 
-/** Bucket a project's per-day Breakdown series into today / rolling-week /
- *  this-month / all-time totals + the 4-category (cache-read / output / cache-
+/** Bucket a project's per-day Breakdown series into today / last-7-days /
+ *  last-30-days / all-time totals + the 4-category (cache-read / output / cache-
  *  write / input) cost+token split for each period. Pure — the caller passes the
- *  local day keys (todayKey, weekStartKey = today-6d, monthPrefix "YYYY-MM"), so
- *  no clock is read here. Powers the Budget page's period filter, which re-scopes
- *  each project's spend, bar, and breakdown pie. */
+ *  local day keys (todayKey, weekStartKey = today-6d, monthStartKey = today-29d),
+ *  so no clock is read here. Powers the Budget page's period filter, which
+ *  re-scopes each project's spend, bar, and breakdown pie.
+ *  Both windows are ROLLING (a fixed number of days back from today), not
+ *  calendar buckets — `week`/`month` are the long-standing key names for them. */
 export function projectPeriods(
   dayDetail: Record<string, Breakdown>,
   todayKey: string,
   weekStartKey: string,
-  monthPrefix: string,
+  monthStartKey: string,
 ): ProjectPeriods {
   const out: ProjectPeriods = {
     today: emptyPeriod(),
@@ -1045,12 +1043,12 @@ export function projectPeriods(
     const bd = dayDetail[day];
     addToPeriod(out.all, bd);
     // A line with no parseable timestamp lands in the "unknown" bucket. It has to
-    // be skipped explicitly: the week test below is a LEXICAL compare, and
-    // "unknown" > any "YYYY-MM-DD", so it would silently count as this week.
+    // be skipped explicitly: the window tests below are LEXICAL compares, and
+    // "unknown" > any "YYYY-MM-DD", so it would silently count in both windows.
     if (day === "unknown") continue;
     if (day === todayKey) addToPeriod(out.today, bd);
     if (day >= weekStartKey) addToPeriod(out.week, bd); // fixed-width YYYY-MM-DD → lexical = chronological
-    if (day.startsWith(monthPrefix)) addToPeriod(out.month, bd);
+    if (day >= monthStartKey) addToPeriod(out.month, bd);
   }
   return out;
 }

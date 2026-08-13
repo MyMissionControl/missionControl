@@ -15,7 +15,6 @@ import {
   getInstantUsage,
   getProjectLedger,
   groupByProjectRoot,
-  localMonthKey,
   localTodayKey,
   mergeProjectsByRealpath,
   projectPeriods,
@@ -39,13 +38,12 @@ const fmt = (n: number) => "$" + n.toLocaleString("en-US", { minimumFractionDigi
 // usage.ts so the detail page reuses the exact same grouping — imported above.
 
 export interface BudgetView {
-  monthFmt: string;
+  last30Fmt: string; // rolling last 30 days (incl. today) — not the calendar month
   todayFmt: string;
-  last7Fmt: string;
+  last7Fmt: string; // rolling last 7 days (incl. today)
   allTimeFmt: string;
   daily14: number[]; // raw daily spend, oldest→newest (index 13 = today) for the 14-day chart
   projects: ProjectRow[]; // every project under projects/ — client sorts + pages
-  monthStartMs: number; // local start-of-month (ms) — client's "this month" filter
   providerNote: string; // reminder when a provider on disk isn't summed in yet ("" = none)
   sessions: number;
   // Whole-bill token-category split per period — the "แยกตามประเภท token" card.
@@ -66,25 +64,33 @@ export interface ProjectRow {
   periods?: ProjectPeriods; // today/week/month/all cost+token+4-cat split (attached by attachPeriods)
 }
 
-/** Build the full display view from a usage snapshot `u`: this-month / today /
- *  7-day / all-time USD and the projects — all pre-formatted. Reads the durable
- *  project ledger (a small cached file, not a rescan) so projects whose folder
- *  was since deleted locally still show their last-known spend instead of
+/** Build the full display view from a usage snapshot `u`: today / last-7-days /
+ *  last-30-days / all-time USD and the projects — all pre-formatted. Reads the
+ *  durable project ledger (a small cached file, not a rescan) so projects whose
+ *  folder was since deleted locally still show their last-known spend instead of
  *  silently disappearing. */
 export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
-  const month = sumByPrefix(u, localMonthKey());
   const today = sumByPrefix(u, localTodayKey());
 
-  // Last 7 local days (inclusive of today): from local midnight 6 days ago.
+  // Rolling windows, both inclusive of today: 7 days = from local midnight 6 days
+  // ago, 30 days = from local midnight 29 days ago. Deliberately NOT calendar
+  // buckets — every period on this page is "the last N days", so the numbers stay
+  // comparable instead of resetting on the 1st.
+  const windowStart = (daysBack: number) => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - daysBack);
+    return d;
+  };
+  const cutoff = windowStart(6);
+  const cutoff30 = windowStart(29);
   let last7 = 0;
-  const cutoff = new Date();
-  cutoff.setHours(0, 0, 0, 0);
-  cutoff.setDate(cutoff.getDate() - 6);
+  let last30 = 0;
   for (const day of Object.keys(u.byDay)) {
     const t = new Date(day + "T00:00:00"); // no "Z" -> local midnight
-    if (!Number.isNaN(t.getTime()) && t.getTime() >= cutoff.getTime()) {
-      last7 += u.byDay[day].cost;
-    }
+    if (Number.isNaN(t.getTime())) continue; // "unknown" day → all-time only
+    if (t.getTime() >= cutoff.getTime()) last7 += u.byDay[day].cost;
+    if (t.getTime() >= cutoff30.getTime()) last30 += u.byDay[day].cost;
   }
 
   // 14-day daily spend series (raw, oldest→newest; index 13 = today) for the chart.
@@ -136,11 +142,6 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
     }))
     .sort((a, b) => b.lastMs - a.lastMs); // default order; client re-sorts
 
-  // Local start-of-month for the client's "this month" filter.
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
-
   // Reminder: a provider CLI is present on disk but its spend isn't wired into
   // this total yet (e.g. the user just added Gemini). Nudge them to include it.
   const unwired = unwiredProviders();
@@ -149,19 +150,18 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
     : "";
 
   // Whole-bill split for the token card, on the same period boundaries the
-  // per-project rows use (attachPeriods) — `cutoff` is already local midnight
-  // six days back, i.e. the start of the rolling 7-day window.
-  const portfolio = projectPeriods(allDayDetail(u), localTodayKey(), ymd(cutoff), localMonthKey());
+  // per-project rows use (attachPeriods) — `cutoff`/`cutoff30` are already local
+  // midnight 6 / 29 days back, i.e. the starts of the rolling windows.
+  const portfolio = projectPeriods(allDayDetail(u), localTodayKey(), ymd(cutoff), ymd(cutoff30));
 
   return {
-    monthFmt: fmt(month),
+    last30Fmt: fmt(last30),
     todayFmt: fmt(today),
     last7Fmt: fmt(last7),
     allTimeFmt: fmt(u.total.cost),
     daily14,
     projects,
     portfolio,
-    monthStartMs: monthStart.getTime(),
     providerNote,
     // Real sessions, not transcript files — subagent/workflow transcripts are
     // part of a session, not sessions of their own (1832 files ≈ 448 sessions).
@@ -178,15 +178,20 @@ function attachPeriods(u: UsageSummary, view: BudgetView): void {
   const home = os.homedir();
   const ymd = (d: Date) =>
     d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
-  const weekStart = new Date();
-  weekStart.setHours(0, 0, 0, 0);
-  weekStart.setDate(weekStart.getDate() - 6);
+  // Same rolling windows as the header totals in buildBudgetView: 7 and 30 days
+  // back from local midnight, both inclusive of today.
+  const windowStart = (daysBack: number) => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - daysBack);
+    return ymd(d);
+  };
   const todayKey = localTodayKey();
-  const weekStartKey = ymd(weekStart);
-  const monthPrefix = localMonthKey();
+  const weekStartKey = windowStart(6);
+  const monthStartKey = windowStart(29);
   for (const p of view.projects) {
     const absRoot = p.path.startsWith("~") ? home + p.path.slice(1) : p.path;
-    p.periods = projectPeriods(collapseProjectDayDetail(u, absRoot), todayKey, weekStartKey, monthPrefix);
+    p.periods = projectPeriods(collapseProjectDayDetail(u, absRoot), todayKey, weekStartKey, monthStartKey);
   }
 }
 
@@ -414,7 +419,7 @@ function renderShell(): string {
     <div class="htext">
       <div class="eyebrow">Mission Control — Claude Usage</div>
       <div class="hero"><span class="cur">$</span><span class="amt" id="hero-amt">—</span></div>
-      <div class="hero-sub" id="hero-sub">ยอดใช้จ่ายเดือนนี้ (คำนวณจาก transcript ในเครื่อง)</div>
+      <div class="hero-sub" id="hero-sub">ยอดใช้จ่าย 30 วันล่าสุด (คำนวณจาก transcript ในเครื่อง)</div>
     </div>
   </div>
 
@@ -468,7 +473,7 @@ function renderShell(): string {
 
   var PAGE_SIZE = 10;
   var STATE = { view: null, period: "month", sortKey: "cost", sortDir: "desc", page: 0, dwellRow: null, dwellTimer: null };
-  var PERIOD_WORD = { today: "วันนี้", week: "7 วันล่าสุด", month: "เดือนนี้", all: "ทั้งหมด" };
+  var PERIOD_WORD = { today: "วันนี้", week: "7 วันล่าสุด", month: "30 วันล่าสุด", all: "ทั้งหมด" };
   // Fixed categorical colors (outside the teal accent palette) — identical in dark + light.
   var CATS = [
     { key: "cacheRead", color: "#4f9cf9", label: "Cache read" },
@@ -493,7 +498,7 @@ function renderShell(): string {
   }
   function heroFmt() {
     var v = STATE.view; if (!v) return "$0.00";
-    return { today: v.todayFmt, week: v.last7Fmt, month: v.monthFmt, all: v.allTimeFmt }[STATE.period] || v.monthFmt;
+    return { today: v.todayFmt, week: v.last7Fmt, month: v.last30Fmt, all: v.allTimeFmt }[STATE.period] || v.last30Fmt;
   }
 
   // ── donut pie: wedges by USD, start 12 o'clock clockwise, center punched out ──
@@ -537,7 +542,10 @@ function renderShell(): string {
     var intPart = dot >= 0 ? body.slice(0, dot) : body;
     var decPart = dot >= 0 ? body.slice(dot) : "";
     document.getElementById("hero-amt").innerHTML = esc(intPart) + '<span class="dec">' + esc(decPart) + "</span>";
-    document.getElementById("hero-sub").textContent = "ยอดใช้จ่าย" + PERIOD_WORD[STATE.period] + " (คำนวณจาก transcript ในเครื่อง)";
+    var pw = PERIOD_WORD[STATE.period];
+    // a period that starts with a digit ("7 วันล่าสุด") needs a space after "ยอดใช้จ่าย";
+    // a word one ("วันนี้"/"ทั้งหมด") reads better glued on.
+    document.getElementById("hero-sub").textContent = "ยอดใช้จ่าย" + (/^[0-9]/.test(pw) ? " " : "") + pw + " (คำนวณจาก transcript ในเครื่อง)";
   }
 
   function renderTiles() {
@@ -545,7 +553,7 @@ function renderShell(): string {
     var tiles = [
       { k: "วันนี้", v: v.todayFmt, p: "today" },
       { k: "7 วันล่าสุด", v: v.last7Fmt, p: "week" },
-      { k: "เดือนนี้", v: v.monthFmt, p: "month" },
+      { k: "30 วันล่าสุด", v: v.last30Fmt, p: "month" },
       { k: "ทั้งหมด", v: v.allTimeFmt, p: "all" }
     ];
     document.getElementById("tiles").innerHTML = tiles.map(function (t) {

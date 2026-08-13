@@ -21,7 +21,7 @@ async function showBudgetPopup(): Promise<void> {
   const v = await buildBudgetView(u);
 
   const items: Row[] = [
-    { label: "$(calendar) " + v.monthFmt, description: "เดือนนี้" },
+    { label: "$(calendar) " + v.last30Fmt, description: "30 วันล่าสุด" },
     { label: "$(clock) " + v.todayFmt, description: "วันนี้" },
     { label: "$(history) " + v.last7Fmt, description: "7 วันล่าสุด" },
     { label: "$(graph) " + v.allTimeFmt, description: "ทั้งหมด" },
@@ -45,7 +45,7 @@ async function showBudgetPopup(): Promise<void> {
   });
 
   const qp = vscode.window.createQuickPick<Row>();
-  qp.title = "Claude usage: " + v.monthFmt + " this month";
+  qp.title = "Claude usage: " + v.last30Fmt + " in the last 30 days";
   qp.placeholder = v.sessions + " sessions · คำนวณจาก ~/.claude/projects · Anthropic list pricing";
   // (v.sessions counts real sessions — subagent/workflow transcripts belong to one)
   qp.items = items;
