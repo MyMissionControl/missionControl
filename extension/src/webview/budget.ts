@@ -19,7 +19,6 @@ import {
   mergeProjectsByRealpath,
   projectPeriods,
   refreshUsage,
-  sumByPrefix,
   unwiredProviders,
 } from "../usage";
 
@@ -42,7 +41,15 @@ export interface BudgetView {
   todayFmt: string;
   last7Fmt: string; // rolling last 7 days (incl. today)
   allTimeFmt: string;
+  // Same four periods counted in TOKENS — the page's unit toggle switches the
+  // hero, the stat cards, the daily chart and the token-type card onto these.
+  // Raw numbers (not pre-formatted): the client renders them compactly (1.2B).
+  todayTok: number;
+  last7Tok: number;
+  last30Tok: number;
+  allTimeTok: number;
   daily14: number[]; // raw daily spend, oldest→newest (index 13 = today) for the 14-day chart
+  daily14Tok: number[]; // same 14 days, counted in tokens
   projects: ProjectRow[]; // every project under projects/ — client sorts + pages
   providerNote: string; // reminder when a provider on disk isn't summed in yet ("" = none)
   sessions: number;
@@ -70,8 +77,6 @@ export interface ProjectRow {
  *  folder was since deleted locally still show their last-known spend instead of
  *  silently disappearing. */
 export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
-  const today = sumByPrefix(u, localTodayKey());
-
   // Rolling windows, both inclusive of today: 7 days = from local midnight 6 days
   // ago, 30 days = from local midnight 29 days ago. Deliberately NOT calendar
   // buckets — every period on this page is "the last N days", so the numbers stay
@@ -82,15 +87,33 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
     d.setDate(d.getDate() - daysBack);
     return d;
   };
+  const todayKey = localTodayKey();
   const cutoff = windowStart(6);
   const cutoff30 = windowStart(29);
+  // One pass, both units: the unit toggle must not be able to disagree with
+  // itself about which days a period covers.
+  let today = 0;
+  let todayTok = 0;
   let last7 = 0;
+  let last7Tok = 0;
   let last30 = 0;
+  let last30Tok = 0;
   for (const day of Object.keys(u.byDay)) {
     const t = new Date(day + "T00:00:00"); // no "Z" -> local midnight
     if (Number.isNaN(t.getTime())) continue; // "unknown" day → all-time only
-    if (t.getTime() >= cutoff.getTime()) last7 += u.byDay[day].cost;
-    if (t.getTime() >= cutoff30.getTime()) last30 += u.byDay[day].cost;
+    const b = u.byDay[day];
+    if (day === todayKey) {
+      today += b.cost;
+      todayTok += b.tokens;
+    }
+    if (t.getTime() >= cutoff.getTime()) {
+      last7 += b.cost;
+      last7Tok += b.tokens;
+    }
+    if (t.getTime() >= cutoff30.getTime()) {
+      last30 += b.cost;
+      last30Tok += b.tokens;
+    }
   }
 
   // 14-day daily spend series (raw, oldest→newest; index 13 = today) for the chart.
@@ -99,10 +122,13 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
   const dayBase = new Date();
   dayBase.setHours(0, 0, 0, 0);
   const daily14: number[] = [];
+  const daily14Tok: number[] = [];
   for (let i = 13; i >= 0; i--) {
     const d = new Date(dayBase);
     d.setDate(dayBase.getDate() - i);
-    daily14.push(u.byDay[ymd(d)]?.cost ?? 0);
+    const b = u.byDay[ymd(d)];
+    daily14.push(b?.cost ?? 0);
+    daily14Tok.push(b?.tokens ?? 0);
   }
 
   const home = os.homedir();
@@ -159,7 +185,12 @@ export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
     todayFmt: fmt(today),
     last7Fmt: fmt(last7),
     allTimeFmt: fmt(u.total.cost),
+    todayTok,
+    last7Tok,
+    last30Tok,
+    allTimeTok: u.total.tokens,
     daily14,
+    daily14Tok,
     projects,
     portfolio,
     providerNote,
@@ -319,14 +350,28 @@ function renderShell(): string {
   .seg .s { height: 26px; padding: 0 12px; display: inline-flex; align-items: center; border-radius: 6px;
     font-size: 11.5px; font-weight: 600; color: var(--faint); background: transparent; cursor: pointer; font-family: var(--uifont); white-space: nowrap; }
   .seg .s.active { color: var(--txt); background: var(--accentSoft); box-shadow: inset 0 0 0 1px var(--accent); }
-  .refresh { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: 8px;
+  .refresh { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: 8px; white-space: nowrap;
     background: var(--card); border: 1px solid var(--border2); color: var(--txt); font-size: 12.5px; font-weight: 600; cursor: pointer; font-family: var(--uifont); }
   .refresh:hover { border-color: var(--accent); }
   .refresh svg { width: 13px; height: 13px; }
   .refresh[disabled] { opacity: .5; cursor: default; }
 
-  /* Refresh bar (above the cards) */
-  .refreshbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+  /* Refresh bar (above the cards) — unit toggle sits left of รีเฟรช */
+  .refreshbar { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 12px; }
+  /* active unit is a state, not an action → accent border like a picked .tile */
+  .refresh.unit { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  /* Both labels live in ONE grid cell, so the slot is always as wide as the
+     LONGER of them and the button never resizes when the unit flips. The
+     inactive one is visibility:hidden — still laid out, just not painted
+     (display:none would collapse the slot and bring the jump back).
+     USD/TOK are both 3 chars in the mono font, so the slot fits each exactly —
+     no dead space around the shorter label. Keep any future labels equal-width
+     or one of them will look adrift inside the locked slot. */
+  .refresh .u { display: inline-grid; font-family: var(--mono); text-align: center; }
+  .refresh .u > span { grid-area: 1 / 1; }
+  .refresh .u > .l-tok { visibility: hidden; }
+  .refresh.tok .u > .l-usd { visibility: hidden; }
+  .refresh.tok .u > .l-tok { visibility: visible; }
 
   /* Stat cards — click one to pick the period */
   .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); margin-bottom: var(--secgap); }
@@ -423,7 +468,7 @@ function renderShell(): string {
     </div>
   </div>
 
-  <div class="refreshbar"><button class="refresh" id="refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg>รีเฟรช</button></div>
+  <div class="refreshbar"><button class="refresh unit" id="unit" title="สลับหน่วยที่แสดง: เงิน (USD) หรือ จำนวนโทเคน"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></svg>หน่วย: <span class="u"><span class="l-usd">USD</span><span class="l-tok">TOK</span></span></button><button class="refresh" id="refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg>รีเฟรช</button></div>
   <div class="tiles" id="tiles"></div>
   <div class="notice" id="provider-note" style="display:none"></div>
 
@@ -469,10 +514,19 @@ function renderShell(): string {
   function money2(n) { return "$" + USD.format(n || 0); }
   var TOKFMT = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
   function fmtTokens(n) { return TOKFMT.format(n || 0); }
+  var EXACT = new Intl.NumberFormat("en-US"); // full count with separators — hero only
   function post(type) { vscode.postMessage({ type: type }); }
 
   var PAGE_SIZE = 10;
-  var STATE = { view: null, period: "month", sortKey: "cost", sortDir: "desc", page: 0, dwellRow: null, dwellTimer: null };
+  // metric = which unit the hero / stat cards / daily chart / token-type card are
+  // counted in: "usd" (money) or "tok" (tokens). The project table is unaffected —
+  // it already shows both columns.
+  var STATE = { view: null, period: "month", metric: "usd", sortKey: "cost", sortDir: "desc", page: 0, dwellRow: null, dwellTimer: null };
+  function isTok() { return STATE.metric === "tok"; }
+  // One value in the active unit: money2 for usd, compact + " tok" for tokens.
+  // unitVal takes a raw USD number; unitStr takes one the host already formatted.
+  function unitVal(usd, tok) { return isTok() ? fmtTokens(tok) + " tok" : money2(usd); }
+  function unitStr(usdFmt, tok) { return isTok() ? fmtTokens(tok) + " tok" : (usdFmt || "$0.00"); }
   var PERIOD_WORD = { today: "วันนี้", week: "7 วันล่าสุด", month: "30 วันล่าสุด", all: "ทั้งหมด" };
   // Fixed categorical colors (outside the teal accent palette) — identical in dark + light.
   var CATS = [
@@ -499,6 +553,12 @@ function renderShell(): string {
   function heroFmt() {
     var v = STATE.view; if (!v) return "$0.00";
     return { today: v.todayFmt, week: v.last7Fmt, month: v.last30Fmt, all: v.allTimeFmt }[STATE.period] || v.last30Fmt;
+  }
+  // Raw token count for the active period (host sends numbers, not strings).
+  function heroTok() {
+    var v = STATE.view; if (!v) return 0;
+    var m = { today: v.todayTok, week: v.last7Tok, month: v.last30Tok, all: v.allTimeTok };
+    return m[STATE.period] || 0;
   }
 
   // ── donut pie: wedges by USD, start 12 o'clock clockwise, center punched out ──
@@ -536,25 +596,35 @@ function renderShell(): string {
   }
 
   function updateHero() {
-    var s = heroFmt();
-    var body = s.charAt(0) === "$" ? s.slice(1) : s;
-    var dot = body.lastIndexOf(".");
-    var intPart = dot >= 0 ? body.slice(0, dot) : body;
-    var decPart = dot >= 0 ? body.slice(dot) : "";
-    document.getElementById("hero-amt").innerHTML = esc(intPart) + '<span class="dec">' + esc(decPart) + "</span>";
+    var cur = document.querySelector(".hero .cur"); // the "$" — meaningless in token mode
+    if (isTok()) {
+      // exact count with separators (the hero has room); " tok" muted like the cents
+      if (cur) cur.style.display = "none";
+      document.getElementById("hero-amt").innerHTML =
+        esc(EXACT.format(heroTok())) + '<span class="dec"> tok</span>';
+    } else {
+      if (cur) cur.style.display = "";
+      var s = heroFmt();
+      var body = s.charAt(0) === "$" ? s.slice(1) : s;
+      var dot = body.lastIndexOf(".");
+      var intPart = dot >= 0 ? body.slice(0, dot) : body;
+      var decPart = dot >= 0 ? body.slice(dot) : "";
+      document.getElementById("hero-amt").innerHTML = esc(intPart) + '<span class="dec">' + esc(decPart) + "</span>";
+    }
     var pw = PERIOD_WORD[STATE.period];
-    // a period that starts with a digit ("7 วันล่าสุด") needs a space after "ยอดใช้จ่าย";
-    // a word one ("วันนี้"/"ทั้งหมด") reads better glued on.
-    document.getElementById("hero-sub").textContent = "ยอดใช้จ่าย" + (/^[0-9]/.test(pw) ? " " : "") + pw + " (คำนวณจาก transcript ในเครื่อง)";
+    // a period that starts with a digit ("7 วันล่าสุด") needs a space after the lead
+    // word; a word one ("วันนี้"/"ทั้งหมด") reads better glued on.
+    var lead = isTok() ? "โทเคนที่ใช้" : "ยอดใช้จ่าย";
+    document.getElementById("hero-sub").textContent = lead + (/^[0-9]/.test(pw) ? " " : "") + pw + " (คำนวณจาก transcript ในเครื่อง)";
   }
 
   function renderTiles() {
     var v = STATE.view;
     var tiles = [
-      { k: "วันนี้", v: v.todayFmt, p: "today" },
-      { k: "7 วันล่าสุด", v: v.last7Fmt, p: "week" },
-      { k: "30 วันล่าสุด", v: v.last30Fmt, p: "month" },
-      { k: "ทั้งหมด", v: v.allTimeFmt, p: "all" }
+      { k: "วันนี้", v: unitStr(v.todayFmt, v.todayTok), p: "today" },
+      { k: "7 วันล่าสุด", v: unitStr(v.last7Fmt, v.last7Tok), p: "week" },
+      { k: "30 วันล่าสุด", v: unitStr(v.last30Fmt, v.last30Tok), p: "month" },
+      { k: "ทั้งหมด", v: unitStr(v.allTimeFmt, v.allTimeTok), p: "all" }
     ];
     document.getElementById("tiles").innerHTML = tiles.map(function (t) {
       return '<div class="tile' + (t.p === STATE.period ? " active" : "") + '" data-p="' + t.p + '"><div class="k">' + esc(t.k) + '</div><div class="v">' + esc(t.v) + "</div></div>";
@@ -562,14 +632,18 @@ function renderShell(): string {
   }
 
   function renderDaily() {
-    var d = (STATE.view && STATE.view.daily14) || [];
+    var v = STATE.view || {};
+    // bar heights follow the ACTIVE unit — a cache-heavy day is tall in tokens
+    // and short in dollars, which is the comparison this toggle exists for.
+    var d = (isTok() ? v.daily14Tok : v.daily14) || [];
     var max = 0; for (var i = 0; i < d.length; i++) if (d[i] > max) max = d[i];
     var today = d.length ? d[d.length - 1] : 0;
+    var one = function (n) { return isTok() ? fmtTokens(n) + " tok" : money2(n); };
     document.getElementById("bars").innerHTML = d.map(function (val, i) {
       var h = max > 0 ? Math.max(2, Math.round(val / max * 52)) : 2;
-      return '<span class="b' + (i === d.length - 1 ? " today" : "") + '" style="height:' + h + 'px" title="' + money2(val) + '"></span>';
+      return '<span class="b' + (i === d.length - 1 ? " today" : "") + '" style="height:' + h + 'px" title="' + esc(one(val)) + '"></span>';
     }).join("");
-    document.getElementById("daily-cap").textContent = "วันนี้ " + money2(today) + " · สูงสุดในรอบ " + money2(max);
+    document.getElementById("daily-cap").textContent = "วันนี้ " + one(today) + " · สูงสุดในรอบ " + one(max);
   }
 
   // Whole-bill token-type totals for the active period. Comes straight from the
@@ -577,21 +651,25 @@ function renderShell(): string {
   // scoped this card to work under projects/ only, so it read ~1/5 of the hero
   // sitting right above it. Falls back to the old row-sum if an older host build
   // sends no portfolio.
-  function portfolioCats() {
+  // field = "usd" or "tokens" — the split is stored per category in both units,
+  // and the shares genuinely differ (cache-read is cheap per token, so it dominates
+  // the token mix far more than the dollar mix).
+  function portfolioCats(field) {
     var tot = { cacheRead: 0, output: 0, cacheWrite: 0, input: 0 }, sum = 0;
     var pf = STATE.view.portfolio && STATE.view.portfolio[STATE.period];
     if (pf) {
-      CATS.forEach(function (c) { var u = ((pf.cats || {})[c.key] || {}).usd || 0; tot[c.key] = u; sum += u; });
+      CATS.forEach(function (c) { var u = ((pf.cats || {})[c.key] || {})[field] || 0; tot[c.key] = u; sum += u; });
       return { tot: tot, sum: sum };
     }
     (STATE.view.projects || []).forEach(function (p) {
       var cats = periodOf(p).cats;
-      CATS.forEach(function (c) { var u = (cats[c.key] || {}).usd || 0; tot[c.key] += u; sum += u; });
+      CATS.forEach(function (c) { var u = (cats[c.key] || {})[field] || 0; tot[c.key] += u; sum += u; });
     });
     return { tot: tot, sum: sum };
   }
   function renderTokenBar() {
-    var pc = portfolioCats(), sum = pc.sum;
+    var tok = isTok();
+    var pc = portfolioCats(tok ? "tokens" : "usd"), sum = pc.sum;
     document.getElementById("stack").innerHTML = sum > 0 ? CATS.map(function (c) {
       var w = pc.tot[c.key] / sum * 100;
       return w > 0 ? '<span style="width:' + w + '%;background:' + c.color + '"></span>' : "";
@@ -600,7 +678,7 @@ function renderShell(): string {
       var u = pc.tot[c.key], pct = sum > 0 ? Math.round(u / sum * 100) : 0;
       return '<div class="lg"><span class="sw" style="background:' + c.color + '"></span>' +
         '<span class="lb">' + c.label + '</span><span class="fill"></span>' +
-        '<span class="vl">' + money2(u) + '</span><span class="pc">' + pct + '%</span></div>';
+        '<span class="vl">' + esc(tok ? fmtTokens(u) + " tok" : money2(u)) + '</span><span class="pc">' + pct + '%</span></div>';
     }).join("");
   }
 
@@ -651,8 +729,25 @@ function renderShell(): string {
     if (STATE.page >= pages - 1) next.setAttribute("disabled", ""); else next.removeAttribute("disabled");
   }
 
+  // Everything the unit toggle touches. The project table is deliberately left
+  // out — it shows a TOKENS and a COST column at the same time either way.
+  // Both labels are already in the DOM (see .refresh .u) — flip which one paints.
+  function syncUnitLabel() {
+    var b = document.getElementById("unit");
+    if (b) b.classList[isTok() ? "add" : "remove"]("tok");
+  }
+  function renderUnit() {
+    syncUnitLabel();
+    if (!STATE.view) return;
+    updateHero();
+    renderTiles();
+    renderDaily();
+    renderTokenBar();
+  }
+
   function render(v) {
     STATE.view = v;
+    syncUnitLabel(); // a refresh must not silently drop back to USD
     updateHero();
     renderTiles();
     var pn = document.getElementById("provider-note");
@@ -701,6 +796,7 @@ function renderShell(): string {
     var row = t.closest ? t.closest(".prow") : null;
     if (row && row.getAttribute("data-key")) { var p = projFromKey(row.getAttribute("data-key")); if (p) vscode.postMessage({ type: "openProjectDetail", projectPath: p.path, projectName: p.name }); return; }
     var b = t.id ? t : (t.closest ? t.closest("[id]") : null);
+    if (b && b.id === "unit") { STATE.metric = isTok() ? "usd" : "tok"; renderUnit(); return; }
     if (b && b.id === "refresh") { b.setAttribute("disabled", "true"); post("reload"); }
     else if (b && b.id === "pg-prev") { if (STATE.page > 0) { STATE.page--; renderTable(); } }
     else if (b && b.id === "pg-next") { STATE.page++; renderTable(); }
