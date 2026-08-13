@@ -203,7 +203,19 @@ test("ปฏิทินต้องซ่อนไว้ก่อน โผล�
   const seg = js.slice(i, js.indexOf("cmEl(\"cm-cancel\")"));
   expect(seg).toContain('cmEl("cm-expwrap").style.display = "";');   // สาขาที่ล้ม
   expect(seg).toContain('cmEl("cm-expwrap").style.display = "none";'); // สาขาที่สำเร็จ
-  // ยังต้องมีทางกรอกเองไว้ทับ
-  expect(SRC).toContain('id="cm-manual"');
-  expect(js).toContain('cmEl("cm-manual").addEventListener("click"');
+});
+
+// user: "กรอกวันหมดอายุเองห้ามแสดงให้กดด้วย ให้มันแสดงแค่ตอนแปะลิ้งแล้วดึงไม่ได้จริงๆเท่านั้น"
+// ⇒ ตัดลิงก์กรอกเองออกทั้งหมด (ตอนดึงไม่ได้ ปฏิทินโผล่เองอยู่แล้ว ลิงก์จึงไม่มีประโยชน์)
+//   และตอนเปิด modal ต้องไม่มีข้อความเรื่องวันหมดอายุเลย
+test("ห้ามมีลิงก์ 'กรอกวันหมดอายุเอง' และเปิด modal ต้องเงียบเรื่องวันหมดอายุ", () => {
+  const js = clientScript();
+  expect(SRC).not.toContain("cm-manual");
+  expect(SRC).not.toContain("กรอกวันหมดอายุเอง");
+  expect(SRC).not.toContain("linkbtn");
+  // openCred ต้องไม่ตั้งข้อความสถานะวันหมดอายุใด ๆ (สถานะมาได้จาก cmDatesResult เท่านั้น)
+  const i = js.indexOf("function openCred(");
+  const seg = js.slice(i, js.indexOf("function closeCred("));
+  expect(seg).toContain('cmEl("cm-expstatus").textContent = "";');
+  expect(seg).not.toContain("จะดึงจาก Azure");
 });
