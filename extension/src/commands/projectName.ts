@@ -58,6 +58,23 @@ export function isNameFree(c: NameCheck): boolean {
   return c.valid && !c.localTaken && !(c.githubChecked && c.githubTaken);
 }
 
+/** first free name derived from `base`: base itself if free, else `base-v2`, `-v3`…
+ *  free = ว่างทั้ง local และ github. capped at 40 rounds.
+ *
+ *  ⛔ n เริ่มที่ 1 เสมอ (nextCandidate(base,1) === base) — ชื่อที่ว่างอยู่แล้วต้องได้ตัวเปล่า
+ *  ไม่ใช่ `-v2` ทันที ไม่งั้น clone repo ครั้งแรกจะได้โฟลเดอร์ชื่อไม่ตรงกับ repo. */
+export function suggestFromBase(
+  base: string,
+  localNames: string[],
+  ghView: (n: string) => boolean | null,
+): string {
+  for (let n = 1; n <= 40; n++) {
+    const cand = nextCandidate(base, n);
+    if (isNameFree(checkProjectName(cand, localNames, ghView))) return cand;
+  }
+  return `${base}-new`;
+}
+
 /** first free name: base of most-recent project (recentNames[0], strip -vN) or
  *  "my-project", bumped until free in BOTH local + github. capped at 40 rounds. */
 export function suggestDefaultName(
@@ -65,10 +82,5 @@ export function suggestDefaultName(
   localNames: string[],
   ghView: (n: string) => boolean | null,
 ): string {
-  const base = recentNames.length ? bumpBase(recentNames[0]) : "my-project";
-  for (let n = 1; n <= 40; n++) {
-    const cand = nextCandidate(base, n);
-    if (isNameFree(checkProjectName(cand, localNames, ghView))) return cand;
-  }
-  return `${base}-new`;
+  return suggestFromBase(recentNames.length ? bumpBase(recentNames[0]) : "my-project", localNames, ghView);
 }

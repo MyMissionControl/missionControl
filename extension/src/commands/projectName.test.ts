@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   ORG, isValidName, sanitizeName, bumpBase, nextCandidate,
-  checkProjectName, isNameFree, suggestDefaultName,
+  checkProjectName, isNameFree, suggestDefaultName, suggestFromBase,
 } from "./projectName";
 
 test("ORG const", () => { expect(ORG).toBe("MyMissionControl"); });
@@ -70,4 +70,31 @@ test("suggestDefaultName: bump past taken in both sources", () => {
 
 test("suggestDefaultName: no projects → my-project", () => {
   expect(suggestDefaultName([], [], () => false)).toBe("my-project");
+});
+
+// ── suggestFromBase: ชื่อที่เสนอจากชื่อ repo ที่ user แปะ URL มา ────────────────
+// ⛔ ว่างอยู่แล้วต้องได้ชื่อเปล่า ไม่ใช่ -v2 — โฟลเดอร์ที่ clone ลงต้องชื่อตรงกับ repo
+test("suggestFromBase: ว่าง → ชื่อ repo ตรง ๆ", () => {
+  expect(suggestFromBase("TexploreFITs", [], () => false)).toBe("TexploreFITs");
+});
+
+test("suggestFromBase: ซ้ำในเครื่อง → bump -vN", () => {
+  expect(suggestFromBase("TexploreFITs", ["TexploreFITs"], () => false)).toBe("TexploreFITs-v2");
+  expect(
+    suggestFromBase("TexploreFITs", ["TexploreFITs", "TexploreFITs-v2"], () => false),
+  ).toBe("TexploreFITs-v3");
+});
+
+test("suggestFromBase: ซ้ำบน github org ก็ต้องเลี่ยง", () => {
+  const taken = new Set(["TexploreFITs"]);
+  expect(suggestFromBase("TexploreFITs", [], (n) => taken.has(n))).toBe("TexploreFITs-v2");
+});
+
+test("suggestFromBase: gh เช็คไม่ได้ (null) = ไม่บล็อก", () => {
+  expect(suggestFromBase("TexploreFITs", [], () => null)).toBe("TexploreFITs");
+});
+
+test("suggestFromBase: ไม่ทะลุ cap 40 → -new", () => {
+  const local = ["z", ...Array.from({ length: 45 }, (_, i) => `z-v${i + 2}`)];
+  expect(suggestFromBase("z", local, () => false)).toBe("z-new");
 });

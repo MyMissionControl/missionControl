@@ -50,7 +50,14 @@ import {
   runSessionLiveForProject,
 } from "../commands/continueRun";
 import type { OracleTeam } from "../commands/teams";
-import { ORG, checkProjectName, suggestDefaultName, sanitizeName, type NameCheck } from "../commands/projectName";
+import {
+  ORG,
+  checkProjectName,
+  suggestDefaultName,
+  suggestFromBase,
+  sanitizeName,
+  type NameCheck,
+} from "../commands/projectName";
 import { cloneRepoInto, parseRepoUrl } from "../commands/repoClone";
 import * as cp from "node:child_process";
 import * as fs from "node:fs";
@@ -582,7 +589,11 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         // ช่อง URL ว่าง = สร้างโปรเจคเปล่าเหมือนเดิม (url: undefined) — ไม่ใช่ "ไม่ถูกต้อง"
         const rawUrl = typeof msg.url === "string" ? msg.url.trim() : "";
         const url = rawUrl ? parseRepoUrl(rawUrl) : undefined;
-        panel.webview.postMessage({ type: "name_result", name, check, url });
+        // ชื่อที่จะเสนอจาก URL: ชื่อ repo ตรง ๆ ถ้าว่าง, ไม่ว่างก็ bump -vN ให้ — ไม่ใช่โยน
+        // ชื่อแดง ๆ ใส่หน้า user แล้วให้ไปแก้เอง (เกิดจริงเมื่อ clone repo เดิมซ้ำรอบสอง)
+        const urlSuggest =
+          url?.valid && url.repo ? suggestFromBase(url.repo, localProjectNames(), ghView) : undefined;
+        panel.webview.postMessage({ type: "name_result", name, check, url, urlSuggest });
         return;
       }
       case "name_confirmed": {
@@ -606,7 +617,13 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
           );
           if (!out.ok) {
             vscode.window.showErrorMessage(`Clone ไม่สำเร็จ: ${out.error}`);
-            panel.webview.postMessage({ type: "open_namemodal", default: name, url: rawUrl });
+            // nameFromUser: ชื่อนี้ผ่านมือ user มาแล้ว → ห้ามให้ URL เติมทับตอนเปิดใหม่
+            panel.webview.postMessage({
+              type: "open_namemodal",
+              default: name,
+              url: rawUrl,
+              nameFromUser: true,
+            });
             return;
           }
           _st.newClone = { url: rawUrl, path: dest };
@@ -1413,12 +1430,15 @@ function renderShell(): string {
   // ── ตั้งชื่อโปรเจคใหม่ modal — พิมพ์ + เช็คว่าง (local+github) debounce 400ms ──
   var _nmTimer=null;
   var _nmUrlOk=true;     // ว่าง = ถือว่าโอเค (สร้างเปล่า)
+  // _nmNameTouched = "user ตั้งชื่อเอง" เท่านั้น. ⛔ เดิมเป็น !!def ซึ่งจริงตลอด (modal เปิดมา
+  // พร้อมชื่อที่ระบบเสนอทุกครั้ง) → บล็อกการเติมชื่อจาก URL ข้างล่างไว้หมด ฟีเจอร์นี้จึงไม่เคยทำงาน
   var _nmNameTouched=false;
-  function openNameModal(def,url){
+  var _nmAutoTries=0;      // กันลูป: ถ้า suggest จากฝั่ง extension แกว่ง (gh ตอบไม่นิ่ง) ให้หยุด
+  function openNameModal(def,url,fromUser){
     el('nm-input').value=def||''; el('nm-ok').disabled=true;
     el('nm-status').textContent=''; el('nm-status').className='merr';
     el('nm-url').value=url||''; el('nm-urlstatus').textContent=''; el('nm-urlstatus').className='merr';
-    _nmUrlOk=!url; _nmNameTouched=!!def;
+    _nmUrlOk=!url; _nmNameTouched=!!fromUser; _nmAutoTries=0;
     el('namemodal').style.display='flex'; el('nm-input').focus(); el('nm-input').select();
     nmSchedule();
   }
@@ -1443,8 +1463,10 @@ function renderShell(): string {
     else if(u.valid){ us.textContent='clone จาก '+u.providerLabel+' → repo "'+u.repo+'"'; us.className='merr ok'; _nmUrlOk=true; }
     else { us.textContent=u.reason||'URL ใช้ไม่ได้'; us.className='merr bad'; _nmUrlOk=false; }
     // URL พา repo มาแล้วและ user ยังไม่ได้ตั้งชื่อเอง → เติมชื่อจาก repo ให้ แล้วเช็คใหม่
-    if(u && u.valid && !_nmNameTouched && el('nm-input').value!==u.repo){
-      el('nm-input').value=u.repo; nmSchedule(); return;
+    // (m.urlSuggest = ชื่อ repo ที่ bump -vN ให้ว่างแล้ว · ไม่มีก็ถอยไปใช้ชื่อ repo ดิบ)
+    var want = u && u.valid ? (m.urlSuggest || u.repo) : '';
+    if(want && !_nmNameTouched && el('nm-input').value!==want && _nmAutoTries<3){
+      _nmAutoTries++; el('nm-input').value=want; nmSchedule(); return;
     }
     el('nm-ok').disabled=!(free && _nmUrlOk);
   }
@@ -2054,7 +2076,7 @@ function renderShell(): string {
     else if(m.type==="preview_state") handlePreviewState(m.running);
     else if(m.type==="disarm_all") disarmAll();  // panel ถูกซ่อน/สลับ tab (backend แจ้งมา) → เลิก arm ค้าง
     else if(m.type==="git_auto_result") handleAutoResult(m.path,m.message,m.gen);
-    else if(m.type==="open_namemodal") openNameModal(m.default, m.url);
+    else if(m.type==="open_namemodal") openNameModal(m.default, m.url, m.nameFromUser);
     else if(m.type==="name_result") nmResult(m);
   });
   post("ready");

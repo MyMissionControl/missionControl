@@ -50,6 +50,22 @@ test("parseRepoUrl: Azure DevOps แบบเก่า visualstudio.com + ssh v3
   expect(ssh.repo).toBe("my-repo");
 });
 
+// URL จริงคู่หนึ่งจากงานจริง (user แปะมา 2026-08-13): https กับ ssh ของ repo เดียวกัน
+// ⛔ สัญญา = ทั้งสองแบบต้องได้ชื่อ **เดียวกัน** เพราะเป็นชื่อโปรเจคที่จะเอาไปตั้งโฟลเดอร์
+test("parseRepoUrl: Azure DevOps ของจริง https/ssh ต้องได้ชื่อเดียวกัน", () => {
+  const https = parseRepoUrl(
+    "https://TexploreProject@dev.azure.com/TexploreProject/TexploreDigitalSandbox/_git/TexploreFITs",
+  );
+  const ssh = parseRepoUrl(
+    "git@ssh.dev.azure.com:v3/TexploreProject/TexploreDigitalSandbox/TexploreFITs",
+  );
+  expect(https.repo).toBe("TexploreFITs"); // ไม่ใช่ TexploreProject / TexploreDigitalSandbox / _git
+  expect(ssh.repo).toBe("TexploreFITs"); // ssh ไม่มี _git → segment สุดท้าย (ไม่ใช่ v3)
+  expect(ssh.repo).toBe(https.repo);
+  expect(https.provider).toBe("azure-devops");
+  expect(ssh.provider).toBe("azure-devops");
+});
+
 test("parseRepoUrl: เจ้าอื่นก็รับ แต่บอกชื่อให้ถูก", () => {
   expect(parseRepoUrl("https://gitlab.com/g/sub/proj.git").provider).toBe("gitlab");
   expect(parseRepoUrl("https://gitlab.com/g/sub/proj.git").repo).toBe("proj");
