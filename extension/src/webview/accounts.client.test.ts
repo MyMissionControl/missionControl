@@ -81,3 +81,39 @@ test("⛔ วันหมดอายุที่ส่งเข้า client �
   expect(block).toContain("expiry");        // ส่งสถานะมาแล้วจริง
   expect(block).not.toMatch(/secret|password|token/i);
 });
+
+// ⛔ กฎของ user: เครื่องเขาเรนเดอร์ emoji/สัญลักษณ์พิเศษเป็น **กล่องเปล่า** → ใช้สื่อความหมายไม่ได้เลย
+//    (เจอจริง 2026-08-13: ข้อความ "⛔ clone ผ่าน ssh จะล้ม" โผล่บนหน้าจอเป็นกล่อง อ่านไม่รู้เรื่อง)
+//    ห้ามมีในสิ่งที่ผู้ใช้เห็น — คอมเมนต์ในโค้ดมีได้ (ไม่ถูกเรนเดอร์)
+const BANNED = /[⛔⚠✅❌✔✖\u{1F300}-\u{1FAFF}\u{1F000}-\u{1F2FF}]/u;
+
+function visibleParts(): { name: string; text: string }[] {
+  const b = SRC.indexOf("<body>");
+  const sc = SRC.indexOf("<script>", b);
+  const en = SRC.lastIndexOf("</script>");
+  // client script: ตัดบรรทัดคอมเมนต์ // ออกก่อน (คอมเมนต์ไม่ถึงตาผู้ใช้)
+  const js = SRC.slice(sc, en)
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+  return [
+    { name: "HTML body", text: SRC.slice(b, sc) },
+    { name: "client script (ไม่รวมคอมเมนต์)", text: js },
+  ];
+}
+
+test("⛔ ห้าม emoji/สัญลักษณ์ในข้อความที่ผู้ใช้เห็น (เครื่อง user เรนเดอร์เป็นกล่องเปล่า)", () => {
+  for (const p of visibleParts()) {
+    const bad = p.text.split("\n").filter((l) => BANNED.test(l));
+    expect(bad.join("\n")).toBe(""); // ถ้า fail จะโชว์บรรทัดที่ผิดให้เห็นตรง ๆ
+    expect(p.name.length).toBeGreaterThan(0);
+  }
+});
+
+test("คำอธิบายยาวต้องพับไว้ (หน้าจอไม่ใช่กำแพงตัวอักษร)", () => {
+  expect(SRC).toContain('<details class="note">');
+  expect(SRC).toContain("<summary>");
+  // ยังต้องเก็บเนื้อหาไว้ ไม่ใช่ลบทิ้ง
+  expect(SRC).toContain("ทำไมต้องมี");
+  expect(SRC).toContain("หลาย organization");
+});

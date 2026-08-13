@@ -94,9 +94,11 @@ function pushGit(panel: vscode.WebviewPanel): void {
       host: r.host,
       user: r.user,
       provider: r.provider,
+      // ⛔ ห้ามใส่สัญลักษณ์/emoji ในข้อความที่ผู้ใช้เห็น — เครื่องนี้เรนเดอร์เป็นกล่องเปล่า
+      //    (ใช้คำว่า "ใช้ไม่ได้:" นำหน้าแทน แล้วให้สีของ .tres เป็นตัวบอกระดับ)
       sub:
         r.provider + " · " + r.host +
-        (r.helper ? "" : " · ⛔ ยังไม่ได้ตั้ง credential helper ของ host นี้ (git จะไม่อ่านไฟล์)"),
+        (r.helper ? "" : " · ใช้ไม่ได้: ยังไม่ได้ตั้ง credential helper ของ host นี้"),
       testable: r.provider === "Azure DevOps",
       // สถานะวันหมดอายุ — level ให้ฝั่งหน้าจอเลือกสี, text เป็นข้อความไทยพร้อมโชว์
       expiry: r.expiry.text,
@@ -478,6 +480,9 @@ function renderShell(): string {
     margin-top: 8px; max-width: 780px; font-size: 12px; line-height: 1.6; opacity: 0.72;
     border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); padding-top: 14px;
   }
+  /* ย่อคำอธิบายยาว ๆ ไว้ใต้ปุ่มพับ — หน้าจอต้องอ่านจบได้ในสายตาเดียว ไม่ใช่กำแพงตัวอักษร */
+  .note > summary { cursor: pointer; opacity: 0.85; }
+  .note > .nb { margin-top: 10px; }
   .note b { opacity: 0.95; }
   /* ตัวสลับโซน — ยืมรูปแบบ segmented ของหน้า Data View มาใช้ (ไม่คิดศัพท์ UI ใหม่) */
   .zones { display: flex; gap: 4px; margin: 0 0 18px; }
@@ -527,12 +532,16 @@ function renderShell(): string {
       <div class="ph"><div><h2>SSH</h2><div class="live" id="ssh-keys"></div></div></div>
       <div id="ssh-rows"></div>
     </section>
-    <div class="note">
-      <b>ทำไมต้องมี:</b> ปุ่ม clone ของหน้า Projects ใช้ credential ของเครื่องนี้ (MC ไม่เก็บ secret เอง) — repo ที่ private จะ clone ไม่ผ่านถ้า host นั้นยังไม่มี credential<br />
-      <b>หลาย organization:</b> Azure DevOps ทุก org ใช้ host เดียวกัน แยกกันด้วยชื่อ org (= username ของ URL) → 1 แถวต่อ 1 org · ต้องวาง URL แบบมี <b>ORG@dev.azure.com</b> ตอน clone ไม่งั้น git หยิบแถวแรกมาใช้<br />
-      <b>PAT:</b> ผูกกับ <b>บัญชี</b> + เลือก <b>org</b> ตอนสร้าง (ไม่ใช่ต่อ project) · scope <b>Code (Read)</b> พอ · มีวันหมดอายุ พอหมดกด "เปลี่ยน PAT"<br />
-      <b>ความปลอดภัย:</b> เก็บใน ~/.git-credentials (สิทธิ์ 0600, เครื่องนี้เท่านั้น) · MC ไม่เคยส่งค่า PAT เข้าหน้าจอ · ปุ่ม <b>ทดสอบ</b> ยิง REST ของ Azure จริงเพื่อดูว่า PAT ยังไม่หมดอายุ
-    </div>
+    <details class="note">
+      <summary>รายละเอียด (กดดูเมื่อสงสัย)</summary>
+      <div class="nb">
+        <b>ทำไมต้องมี:</b> ปุ่ม clone ของหน้า Projects ใช้ credential ของเครื่องนี้ (MC ไม่เก็บ secret เอง) — repo ที่ private จะ clone ไม่ผ่านถ้า host นั้นยังไม่มี credential<br />
+        <b>หลาย organization:</b> Azure DevOps ทุก org ใช้ host เดียวกัน แยกกันด้วยชื่อ org (= username ของ URL) → 1 แถวต่อ 1 org · ต้องวาง URL แบบมี <b>ORG@dev.azure.com</b> ตอน clone ไม่งั้น git หยิบแถวแรกมาใช้<br />
+        <b>PAT:</b> ผูกกับ <b>บัญชี</b> + เลือก <b>org</b> ตอนสร้าง (ไม่ใช่ต่อ project) · scope <b>Code (Read)</b> พอ<br />
+        <b>วันหมดอายุ:</b> Azure ไม่ยอมให้ถามอายุของ PAT ด้วยตัว PAT เอง จึงต้องกรอกวันที่หน้าเว็บโชว์ตอนสร้าง token (ข้ามได้) · MC เตือนล่วงหน้า 14 วัน<br />
+        <b>ความปลอดภัย:</b> เก็บใน ~/.git-credentials (สิทธิ์ 0600, เครื่องนี้เท่านั้น) · MC ไม่เคยส่งค่า PAT เข้าหน้าจอ · ปุ่ม <b>ทดสอบ</b> ยิง REST ของ Azure จริง
+      </div>
+    </details>
   </div>
 
 <script>
@@ -677,8 +686,8 @@ function renderShell(): string {
     if (!v || !v.ssh) return;
     const keys = v.ssh.keys || [];
     document.getElementById("ssh-keys").textContent = keys.length
-      ? "private key ในเครื่อง: " + keys.join(", ") + " — key เดียวครอบทุก org ของบัญชีนั้น"
-      : "ยังไม่มี ssh key — สร้าง: ssh-keygen -t ed25519 -C mission-control (ไม่ต้องใส่ passphrase ไม่งั้น extension เรียกใช้ไม่ได้)";
+      ? "key ในเครื่อง: " + keys.join(", ")
+      : "ยังไม่มี ssh key — สร้าง: ssh-keygen -t ed25519 -C mission-control (ห้ามใส่ passphrase)";
     const hosts = v.ssh.hosts || [];
     let html = '<div class="rows">';
     for (let i = 0; i < hosts.length; i++) {
@@ -688,7 +697,7 @@ function renderShell(): string {
       html +=
         '<div class="row"><div class="ri">' +
           '<div class="rl">' + esc(h.host) + (h.known ? ' <span class="badge">host key พร้อม</span>' : ' <span class="badge warn">ยังไม่มี host key</span>') + '</div>' +
-          '<div class="rs">' + esc(h.provider) + ' · ' + (h.known ? 'อยู่ใน known_hosts แล้ว' : '⛔ clone ผ่าน ssh จะล้มทันที (BatchMode ไม่ถามยอมรับ key)') + '</div>' +
+          '<div class="rs">' + esc(h.provider) + ' · ' + (h.known ? 'พร้อมใช้' : 'ต้องกด "เตรียม host key" ก่อน ไม่งั้น clone ผ่าน ssh ล้ม') + '</div>' +
           (m ? '<div class="' + cls + '">' + esc(m.text) + '</div>' : "") +
         '</div><div class="ra">' +
           (h.known ? "" : '<button class="b sprep" data-hh="' + esc(h.host) + '">เตรียม host key</button>') +
