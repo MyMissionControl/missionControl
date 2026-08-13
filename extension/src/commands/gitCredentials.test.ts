@@ -9,6 +9,10 @@ import {
   isSafeCredHost,
   isSafeCredUser,
   credTargetFromUrl,
+  isValidExpiryDate,
+  patMetaKey,
+  patExpiryState,
+  PAT_SOON_DAYS,
 } from "./gitCredentials";
 
 const AZ = "https://TexploreProject:pat-one@dev.azure.com";
@@ -126,4 +130,70 @@ test("credTargetFromUrl: ของเสีย = null (ไม่เดา)", () 
   for (const bad of ["", "not a url", "ssh://git@dev.azure.com/v3/o/p/r", "https://dev.azure.com"]) {
     expect(credTargetFromUrl(bad)).toBeNull();
   }
+});
+
+// ── วันหมดอายุของ PAT ────────────────────────────────────────────────────────
+// ⛔ ทำไมไม่ดึงจาก Azure: PAT ถามอายุของตัวเองไม่ได้ (PAT lifecycle API รับแต่ Entra token)
+//    จึงเก็บวันที่ user กรอกไว้เอง แล้วนับถอยหลัง — ตัวนับนี้จึงต้องถูกเป๊ะ
+
+test("isValidExpiryDate: รับแค่ YYYY-MM-DD ที่เป็นวันจริง", () => {
+  expect(isValidExpiryDate("2026-09-30")).toBe(true);
+  expect(isValidExpiryDate("2028-02-29")).toBe(true); // ปีอธิกสุรทิน
+  expect(isValidExpiryDate("2026-02-30")).toBe(false); // ⛔ ก.พ. ไม่มีวันที่ 30
+  expect(isValidExpiryDate("2026-13-01")).toBe(false);
+  expect(isValidExpiryDate("2026-9-30")).toBe(false); // ต้อง zero-pad
+  expect(isValidExpiryDate("30/09/2026")).toBe(false);
+  expect(isValidExpiryDate("")).toBe(false);
+});
+
+const NOON = Date.UTC(2026, 7, 13, 12, 0, 0); // 2026-08-13 เที่ยง UTC
+const LATE = Date.UTC(2026, 7, 13, 23, 30, 0); // วันเดียวกัน ดึก
+
+test("patExpiryState: ไม่มีวัน = unknown (ไม่ใช่ expired)", () => {
+  for (const v of [null, undefined, "", "พรุ่งนี้"]) {
+    const s = patExpiryState(v as string | null, NOON);
+    expect(s.level).toBe("unknown");
+    expect(s.days).toBeNull();
+    expect(s.text).toContain("ไม่รู้");
+  }
+});
+
+test("patExpiryState: เลยวันมาแล้ว = expired + บอกวันที่", () => {
+  const s = patExpiryState("2026-08-01", NOON);
+  expect(s.level).toBe("expired");
+  expect(s.days).toBe(-12);
+  expect(s.text).toContain("หมดอายุแล้ว");
+  expect(s.text).toContain("2026-08-01");
+});
+
+test("⛔ patExpiryState: วันสุดท้ายต้องยัง 'ไม่หมด' แม้ตอนดึก (นับเป็นวันปฏิทิน)", () => {
+  for (const now of [NOON, LATE]) {
+    const s = patExpiryState("2026-08-13", now);
+    expect(s.level).toBe("soon");
+    expect(s.days).toBe(0);
+    expect(s.text).toContain("วันนี้");
+  }
+});
+
+test("patExpiryState: ขอบเขต soon อยู่ที่ PAT_SOON_DAYS พอดี", () => {
+  const soon = patExpiryState("2026-08-27", NOON); // +14
+  expect(PAT_SOON_DAYS).toBe(14);
+  expect(soon.days).toBe(14);
+  expect(soon.level).toBe("soon");
+  const ok = patExpiryState("2026-08-28", NOON); // +15
+  expect(ok.days).toBe(15);
+  expect(ok.level).toBe("ok");
+});
+
+test("patExpiryState: ยังไกล = ok + บอกจำนวนวันที่เหลือ", () => {
+  const s = patExpiryState("2027-08-13", NOON);
+  expect(s.level).toBe("ok");
+  expect(s.days).toBe(365);
+  expect(s.text).toContain("อีก 365 วัน");
+});
+
+test("patMetaKey: แยกตามคู่ (host, user) เหมือนที่ ~/.git-credentials แยก", () => {
+  expect(patMetaKey("dev.azure.com", "TexploreProject")).toBe("dev.azure.com TexploreProject");
+  // สอง org บน host เดียวกันต้องได้คีย์ต่างกัน — ไม่งั้นตั้งวันของ org หนึ่งไปทับอีก org
+  expect(patMetaKey("dev.azure.com", "OtherOrg")).not.toBe(patMetaKey("dev.azure.com", "TexploreProject"));
 });

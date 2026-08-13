@@ -54,3 +54,30 @@ test("⛔ view ของโซน Git ต้องไม่มีคำว่า
   expect(block).not.toContain("secretOf");
   expect(block).not.toMatch(/secret|password|token/i);
 });
+
+test("โซน Git: ปุ่ม 'วันหมดอายุ' มี handler + ส่งวันเดิมไปด้วย", () => {
+  const js = clientScript();
+  expect(js).toContain('t.classList.contains("gexp")');
+  expect(js).toContain('post("git_expiry"');
+  // ต้องพาวันเดิมไปให้ช่องกรอกตั้งค่าไว้ ไม่ใช่ให้พิมพ์ใหม่ทุกครั้ง
+  expect(js).toContain('t.getAttribute("data-e")');
+  // ⛔ gexp ต้องถูกเช็คก่อน .del ตัวท้าย (ปุ่มลบของ account AI) ไม่งั้นคลิกผิดเรื่อง
+  expect(js.indexOf('contains("gexp")')).toBeLessThan(js.lastIndexOf('contains("del")'));
+});
+
+test("โซน Git: แถวโชว์สถานะหมดอายุ + แยกสีตาม level", () => {
+  const js = clientScript();
+  expect(js).toContain("r.expiryLevel");
+  for (const lv of ["expired", "soon", "ok"]) expect(js).toContain('"' + lv + '"');
+  // หมดอายุแล้วต้องบอกทางแก้ ไม่ใช่บอกแค่ว่าหมด
+  expect(js).toContain("เปลี่ยน PAT");
+  expect(SRC).toContain(".tres.warn");
+});
+
+test("⛔ วันหมดอายุที่ส่งเข้า client ต้องไม่พา secret มาด้วย", () => {
+  const idx = SRC.indexOf('type: "git"');
+  const end = SRC.indexOf("\n  });", idx);
+  const block = SRC.slice(idx, end);
+  expect(block).toContain("expiry");        // ส่งสถานะมาแล้วจริง
+  expect(block).not.toMatch(/secret|password|token/i);
+});

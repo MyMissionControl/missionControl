@@ -144,6 +144,96 @@ export function removeCredentialLine(raw: string, host: string, user: string): s
   return joinLines((raw ?? "").split(/\r?\n/).filter((l) => !samePair(l, host, user)));
 }
 
+// ── วันหมดอายุของ PAT ────────────────────────────────────────────────────────
+//
+// ⛔ ทำไมต้องให้ user กรอกเอง ไม่ดึงจาก Azure: PAT lifecycle API (`_apis/tokens/pats`) รับ
+//    **Entra/AAD access token เท่านั้น** — เอา PAT ไปถามอายุของ PAT ตัวเองไม่ได้ (401). สิ่งที่
+//    PAT ถามได้คือ "ยังใช้ได้ไหม" (testGitCredential ยิง `_apis/projects` → 401/203 = ตาย) ซึ่ง
+//    ตอบได้เฉพาะ **หลัง** หมดอายุ. หน้าจอที่บอกได้แค่ตอนสายไปแล้ว = เตือนล่วงหน้าไม่ได้ จึงเก็บ
+//    วันที่ที่หน้าเว็บ Azure โชว์ตอนสร้าง token ไว้เอง แล้วนับถอยหลังจากมันตรง ๆ
+//
+// ⛔ เก็บ **แยกไฟล์จาก ~/.git-credentials** โดยเจตนา: ไฟล์นั้นมีรูปแบบ "1 บรรทัด = 1 credential"
+//    ที่ git เป็นเจ้าของ — แทรก metadata ลงไปคือทำให้ git อ่านเพี้ยน. ไฟล์นี้ **ไม่มี secret เลย**
+//    (host + org + วันที่) จึงไม่ต้อง 0600 แต่ก็ให้ไว้เพราะไม่มีเหตุให้คนอื่นอ่าน
+export const PAT_META_FILE = path.join(os.homedir(), ".claude", ".mc-git-pat.json");
+
+/** YYYY-MM-DD ที่เป็นวันจริง (ไม่ใช่ 2026-13-40) */
+export function isValidExpiryDate(s: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((s ?? "").trim());
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+}
+
+/** คีย์ของ metadata = คู่ (host, user) เดียวกับที่ ~/.git-credentials แยกกัน */
+export function patMetaKey(host: string, user: string): string {
+  return `${host} ${user}`;
+}
+
+export type PatExpiryLevel = "unknown" | "ok" | "soon" | "expired";
+export interface PatExpiry {
+  level: PatExpiryLevel;
+  /** วันที่เหลือ (ติดลบ = เลยมาแล้ว) — null เมื่อไม่รู้วันหมดอายุ */
+  days: number | null;
+  text: string;
+}
+
+/** เตือนล่วงหน้ากี่วันจึงนับเป็น "ใกล้หมด" — 14 วันพอให้ไปสร้าง PAT ใหม่โดยไม่ต้องรีบ */
+export const PAT_SOON_DAYS = 14;
+
+/** สถานะวันหมดอายุ — **pure** (รับ now เข้ามา) เพื่อเทสได้ไม่ต้องอิงเวลาจริง.
+ *  ⛔ นับเป็น "วันตามปฏิทิน UTC" ไม่ใช่ (ts2-ts1)/86400e3: PAT หมดอายุ "สิ้นวันนั้น" และการ
+ *  ปัดเศษชั่วโมงทำให้วันสุดท้ายกลายเป็น "หมดอายุแล้ว" ตอนบ่าย ซึ่งผิดและกวนคน */
+export function patExpiryState(expiresAt: string | null | undefined, nowMs: number): PatExpiry {
+  if (!expiresAt || !isValidExpiryDate(expiresAt))
+    return { level: "unknown", days: null, text: "ไม่รู้วันหมดอายุ" };
+  const [y, mo, d] = expiresAt.split("-").map(Number);
+  const end = Date.UTC(y, mo - 1, d);
+  const now = new Date(nowMs);
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const days = Math.round((end - today) / 86400000);
+  if (days < 0) return { level: "expired", days, text: `หมดอายุแล้ว (${expiresAt})` };
+  if (days === 0) return { level: "soon", days, text: `หมดอายุวันนี้ (${expiresAt})` };
+  if (days <= PAT_SOON_DAYS)
+    return { level: "soon", days, text: `อีก ${days} วันหมดอายุ (${expiresAt})` };
+  return { level: "ok", days, text: `หมดอายุ ${expiresAt} (อีก ${days} วัน)` };
+}
+
+/** map คีย์ → วันหมดอายุ. ไฟล์เสีย/ไม่มี = ว่าง (ไม่ล้ม — metadata หายไม่ใช่เหตุให้หน้าจอพัง) */
+export function readPatMeta(): Record<string, string> {
+  let raw = "";
+  try {
+    raw = fs.readFileSync(PAT_META_FILE, "utf8");
+  } catch {
+    return {};
+  }
+  try {
+    const d = JSON.parse(raw) as { pats?: Record<string, string> };
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(d?.pats ?? {}))
+      if (typeof v === "string" && isValidExpiryDate(v)) out[k] = v;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** ตั้ง/ลบวันหมดอายุของคู่ (host, user) — คู่อื่นไม่ถูกแตะ (บทเรียนเดียวกับ upsertCredentialLine) */
+export function setPatExpiry(host: string, user: string, expiresAt: string | null): void {
+  const meta = readPatMeta();
+  const key = patMetaKey(host, user);
+  if (expiresAt && isValidExpiryDate(expiresAt)) meta[key] = expiresAt;
+  else delete meta[key];
+  try {
+    fs.mkdirSync(path.dirname(PAT_META_FILE), { recursive: true });
+    fs.writeFileSync(PAT_META_FILE, JSON.stringify({ pats: meta }, null, 2) + "\n", { mode: 0o600 });
+  } catch {
+    /* เขียนไม่ได้ = เสียแค่การเตือนล่วงหน้า ไม่ควรทำให้การใส่ PAT ล้ม */
+  }
+}
+
 // ── ฝั่งที่แตะดิสก์/เครือข่าย ────────────────────────────────────────────────
 
 function readFileSafe(): string {
@@ -190,16 +280,26 @@ export interface GitCredView {
   provider: string;
   /** helper ของ host นี้ถูกตั้งไว้ไหม — ไม่ตั้ง = git ไม่เคยอ่านไฟล์นี้เลย */
   helper: boolean;
+  /** วันหมดอายุที่ user บอกไว้ (YYYY-MM-DD) — null = ไม่รู้ */
+  expiresAt: string | null;
+  expiry: PatExpiry;
 }
 
-export function listGitCredentials(): { rows: GitCredView[]; ghLogin: string | null } {
+export function listGitCredentials(nowMs?: number): { rows: GitCredView[]; ghLogin: string | null } {
   const helpers = helperHosts();
-  const rows = parseCredentialLines(readFileSafe()).map((r) => ({
-    host: r.host,
-    user: r.user,
-    provider: providerLabelForHost(r.host),
-    helper: !!helpers[r.host],
-  }));
+  const meta = readPatMeta();
+  const now = nowMs ?? Date.now();
+  const rows = parseCredentialLines(readFileSafe()).map((r) => {
+    const expiresAt = meta[patMetaKey(r.host, r.user)] ?? null;
+    return {
+      host: r.host,
+      user: r.user,
+      provider: providerLabelForHost(r.host),
+      helper: !!helpers[r.host],
+      expiresAt,
+      expiry: patExpiryState(expiresAt, now),
+    };
+  });
   let ghLogin: string | null = null;
   try {
     const out = cp.execFileSync("gh", ["auth", "status"], { timeout: 8000, stdio: ["ignore", "pipe", "pipe"] });
@@ -214,15 +314,25 @@ export function listGitCredentials(): { rows: GitCredView[]; ghLogin: string | n
   return { rows, ghLogin };
 }
 
-export function setGitCredential(host: string, user: string, secret: string): { ok: boolean; error?: string } {
+export function setGitCredential(
+  host: string,
+  user: string,
+  secret: string,
+  expiresAt?: string,
+): { ok: boolean; error?: string } {
   if (!isSafeCredHost(host)) return { ok: false, error: `host ไม่ถูกต้อง: ${host}` };
   if (!isSafeCredUser(user)) return { ok: false, error: "ชื่อ org/username ใช้ได้เฉพาะ A-Z a-z 0-9 . _ @ + -" };
   if (!secret || /[\r\n]/.test(secret)) return { ok: false, error: "PAT ว่าง หรือมีการขึ้นบรรทัดใหม่" };
+  // ⛔ วันที่ผิดรูปแบบ = ปฏิเสธก่อนเขียน PAT ไม่ใช่เขียน PAT แล้วเงียบ ๆ ทิ้งวันที่
+  //    (ไม่งั้นได้ credential ที่ใช้ได้แต่หน้าจอบอก "ไม่รู้วันหมดอายุ" ทั้งที่ user กรอกมาแล้ว)
+  if (expiresAt !== undefined && expiresAt !== "" && !isValidExpiryDate(expiresAt))
+    return { ok: false, error: "วันหมดอายุต้องเป็น YYYY-MM-DD (เช่น 2026-09-30)" };
   try {
     writeCredFile(upsertCredentialLine(readFileSafe(), host, user, secret));
   } catch (e) {
     return { ok: false, error: `เขียน ${CRED_FILE} ไม่ได้: ${(e as Error).message}` };
   }
+  if (expiresAt !== undefined) setPatExpiry(host, user, expiresAt || null);
   // ⛔ ไม่มี helper = ไฟล์นี้ไม่ถูกอ่านเลย (อาการ "ใส่ PAT แล้วยัง auth ไม่ผ่าน")
   //    ตั้งแบบ **ต่อ host** เท่านั้น — ห้ามแตะ credential.helper ตัวกลางที่ gh เป็นเจ้าของ
   gitConfigGlobal([`credential.https://${host}.helper`, "store"]);
@@ -233,6 +343,7 @@ export function removeGitCredential(host: string, user: string): { ok: boolean; 
   if (!isSafeCredHost(host) || !isSafeCredUser(user)) return { ok: false, error: "host/user ไม่ถูกต้อง" };
   try {
     writeCredFile(removeCredentialLine(readFileSafe(), host, user));
+    setPatExpiry(host, user, null); // ลบ PAT แล้วต้องไม่เหลือวันหมดอายุกำพร้าไว้หลอกรอบหน้า
     return { ok: true };
   } catch (e) {
     return { ok: false, error: (e as Error).message };

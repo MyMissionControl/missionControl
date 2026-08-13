@@ -16,11 +16,13 @@ import { fetchClaudeUsage } from "../commands/usage";
 import {
   CRED_FILE,
   credTargetFromUrl,
+  isValidExpiryDate,
   listGitCredentials,
   listSshState,
   providerLabelForHost,
   removeGitCredential,
   setGitCredential,
+  setPatExpiry,
   testGitCredential,
   testSshHost,
 } from "../commands/gitCredentials";
@@ -96,6 +98,10 @@ function pushGit(panel: vscode.WebviewPanel): void {
         r.provider + " · " + r.host +
         (r.helper ? "" : " · ⛔ ยังไม่ได้ตั้ง credential helper ของ host นี้ (git จะไม่อ่านไฟล์)"),
       testable: r.provider === "Azure DevOps",
+      // สถานะวันหมดอายุ — level ให้ฝั่งหน้าจอเลือกสี, text เป็นข้อความไทยพร้อมโชว์
+      expiry: r.expiry.text,
+      expiryLevel: r.expiry.level,
+      expiresAt: r.expiresAt,
     })),
     ssh: (() => {
       const st = listSshState();
@@ -121,6 +127,24 @@ async function promptPat(host: string, user: string): Promise<string> {
     password: true,
     ignoreFocusOut: true,
     validateInput: (x) => ((x ?? "").trim() ? null : "ใส่ PAT ก่อน"),
+  });
+  return (v ?? "").trim();
+}
+
+/** ถามวันหมดอายุ (ข้ามได้) — Azure โชว์วันนี้ตอนสร้าง token และ **ถามกลับทีหลังไม่ได้**
+ *  (PAT ใช้ถามอายุตัวเองไม่ได้) ⇒ ถ้าไม่กรอกตอนนี้ ก็เตือนล่วงหน้าไม่ได้เลย
+ *  ⛔ ต้องไม่บังคับ: PAT ที่ใช้ได้แต่ไม่รู้วันหมดอายุ ยังดีกว่าไม่ได้ใส่ PAT เลย */
+async function promptExpiry(defaultValue = ""): Promise<string> {
+  const v = await vscode.window.showInputBox({
+    title: "วันหมดอายุของ PAT (ข้ามได้ — กด Enter เปล่า)",
+    prompt: "รูปแบบ YYYY-MM-DD ตามที่หน้า Azure โชว์ตอนสร้าง token · ใส่ไว้เพื่อให้ MC เตือนก่อนหมด",
+    placeHolder: "2026-09-30",
+    value: defaultValue,
+    ignoreFocusOut: true,
+    validateInput: (x) => {
+      const s = (x ?? "").trim();
+      return !s || isValidExpiryDate(s) ? null : "ต้องเป็น YYYY-MM-DD (เช่น 2026-09-30)";
+    },
   });
   return (v ?? "").trim();
 }
@@ -225,7 +249,8 @@ export function openAccountsPanel(): vscode.WebviewPanel {
           const user = String(msg.user);
           const pat0 = await promptPat(host, user);
           if (!pat0) return;
-          notify(setGitCredential(host, user, pat0), `เปลี่ยน PAT ของ ${user} แล้ว`);
+          const exp0 = await promptExpiry();
+          notify(setGitCredential(host, user, pat0, exp0), `เปลี่ยน PAT ของ ${user} แล้ว`);
           pushGit(panel);
           return;
         }
@@ -243,8 +268,24 @@ export function openAccountsPanel(): vscode.WebviewPanel {
         if (!target) return;
         const pat = await promptPat(target.host, target.user);
         if (!pat) return;
-        const r = setGitCredential(target.host, target.user, pat);
+        const exp = await promptExpiry();
+        const r = setGitCredential(target.host, target.user, pat, exp);
         notify(r, `เก็บ PAT ของ ${target.user} (${target.host}) แล้ว`);
+        pushGit(panel);
+        return;
+      }
+
+      case "git_expiry": {
+        // แก้เฉพาะวันหมดอายุ — ไม่แตะ PAT (คู่ host+user เดิม) · ปล่อยว่าง = ลืมวันไปเลย
+        const host = String(msg.host ?? "");
+        const user = String(msg.user ?? "");
+        const cur = String(msg.expiresAt ?? "");
+        const next = await promptExpiry(cur);
+        if (next === cur) return; // กด Enter เฉย ๆ = ไม่เปลี่ยน
+        setPatExpiry(host, user, next || null);
+        vscode.window.showInformationMessage(
+          next ? `ตั้งวันหมดอายุของ ${user} เป็น ${next}` : `ลบวันหมดอายุของ ${user} แล้ว`,
+        );
         pushGit(panel);
         return;
       }
@@ -449,6 +490,7 @@ function renderShell(): string {
   .tres { font-size: 11px; margin-top: 3px; opacity: 0.8; }
   .tres.bad { color: var(--vscode-inputValidation-errorBorder, #d1242f); opacity: 1; }
   .tres.good { color: var(--vscode-charts-green, #3fd39a); opacity: 1; }
+  .tres.warn { color: var(--vscode-charts-orange, #d18616); opacity: 1; }
   .mono { font-family: var(--vscode-editor-font-family), monospace; font-size: 11px; opacity: 0.7; }
 </style>
 </head>
@@ -605,13 +647,21 @@ function renderShell(): string {
         const r = rows[i];
         const t = testMap[key(r.host, r.user)];
         const cls = t == null ? "tres" : t.ok === true ? "tres good" : t.ok === false ? "tres bad" : "tres";
+        // สถานะวันหมดอายุ: หมดแล้ว/ใกล้หมด = สีเตือน · ไม่รู้วัน = สีจาง (ไม่ใช่ error)
+        const ecls =
+          r.expiryLevel === "expired" ? "tres bad"
+          : r.expiryLevel === "soon" ? "tres warn"
+          : r.expiryLevel === "ok" ? "tres good" : "tres";
+        const etext = r.expiryLevel === "expired" ? "PAT " + r.expiry + " — กด 'เปลี่ยน PAT'" : r.expiry;
         html +=
           '<div class="row"><div class="ri">' +
             '<div class="rl">' + esc(r.user) + '</div>' +
             '<div class="rs">' + esc(r.sub) + '</div>' +
+            (r.expiry ? '<div class="' + ecls + '">' + esc(etext) + '</div>' : "") +
             (t ? '<div class="' + cls + '">' + esc(t.text) + '</div>' : "") +
           '</div><div class="ra">' +
             (r.testable ? '<button class="b gtest" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '">ทดสอบ</button>' : "") +
+            '<button class="b gexp" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '" data-e="' + esc(r.expiresAt || "") + '">วันหมดอายุ</button>' +
             '<button class="b gedit" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '">เปลี่ยน PAT</button>' +
             '<button class="b del gdel" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '">ลบ</button>' +
           '</div></div>';
@@ -673,6 +723,9 @@ function renderShell(): string {
     if (t.classList.contains("gtest")) { post("git_test", { host: h, user: u }); return; }
     // เปลี่ยน PAT = เขียนทับคู่ host+user เดิม → ใช้เส้นเดียวกับ add แต่ส่ง host/user มาให้เลย
     if (t.classList.contains("gedit")) { post("git_add", { host: h, user: u }); return; }
+    // แก้แค่วันหมดอายุ ไม่ต้องกรอก PAT ใหม่ (เผื่อ user เพิ่งไปต่ออายุที่เว็บ Azure)
+    if (t.classList.contains("gexp")) { post("git_expiry", { host: h, user: u, expiresAt: t.getAttribute("data-e") || "" }); return; }
+    // ⛔ ต้องมาก่อน .del ตัวล่าง: gdel มีคลาส del ด้วย ถ้าปล่อยไปถึงบรรทัดนั้นจะกลายเป็นลบ account AI
     if (t.classList.contains("gdel")) { post("git_del", { host: h, user: u }); return; }
     const p = t.getAttribute("data-p");
     const l = t.getAttribute("data-l");
