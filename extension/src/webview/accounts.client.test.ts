@@ -18,16 +18,17 @@ test("client script ของหน้า Connections ยัง parse ได้"
   expect(() => new Function(js)).not.toThrow();
 });
 
-test("โซน SSH: ปุ่มเตรียม host key / ทดสอบ ต่อสายจริง + แถวบอกสถานะ", () => {
+// user สั่งลบโซน SSH ทิ้ง 2026-08-13 — เหลือทาง https + PAT ทางเดียว
+// ⛔ ลบแค่ UI: cloneRepoInto ยังเรียก ensureKnownHost เองอยู่ (repoClone.ts) ดังนั้น
+//    clone ผ่าน ssh ยังเตรียม host key ให้อัตโนมัติ ไม่ได้พังเพราะปุ่มหาย
+test("โซน SSH ต้องไม่กลับมา (ทั้ง HTML, handler และ payload)", () => {
   const js = clientScript();
-  expect(js).toContain('t.classList.contains("sprep")');
-  expect(js).toContain('t.classList.contains("stest")');
-  expect(SRC).toContain('id="ssh-rows"');
-  expect(SRC).toContain('id="ssh-keys"');
-  // ⛔ ปุ่ม "เตรียม host key" ต้องโผล่เฉพาะตอนยังไม่มี — มีแล้วยังโชว์ = ชวนกดของที่ไม่ต้องกด
-  expect(js).toContain('(h.known ? "" : ');
-  // ⛔ ห้ามส่งชื่อไฟล์ key ไปเป็นเนื้อ key — โชว์แค่ชื่อ
-  expect(js).toContain("v.ssh.keys");
+  for (const gone of ['id="ssh-rows"', 'id="ssh-keys"', "<h2>SSH</h2>"]) {
+    expect(SRC).not.toContain(gone);
+  }
+  for (const gone of ["sprep", "stest", "ssh_prepare", "ssh_test", "ssh_result", "renderSsh"]) {
+    expect(js).not.toContain(gone);
+  }
 });
 
 test("โซน Git: ปุ่มทุกตัวมี handler จริง (ไม่ใช่ปุ่มตาย)", () => {
