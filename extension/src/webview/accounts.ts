@@ -471,6 +471,8 @@ function renderShell(): string {
   .modal-card .mbtn.primary:hover { background: #388bfd; }
   .modal-card .mbtn:disabled { opacity: 0.45; cursor: not-allowed; }
   .modal-card .fixed { font-size: 13px; padding: 6px 0; opacity: 0.9; }
+  .modal-card .linkbtn { background: none; border: none; padding: 2px 0; margin-top: 6px;
+    font-size: 11px; color: var(--vscode-textLink-foreground, #4daafc); cursor: pointer; }
   .modal-card select { width: 100%; box-sizing: border-box; font-size: 13px; padding: 6px 8px;
     background: var(--vscode-input-background); color: var(--vscode-input-foreground);
     border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; }
@@ -531,9 +533,12 @@ function renderShell(): string {
         <div class="ml">token ของคุณใน Azure (ดึงวันหมดอายุจริงมาให้)</div>
         <select id="cm-pick"></select>
       </div>
-      <div class="ml">วันหมดอายุ (ข้ามได้ — ใส่ไว้เพื่อให้เตือนก่อนหมด)</div>
-      <input id="cm-exp" type="date" />
+      <div id="cm-expwrap" style="display:none">
+        <div class="ml">วันหมดอายุ (ข้ามได้ — ใส่ไว้เพื่อให้เตือนก่อนหมด)</div>
+        <input id="cm-exp" type="date" />
+      </div>
       <div class="merr" id="cm-expstatus"></div>
+      <button class="linkbtn" id="cm-manual" style="display:none">กรอกวันหมดอายุเอง</button>
       <div class="mact">
         <button class="mbtn" id="cm-cancel">ยกเลิก</button>
         <button class="mbtn primary" id="cm-ok" disabled>บันทึก</button>
@@ -700,14 +705,23 @@ function renderShell(): string {
     cmEl("cm-exp").value = expiresAt || "";
     cmEl("cm-urlstatus").textContent = ""; cmEl("cm-urlstatus").className = "merr";
     cmEl("cm-patstatus").textContent = ""; cmEl("cm-patstatus").className = "merr";
+    // ⛔ ซ่อนทั้ง dropdown และปฏิทินไว้ก่อน — user บอกว่า "ถ้าดึงจริงไม่ต้องให้มันแสดงปฏิทิน"
+    //    ปฏิทินจะโผล่เฉพาะตอนดึงวันจาก Azure ไม่ได้ หรือกด "กรอกวันหมดอายุเอง"
     cmEl("cm-pickwrap").style.display = "none";
     cmEl("cm-pick").innerHTML = "";
+    cmEl("cm-expwrap").style.display = "none";
+    cmEl("cm-manual").style.display = "none";
     cmEl("cm-expstatus").textContent = ""; cmEl("cm-expstatus").className = "merr";
     cmEl("cmodal").style.display = "flex";
     (isAdd ? cmEl("cm-url") : isExp ? cmEl("cm-exp") : cmEl("cm-pat")).focus();
     cmSync();
     // โหมดที่รู้ org อยู่แล้ว = ขอวันหมดอายุจริงได้เลย · โหมด add รอผลเช็ค URL ก่อน
     if (!isAdd && _cmUser) askDates(_cmUser);
+    else if (isAdd) {
+      cmEl("cm-expstatus").textContent = "วันหมดอายุ: จะดึงจาก Azure ให้เองหลังใส่ URL";
+      cmEl("cm-expstatus").className = "merr";
+      cmEl("cm-manual").style.display = "";
+    }
   }
 
   // ── ดึงวันหมดอายุจริงจาก Azure ────────────────────────────────────────────
@@ -726,7 +740,10 @@ function renderShell(): string {
     var st = cmEl("cm-expstatus"), wrap = cmEl("cm-pickwrap"), sel = cmEl("cm-pick");
     var pats = m.pats || [];
     if (!m.ok || !pats.length) {
+      // ดึงไม่ได้จริง → ตรงนี้เท่านั้นที่ปฏิทินควรโผล่
       wrap.style.display = "none";
+      cmEl("cm-expwrap").style.display = "";
+      cmEl("cm-manual").style.display = "none";
       st.textContent = m.ok ? "ไม่เจอ token ที่ยังใช้ได้ใน org นี้ — กรอกวันเองได้" : (m.reason || "");
       st.className = "merr warn";
       return;
@@ -738,6 +755,8 @@ function renderShell(): string {
     }
     sel.innerHTML = html;
     wrap.style.display = "";
+    cmEl("cm-expwrap").style.display = "none";   // ดึงได้แล้ว = ไม่ต้องมีปฏิทิน
+    cmEl("cm-manual").style.display = "";        // เผื่ออยากทับด้วยมือ
     if (pats.length === 1) { sel.value = pats[0].expiresAt; cmEl("cm-exp").value = pats[0].expiresAt; }
     st.textContent = pats.length === 1
       ? "เจอ token เดียว ใส่วันให้แล้ว"
@@ -794,6 +813,11 @@ function renderShell(): string {
   cmEl("cm-ok").addEventListener("click", cmSave);
   cmEl("cm-url").addEventListener("input", cmUrlChanged);
   cmEl("cm-pat").addEventListener("input", cmSync);
+  cmEl("cm-manual").addEventListener("click", function () {
+    cmEl("cm-expwrap").style.display = "";
+    cmEl("cm-manual").style.display = "none";
+    cmEl("cm-exp").focus();
+  });
   cmEl("cm-pick").addEventListener("change", function () {
     if (cmEl("cm-pick").value) cmEl("cm-exp").value = cmEl("cm-pick").value;
   });

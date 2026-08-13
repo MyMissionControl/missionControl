@@ -189,3 +189,21 @@ test("⛔ ผลดึงวันของ org เก่าที่มาช�
   const js = clientScript();
   expect(js).toContain("if (m.org !== _cmDatesOrg) return;");
 });
+
+// user: "มันยังขึ้นให้ผมกรอกอยู่เลย ถ้าดึงจริงไม่ต้องให้มันแสดงปฏิทินก็ได้"
+// ⇒ ปฏิทินต้องซ่อนเป็นค่าเริ่มต้น และโผล่เฉพาะตอนดึงวันจาก Azure ไม่ได้ (หรือกดขอเอง)
+test("ปฏิทินต้องซ่อนไว้ก่อน โผล่เฉพาะตอนดึงวันไม่ได้", () => {
+  const js = clientScript();
+  // เริ่มต้นซ่อนใน HTML
+  expect(SRC).toContain('<div id="cm-expwrap" style="display:none">');
+  // เปิด modal = ซ่อนอีกครั้ง (เผื่อรอบก่อนเปิดค้างไว้)
+  expect(js).toContain('cmEl("cm-expwrap").style.display = "none";');
+  // ดึงได้ = ยังซ่อน · ดึงไม่ได้ = โชว์
+  const i = js.indexOf("function cmDatesResult");
+  const seg = js.slice(i, js.indexOf("cmEl(\"cm-cancel\")"));
+  expect(seg).toContain('cmEl("cm-expwrap").style.display = "";');   // สาขาที่ล้ม
+  expect(seg).toContain('cmEl("cm-expwrap").style.display = "none";'); // สาขาที่สำเร็จ
+  // ยังต้องมีทางกรอกเองไว้ทับ
+  expect(SRC).toContain('id="cm-manual"');
+  expect(js).toContain('cmEl("cm-manual").addEventListener("click"');
+});
