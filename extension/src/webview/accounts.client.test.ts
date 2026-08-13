@@ -156,3 +156,36 @@ test("โซน Git ต้องไม่มีบล็อกคำอธิบ
     expect(zone).not.toContain(gone);
   }
 });
+
+// ⛔ user ถาม "วันหมดอายุมันดึงจาก PAT เองไม่ได้หรอ ต้องให้ผมมากรอกตัวเตือนเฉย" —
+//    ดึงด้วย PAT ไม่ได้จริง แต่ดึงด้วย Entra token ของ az ได้ (ทดสอบของจริงได้ HTTP 200)
+//    API ไม่คืนค่า token กลับมา จับคู่อัตโนมัติไม่ได้ → ให้เลือกจากรายการที่มีวันจริงติดมา
+test("modal: ดึงวันหมดอายุจริงจาก Azure มาให้เลือก ไม่ต้องพิมพ์เอง", () => {
+  const js = clientScript();
+  expect(SRC).toContain('id="cm-pick"');
+  expect(js).toContain('post("git_pat_dates"');
+  expect(js).toContain('m.type === "git_pat_dates_result"');
+  // ถามทันทีที่รู้ org — ทั้งทางผลเช็ค URL และทางโหมดที่รู้ host/org อยู่แล้ว
+  expect(js).toContain("askDates(m.user)");
+  expect(js).toContain("if (!isAdd && _cmUser) askDates(_cmUser)");
+  // เลือกแล้วต้องเติมช่องวันที่ให้จริง
+  expect(js).toContain('cmEl("cm-exp").value = cmEl("cm-pick").value');
+  // token เดียว = ใส่ให้เลย ไม่ต้องคลิก
+  expect(js).toContain("if (pats.length === 1)");
+});
+
+test("⛔ ดึงวันไม่ได้ต้องไม่บล็อกการใส่ PAT (ของแถม ห้ามกลายเป็นด่าน)", () => {
+  const js = clientScript();
+  // ล้มแล้วแค่ซ่อน dropdown + บอกเหตุผล ไม่แตะปุ่มบันทึก
+  expect(js).toContain('wrap.style.display = "none"');
+  expect(js).toContain("m.reason");
+  // cmSync (ตัวคุมปุ่มบันทึก) ต้องไม่อ้างอิงผลการดึงวันเลย
+  const i = js.indexOf("function cmSync()");
+  const seg = js.slice(i, js.indexOf("function cmUrlChanged()"));
+  for (const dep of ["cm-pick", "_cmDatesOrg", "cm-exp"]) expect(seg).not.toContain(dep);
+});
+
+test("⛔ ผลดึงวันของ org เก่าที่มาช้าต้องถูกทิ้ง", () => {
+  const js = clientScript();
+  expect(js).toContain("if (m.org !== _cmDatesOrg) return;");
+});

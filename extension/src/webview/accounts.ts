@@ -12,6 +12,7 @@ import {
   switchTo,
   type Provider,
 } from "../commands/accountsOps";
+import { listAzurePats } from "../commands/azurePats";
 import { fetchClaudeUsage } from "../commands/usage";
 import {
   CRED_FILE,
@@ -214,6 +215,14 @@ export function openAccountsPanel(): vscode.WebviewPanel {
               }
             : { type: "git_url_result", url, ok: false, reason: "อ่าน host/org จาก URL นี้ไม่ได้" },
         );
+        return;
+      }
+
+      // ดึงวันหมดอายุจริงจาก Azure (ผ่าน Entra token ของ az) — ของแถม ล้มได้ไม่กระทบอะไร
+      case "git_pat_dates": {
+        const org = String(msg.org ?? "");
+        const r = await listAzurePats(org);
+        panel.webview.postMessage({ type: "git_pat_dates_result", org, ...r });
         return;
       }
 
@@ -462,6 +471,9 @@ function renderShell(): string {
   .modal-card .mbtn.primary:hover { background: #388bfd; }
   .modal-card .mbtn:disabled { opacity: 0.45; cursor: not-allowed; }
   .modal-card .fixed { font-size: 13px; padding: 6px 0; opacity: 0.9; }
+  .modal-card select { width: 100%; box-sizing: border-box; font-size: 13px; padding: 6px 8px;
+    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; }
   .mono { font-family: var(--vscode-editor-font-family), monospace; font-size: 11px; opacity: 0.7; }
 </style>
 </head>
@@ -515,8 +527,13 @@ function renderShell(): string {
         <input id="cm-pat" type="password" spellcheck="false" placeholder="วาง PAT ที่ copy มาจาก Azure" />
         <div class="merr" id="cm-patstatus"></div>
       </div>
+      <div id="cm-pickwrap" style="display:none">
+        <div class="ml">token ของคุณใน Azure (ดึงวันหมดอายุจริงมาให้)</div>
+        <select id="cm-pick"></select>
+      </div>
       <div class="ml">วันหมดอายุ (ข้ามได้ — ใส่ไว้เพื่อให้เตือนก่อนหมด)</div>
       <input id="cm-exp" type="date" />
+      <div class="merr" id="cm-expstatus"></div>
       <div class="mact">
         <button class="mbtn" id="cm-cancel">ยกเลิก</button>
         <button class="mbtn primary" id="cm-ok" disabled>บันทึก</button>
@@ -683,14 +700,55 @@ function renderShell(): string {
     cmEl("cm-exp").value = expiresAt || "";
     cmEl("cm-urlstatus").textContent = ""; cmEl("cm-urlstatus").className = "merr";
     cmEl("cm-patstatus").textContent = ""; cmEl("cm-patstatus").className = "merr";
+    cmEl("cm-pickwrap").style.display = "none";
+    cmEl("cm-pick").innerHTML = "";
+    cmEl("cm-expstatus").textContent = ""; cmEl("cm-expstatus").className = "merr";
     cmEl("cmodal").style.display = "flex";
     (isAdd ? cmEl("cm-url") : isExp ? cmEl("cm-exp") : cmEl("cm-pat")).focus();
     cmSync();
+    // โหมดที่รู้ org อยู่แล้ว = ขอวันหมดอายุจริงได้เลย · โหมด add รอผลเช็ค URL ก่อน
+    if (!isAdd && _cmUser) askDates(_cmUser);
+  }
+
+  // ── ดึงวันหมดอายุจริงจาก Azure ────────────────────────────────────────────
+  // ⛔ API ไม่คืนค่า token กลับมา จับคู่อัตโนมัติว่า PAT ที่เก็บไว้เป็นตัวไหน "ไม่ได้" →
+  //    ให้เลือกจากรายการ (1 คลิก) · เหลือ token เดียว = เลือกให้เลย ไม่ต้องคลิก
+  var _cmDatesOrg = "";
+  function askDates(org) {
+    if (!org || org === _cmDatesOrg) return;
+    _cmDatesOrg = org;
+    cmEl("cm-expstatus").textContent = "กำลังดึงวันหมดอายุจาก Azure…";
+    cmEl("cm-expstatus").className = "merr";
+    post("git_pat_dates", { org: org });
+  }
+  function cmDatesResult(m) {
+    if (m.org !== _cmDatesOrg) return;
+    var st = cmEl("cm-expstatus"), wrap = cmEl("cm-pickwrap"), sel = cmEl("cm-pick");
+    var pats = m.pats || [];
+    if (!m.ok || !pats.length) {
+      wrap.style.display = "none";
+      st.textContent = m.ok ? "ไม่เจอ token ที่ยังใช้ได้ใน org นี้ — กรอกวันเองได้" : (m.reason || "");
+      st.className = "merr warn";
+      return;
+    }
+    var html = '<option value="">— เลือกเอง / ไม่ระบุ —</option>';
+    for (var i = 0; i < pats.length; i++) {
+      html += '<option value="' + esc(pats[i].expiresAt) + '">' + esc(pats[i].name) +
+              "  ·  หมด " + esc(pats[i].expiresAt) + "</option>";
+    }
+    sel.innerHTML = html;
+    wrap.style.display = "";
+    if (pats.length === 1) { sel.value = pats[0].expiresAt; cmEl("cm-exp").value = pats[0].expiresAt; }
+    st.textContent = pats.length === 1
+      ? "เจอ token เดียว ใส่วันให้แล้ว"
+      : "เจอ " + pats.length + " token — เลือกตัวที่กำลังวาง";
+    st.className = "merr ok";
   }
   function closeCred() {
     // ⛔ ล้าง PAT ออกจาก DOM ทุกครั้งที่ปิด ไม่ปล่อยค้างในหน้าที่ซ่อนอยู่
     cmEl("cm-pat").value = ""; cmEl("cm-url").value = "";
     cmEl("cmodal").style.display = "none";
+    _cmDatesOrg = "";
     if (_cmTimer) { clearTimeout(_cmTimer); _cmTimer = null; }
   }
   function cmSync() {
@@ -715,6 +773,7 @@ function renderShell(): string {
       _cmHost = m.host; _cmUser = m.user; _cmUrlOk = true;
       st.textContent = m.provider + " · org " + m.user;
       st.className = "merr ok";
+      askDates(m.user);
     } else {
       _cmUrlOk = false; st.textContent = m.reason || "อ่าน URL นี้ไม่ได้"; st.className = "merr bad";
     }
@@ -735,6 +794,9 @@ function renderShell(): string {
   cmEl("cm-ok").addEventListener("click", cmSave);
   cmEl("cm-url").addEventListener("input", cmUrlChanged);
   cmEl("cm-pat").addEventListener("input", cmSync);
+  cmEl("cm-pick").addEventListener("change", function () {
+    if (cmEl("cm-pick").value) cmEl("cm-exp").value = cmEl("cm-pick").value;
+  });
   cmEl("cmodal").addEventListener("click", function (e) { if (e.target === cmEl("cmodal")) closeCred(); });
   cmEl("cmodal").addEventListener("keydown", function (e) {
     if (e.key === "Enter") { e.preventDefault(); cmSave(); }
@@ -783,6 +845,7 @@ function renderShell(): string {
     else if (m.type === "usage") { usageMap = m.results || {}; render(); }
     else if (m.type === "git") { gitView = m; renderGit(); }
     else if (m.type === "git_url_result") { cmUrlResult(m); }
+    else if (m.type === "git_pat_dates_result") { cmDatesResult(m); }
     else if (m.type === "git_test_result") { testMap[key(m.host, m.user)] = { ok: m.ok, text: m.text }; renderGit(); }
   });
 
