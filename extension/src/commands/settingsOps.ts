@@ -98,6 +98,22 @@ export const SETTINGS_SCHEMA: FieldSchema[] = [
       "When the orchestrator pushes to the remote. Asked up-front at the start of a drive; this sets the default it offers.",
   },
   {
+    key: "claude_view_mode",
+    label: "หน้าตา Claude REPL",
+    group: "Orchestration",
+    type: "select",
+    default: "chat",
+    options: [
+      { value: "chat", label: "Claude Chat (ของเรา) — ค่าเริ่มต้น" },
+      { value: "native", label: "Terminal (native) — tmux attach ในแท็บ terminal" },
+    ],
+    help:
+      "เลือกว่าปุ่มต่างๆ ใน Mission Control จะเปิด Claude REPL เป็นหน้าไหน. " +
+      "Claude Chat (ของเรา) = webview ที่อ่าน transcript มาเรนเดอร์เป็นแชท — ภาษาไทยไม่แตก, ตัด emoji ที่อ่านไม่ออกทิ้ง, แนบไฟล์/ลากไฟล์วางได้, มีปุ่ม /compact, เปิด-ปิด worker ได้; แต่ส่งได้แค่ข้อความ+Enter (กด Esc หรือ Ctrl-C หยุด agent ไม่ได้, ไม่มีเมนู / กับ @, ไม่มี Shift+Tab, ย้อนดูได้เท่าที่ transcript เก็บ). " +
+      "Terminal (native) = เปิดแท็บ terminal แล้ว tmux attach ตรงๆ — ได้ TUI เต็ม (Esc, Ctrl-C, Shift+Tab, เมนู / และ @, เลื่อนดูย้อนหลังได้หมด, วางรูปจากคลิปบอร์ดได้); แต่ภาษาไทยแตกและลากไฟล์วางไม่ได้. " +
+      "session ที่แชทเรนเดอร์ไม่ได้ (เช่น shell เปล่า) จะเปิดเป็น terminal ให้อัตโนมัติไม่ว่าตั้งค่าไว้แบบไหน.",
+  },
+  {
     key: "default_member_model",
     label: "Default member model",
     group: "Teams",
@@ -192,6 +208,27 @@ export function readConfig(): Record<string, unknown> {
 export function getDefaultMemberModel(): string {
   const v = readConfig()["default_member_model"];
   return typeof v === "string" && v.trim() ? v : DEFAULT_MODEL;
+}
+
+// ── Claude REPL view mode ────────────────────────────────────────────────────
+/** Which face Mission Control puts on a running Claude REPL.
+ *  "chat"   — our transcript-backed webview (src/webview/mirror.ts)
+ *  "native" — a VS Code terminal running `tmux attach` */
+export type ClaudeViewMode = "chat" | "native";
+export const CLAUDE_VIEW_MODE_KEY = "claude_view_mode";
+export const DEFAULT_CLAUDE_VIEW_MODE: ClaudeViewMode = "chat";
+
+/** TOTAL: any stored/hand-edited/absent value collapses to one of the two modes.
+ *  Only the exact string "native" opts out — a typo degrades to the default
+ *  rather than becoming a silent third state that no caller handles. */
+export function normalizeClaudeViewMode(v: unknown): ClaudeViewMode {
+  return v === "native" ? "native" : DEFAULT_CLAUDE_VIEW_MODE;
+}
+
+/** THE single answer to "which view?". Every REPL-opening path reads this one
+ *  function (via webview/claudeView.ts) so the modes cannot drift apart. */
+export function getClaudeViewMode(): ClaudeViewMode {
+  return normalizeClaudeViewMode(readConfig()[CLAUDE_VIEW_MODE_KEY]);
 }
 
 /** The key whose select options come from the live model list, not the schema. */

@@ -100,6 +100,35 @@ test("buildTeamUpCommand: empty roster → single plain up (charter decides)", (
   );
 });
 
+// --- view setting: chat hosts the session itself, so the bootstrap must NOT attach ---
+
+test("buildTeamUpCommand: attach=false → wake + rename + kill _boot, but no tmux attach", () => {
+  const cmd = buildTeamUpCommand("brew", "brew", "/home/u/soulbrew", ["bob", "jack"], {}, false);
+  expect(cmd).toContain("maw team up 'brew' --session 'brew' --force --only 'bob'");
+  expect(cmd).toContain("maw team up 'brew' --session 'brew' --force --only 'jack'");
+  expect(cmd).toContain("tmux kill-window -t '=brew:_boot'");
+  expect(cmd).not.toContain("tmux attach");
+  expect(cmd.endsWith("}")).toBe(true); // brace group still closes → `&& { … }` stays valid
+});
+
+test("buildTeamUpCommand: attach=false keeps the per-member /model sends", () => {
+  const cmd = buildTeamUpCommand("brew", "brew", "/home/u/soulbrew", ["bob"], { bob: "claude-sonnet-5" }, false);
+  expect(cmd).toContain("tmux send-keys -t '=brew:bob' '/model claude-sonnet-5' Enter");
+  expect(cmd).not.toContain("tmux attach");
+});
+
+test("buildAwakenMemberCommand: attach=false → /awaken still fires, nothing attaches", () => {
+  const cmd = buildAwakenMemberCommand("brew", "brew", "/home/u/soulbrew", "newbie", false);
+  expect(cmd).toContain("tmux send-keys -t '=brew:newbie' '/awaken' Enter");
+  expect(cmd).not.toContain("tmux attach");
+  expect(cmd.endsWith("}")).toBe(true);
+});
+
+test("buildTeamUpCommand / buildAwakenMemberCommand: attach defaults to true (native unchanged)", () => {
+  expect(buildTeamUpCommand("brew", "brew", "/home/u/soulbrew", ["bob"])).toContain("tmux attach");
+  expect(buildAwakenMemberCommand("brew", "brew", "/home/u/soulbrew", "bob")).toContain("tmux attach");
+});
+
 test("buildAwakenMemberCommand: wakes only the one oracle, then fires /awaken before attach", () => {
   const cmd = buildAwakenMemberCommand("brew", "brew", "/home/u/soulbrew", "newbie");
   // only this oracle woken — the rest of the team is untouched

@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 
 import {
   buildAttachCommand,
+  isMirrorableSession,
   isWindowIndex,
   isSafeSessionName,
   parseTmuxSessions,
@@ -20,7 +21,57 @@ import {
   pickAttachAction,
   killFailureMessage,
   sessionKillGroup,
+  pickGridPanes,
 } from "./sessions";
+
+// --- pickGridPanes: which panes the Claude Chat grid shows -------------------
+// /orches = one window, panes move in/out of it. team up = one window per member.
+const row = (
+  id: string,
+  o: { role?: string; member?: string; win?: boolean; pane?: boolean } = {},
+) => ({
+  id,
+  orchRole: o.role ?? "",
+  orchMember: o.member ?? "",
+  windowActive: o.win ?? false,
+  paneActive: o.pane ?? false,
+});
+
+test("pickGridPanes: /orches (roster) → the active window IS the grid", () => {
+  // orchestrator + 1 worker in the layout window; a CLOSED worker sits in its own
+  // window (pane-active there, window not active) and must stay out of the grid.
+  const rows = [
+    row("%1", { role: "orchestrator", win: true, pane: true }),
+    row("%2", { member: "bob", win: true, pane: false }),
+    row("%9", { member: "jack", win: false, pane: true }),
+  ];
+  expect(pickGridPanes(rows, true).map((r) => r.id)).toEqual(["%1", "%2"]);
+});
+
+test("pickGridPanes: /orches detected from pane stamps even with no roster set", () => {
+  const rows = [
+    row("%1", { role: "orchestrator", win: true, pane: true }),
+    row("%9", { member: "jack", win: false, pane: true }),
+  ];
+  expect(pickGridPanes(rows, false).map((r) => r.id)).toEqual(["%1"]);
+});
+
+test("pickGridPanes: team session (no stamps) → every window's active pane", () => {
+  // maw team up gives each member its own window — taking the active window would
+  // show ONE member of the team.
+  const rows = [
+    row("%1", { win: true, pane: true }), // bob (current window)
+    row("%2", { win: false, pane: true }), // jack
+    row("%3", { win: false, pane: true }), // john
+    row("%4", { win: false, pane: false }), // a split inside john's window — not its active pane
+  ];
+  expect(pickGridPanes(rows, false).map((r) => r.id)).toEqual(["%1", "%2", "%3"]);
+});
+
+test("pickGridPanes: empty scan → empty grid", () => {
+  expect(pickGridPanes([], false)).toEqual([]);
+  expect(pickGridPanes([], true)).toEqual([]);
+});
 
 test("parseTmuxWindows: parses index/name/cmd, preserves spaces in cmd", () => {
   const raw = "0\tforeman\tclaude\n1\tbuild\tpnpm dev\n2\tlogs\ttail -f app.log";
@@ -333,4 +384,23 @@ test("sessionKillGroup: ไม่มีซาก = คืนแค่ตัว�
   expect(sessionKillGroup("09-foreman", list)).toEqual(["09-foreman"]);
   // ตัวที่กดต้องมาก่อนเสมอ (เจตนา user ต้องถูกยิงก่อน เผื่อตัวถัด ๆ ไปค้าง)
   expect(sessionKillGroup("09-foreman", [])[0]).toBe("09-foreman");
+});
+
+// Which sessions the Claude Chat webview can actually render. Shared by mirror.ts
+// (what to offer) and claudeView.ts (whether the view-mode setting can be honoured
+// for a given session) — a session that fails this opens as a terminal instead of
+// an empty chat panel, whatever the setting says.
+test("isMirrorableSession: claude pane yes, orches session yes, bare shell no", () => {
+  const safe = isSafeSessionName;
+  // active pane runs claude → there is a transcript to render
+  expect(isMirrorableSession({ name: "claude-foo", cmd: "claude" }, safe)).toBe(true);
+  // orches session: active pane may be a shell, but @orches_label marks it as ours
+  expect(isMirrorableSession({ name: "09-foreman", cmd: "bash", orchesLabel: "proj / brew" }, safe)).toBe(true);
+  // plain shell / other tools → the chat would open empty
+  expect(isMirrorableSession({ name: "scratch", cmd: "bash" }, safe)).toBe(false);
+  expect(isMirrorableSession({ name: "maw-ui", cmd: "maw" }, safe)).toBe(false);
+  // an unsafe name is never mirrorable no matter what it runs
+  expect(isMirrorableSession({ name: "evil;rm -rf", cmd: "claude" }, safe)).toBe(false);
+  // whitespace around the command must not defeat the claude check
+  expect(isMirrorableSession({ name: "claude-bar", cmd: " claude " }, safe)).toBe(true);
 });

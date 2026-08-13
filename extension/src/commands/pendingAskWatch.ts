@@ -114,7 +114,14 @@ async function stillUp(hit: PendingHit): Promise<boolean> {
 }
 
 /** Attach to the pane so the human can answer it there — the multi-select shape,
- *  where a digit only ticks a checkbox. */
+ *  where a digit only ticks a checkbox.
+ *
+ *  ⛔ DELIBERATELY IGNORES the claude_view_mode setting and always opens a real
+ *  terminal. This is the escape hatch for the one ask shape we cannot answer for
+ *  the user, and answering it needs arrows + space + Enter — keys the chat
+ *  composer has no way to send (it posts literal text plus a separate Enter).
+ *  Routing this through claudeView would hand chat-mode users a panel they
+ *  physically cannot answer in, with the run still blocked. */
 async function openPane(hit: PendingHit): Promise<void> {
   // Best effort — if focusing fails the human can still navigate once attached.
   await tmux(["select-window", "-t", hit.pane]);

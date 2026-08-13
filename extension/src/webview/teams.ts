@@ -20,7 +20,7 @@ import {
   type TeamMember,
 } from "../commands/teamsModel";
 import { getDefaultMemberModel } from "../commands/settingsOps";
-import { awakenMember, teamUp, teamUpMember } from "../commands/teamUp";
+import { awakenMember, teamUp, teamUpMember, type TeamUpResult } from "../commands/teamUp";
 
 // Editor-area panel for browsing + editing maw oracle-teams. Mirrors skills.ts:
 // singleton _panel, renderShell HTML, postMessage list/detail, a message switch.
@@ -80,7 +80,17 @@ function sanitizeMembers(raw: unknown): TeamMember[] {
   return out;
 }
 
-export function openTeamsPanel(_projectId: string | null = null): vscode.WebviewPanel {
+/** Where the user should look after a wake, worded from the view that actually
+ *  opened (chat webview vs editor terminal) — a toast that says "attach ใน
+ *  terminal" while the chat opened is worse than no toast. */
+function viewWord(r: TeamUpResult): string {
+  return r.chat ? "เปิดใน Claude Chat" : "attach ใน terminal";
+}
+
+export function openTeamsPanel(
+  context: vscode.ExtensionContext,
+  _projectId: string | null = null,
+): vscode.WebviewPanel {
   if (_panel) {
     _panel.reveal();
     return _panel;
@@ -145,16 +155,16 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
           panel.webview.postMessage({ type: "op_done" });
           return;
         }
-        const r = teamUp(name);
+        const r = teamUp(context, name);
         if (r.error) {
           vscode.window.showErrorMessage(`Teams: team up '${name}' — ${r.error}`);
         } else if (r.minted) {
           vscode.window.showInformationMessage(
-            `Teams: '${name}' มี session อยู่แล้ว → เปิด instance ใหม่ '${r.session}' (attach ใน terminal)`,
+            `Teams: '${name}' มี session อยู่แล้ว → เปิด instance ใหม่ '${r.session}' (${viewWord(r)})`,
           );
         } else {
           vscode.window.showInformationMessage(
-            `Teams: team up '${name}' → session '${r.session}' (attach ใน terminal)`,
+            `Teams: team up '${name}' → session '${r.session}' (${viewWord(r)})`,
           );
         }
         // Opening a terminal returns immediately — release the button.
@@ -169,16 +179,16 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
           panel.webview.postMessage({ type: "op_done" });
           return;
         }
-        const r = teamUpMember(name, oracle);
+        const r = teamUpMember(context, name, oracle);
         if (r.error) {
           vscode.window.showErrorMessage(`Teams: wake '${oracle}' — ${r.error}`);
         } else if (r.minted) {
           vscode.window.showInformationMessage(
-            `Teams: '${name}' มี session อยู่แล้ว → ปลุก '${oracle}' เข้า instance ใหม่ '${r.session}' (attach ใน terminal)`,
+            `Teams: '${name}' มี session อยู่แล้ว → ปลุก '${oracle}' เข้า instance ใหม่ '${r.session}' (${viewWord(r)})`,
           );
         } else {
           vscode.window.showInformationMessage(
-            `Teams: ปลุก '${oracle}' → session '${r.session}' (attach ใน terminal)`,
+            `Teams: ปลุก '${oracle}' → session '${r.session}' (${viewWord(r)})`,
           );
         }
         panel.webview.postMessage({ type: "op_done" });
@@ -211,12 +221,14 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
           panel.webview.postMessage({ type: "op_done" });
           return;
         }
-        const r = awakenMember(name, oracle);
+        const r = awakenMember(context, name, oracle);
         if (r.error) {
           vscode.window.showErrorMessage(`Teams: awaken '${oracle}' — ${r.error}`);
         } else {
           vscode.window.showInformationMessage(
-            `Teams: สร้าง+awaken '${oracle}' → session '${r.session}' (พิธีเปิดใน terminal · ถ้า /awaken ไม่ขึ้นใน pane พิมพ์เอง)`,
+            `Teams: สร้าง+awaken '${oracle}' → session '${r.session}' (พิธีเปิดใน ${
+              r.chat ? "Claude Chat" : "terminal"
+            } · ถ้า /awaken ไม่ขึ้นใน pane พิมพ์เอง)`,
           );
         }
         await pushDetail(panel, name); // refresh — the new member now shows (as stub until the ritual runs)

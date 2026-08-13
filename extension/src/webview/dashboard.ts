@@ -21,27 +21,28 @@ import {
   tmuxHasSession,
 } from "../commands/startOrchestrator";
 import { parseTeamRoster, type OracleTeam } from "../commands/teams";
-import { trackClaudeTerminal } from "../commands/claudeTerminals";
 import { parseOrchesMeta, serializeOrchesMeta, type ResumableProject } from "../commands/orchestratorResume";
 import * as gitOps from "../commands/gitOps";
 import { parseGitButtonState, type GitButtonState } from "../commands/gitStatus";
 import { computeUsage, topProjectsByRange } from "../usage";
 import { buildBudgetView } from "./budget";
+import { openClaudeView } from "./claudeView";
+import {
+  forgetSessionTerminal,
+  listTmuxSessions,
+  registerAttachTerminalCleanup,
+  sessionTerminal,
+} from "./attachTerminal";
 import { liveClaudeToken } from "../commands/accountsOps";
 import { fetchClaudeUsage } from "../commands/usage";
 import {
-  TMUX_FMT,
   TMUX_WINDOWS_FMT,
   type TmuxSession,
   type TmuxWindow,
-  buildAttachCommand,
   isSafeSessionName,
   isWindowIndex,
-  parseTmuxSessions,
   parseTmuxWindows,
   sessionIsIdle,
-  sessionClients,
-  pickAttachAction,
   killFailureMessage,
   sessionKillGroup,
   parseOraclesJson,
@@ -67,10 +68,9 @@ let _panel: vscode.WebviewPanel | undefined;
 let _unsubProjectChange: (() => void) | undefined;
 let _statusPollTimer: NodeJS.Timeout | undefined;
 
-// Sessions panel state. _sessionTerminals reuses one editor terminal per tmux
-// session (Task: click→attach); _lastSessionNames is the set we last showed the
-// webview, used to validate attach requests.
-const _sessionTerminals = new Map<string, vscode.Terminal>();
+// Sessions panel state. The terminal-reuse map now lives in attachTerminal.ts so
+// every native-attach caller shares one registry; _lastSessionNames is the set we
+// last showed the webview, used to validate attach requests.
 let _lastSessionNames = new Set<string>();
 let _termCleanupRegistered = false;
 
@@ -186,16 +186,10 @@ export function openDashboardPanel(
   });
 
   // One global listener: when a session's terminal closes, drop it from the
-  // reuse map so the next click opens a fresh attached terminal.
+  // shared reuse map so the next click opens a fresh attached terminal.
   if (!_termCleanupRegistered) {
     _termCleanupRegistered = true;
-    context.subscriptions.push(
-      vscode.window.onDidCloseTerminal((t) => {
-        for (const [k, v] of _sessionTerminals) {
-          if (v === t) _sessionTerminals.delete(k);
-        }
-      }),
-    );
+    registerAttachTerminalCleanup(context);
   }
 
   panel.webview.onDidReceiveMessage(async (msg) => {
@@ -251,90 +245,17 @@ export function openDashboardPanel(
         // session (old behaviour). Junk is dropped, never interpolated into the target.
         const win = isWindowIndex(msg.window) ? msg.window : undefined;
 
-        // A terminal we already hold for this session, or an orchestrator tab
-        // already pointed at it (opened by the "⏮ ทำต่อ" button /
-        // launchOrchestrator, which tracks its terminals in a separate map).
-        // Match its naming: `orchestrator: <orch>` for a base session
-        // `NN-<orch>`, or `… · <session>` for a twin.
-        const orchStem = name.replace(/^\d+-/, "");
-        const reusable =
-          (() => {
-            const t = _sessionTerminals.get(name);
-            return t && t.exitStatus === undefined ? t : undefined;
-          })() ??
-          vscode.window.terminals.find(
-            (t) =>
-              t.exitStatus === undefined &&
-              (t.name === `orchestrator: ${orchStem}` || t.name.endsWith(` · ${name}`)),
-          );
-
-        // ⛔ "terminal ยังไม่ตาย" ไม่ใช่คำถามที่ถูก — `tmux attach` จบไปได้โดยที่แท็บยัง
-        //    เปิดอยู่เป็นเชลล์เปล่า แล้วโค้ดเดิม show() แท็บซากนั้นแล้ว return =
-        //    กดจาก dashboard ไม่มีอะไรขึ้นตลอดกาล (เจอจริง run newflow4 2026-08-04:
-        //    session_attached ไหล 1 -> 0 กลางรัน) · ถามให้ถูกคือ "เดี๋ยวนี้มี client
-        //    เกาะ session อยู่ไหม" แล้วยิง attach ซ้ำลงแท็บเดิมเมื่อไม่มี.
-        const action = pickAttachAction(!!reusable, sessionClients(await listTmuxSessions(), name));
-        if (action === "gone") {
+        // Honour the Claude-view setting (default = our chat webview). A session
+        // the chat can't render falls back to a terminal inside openClaudeView.
+        // Tab title = the project (the part before " / <team>" in the label), e.g.
+        // "agentskill-marketplace-v9", not the raw pin "tmux: 09-foreman-2".
+        const opened = await openClaudeView(context, name, {
+          window: win,
+          tabTitle: label.split(" / ")[0].trim() || undefined,
+        });
+        if (!opened) {
           void vscode.window.showWarningMessage(`tmux session '${name}' ปิดไปแล้ว`);
           await pushSessions(panel); // drop the stale row instead of leaving a dead button
-          return;
-        }
-        if (action === "focus") {
-          // ⛔ แท็บที่เกาะอยู่แล้วโชว์หน้าต่างเดิม → กด "1:john" แล้วจะไม่มีอะไรเปลี่ยน
-          //    (กดแล้วเหมือนไม่ทำงาน = อาการเดียวกับบั๊กเดิม) · สั่ง tmux สลับหน้าต่างก่อน show
-          if (win !== undefined) {
-            await new Promise<void>((resolve) => {
-              cp.execFile("tmux", ["select-window", "-t", `=${name}:${win}`], { timeout: 2000 }, () =>
-                resolve(),
-              );
-            });
-          }
-          reusable!.show(false);
-          return;
-        }
-
-        let term: vscode.Terminal;
-        if (action === "reattach") {
-          // Typing into the husk is safe here: a tab still RUNNING `tmux attach`
-          // would mean clients > 0, which routes to "focus" above — so reaching
-          // this branch means that shell is back at a prompt.
-          term = reusable!;
-          term.show(false);
-        } else {
-          // Title the tab with the project (the part before " / <team>" in the
-          // label), e.g. "agentskill-marketplace-v9", instead of the raw pin
-          // "tmux: 09-foreman-2". Unlabeled sessions keep the old "tmux: <name>".
-          const proj = label.split(" / ")[0].trim();
-          term = vscode.window.createTerminal({
-            name: proj || "tmux: " + name,
-            location: vscode.TerminalLocation.Editor,
-          });
-          _sessionTerminals.set(name, term);
-          trackClaudeTerminal(term, name); // context pill follows this attached REPL
-          term.show(false);
-        }
-
-        const command = buildAttachCommand(name, win);
-        let launched = false;
-        const launch = () => {
-          if (launched || term.exitStatus !== undefined) return;
-          launched = true;
-          if (term.shellIntegration) term.shellIntegration.executeCommand(command);
-          else term.sendText(command);
-        };
-        if (term.shellIntegration) {
-          launch();
-        } else {
-          const sub = vscode.window.onDidChangeTerminalShellIntegration((e) => {
-            if (e.terminal === term) {
-              sub.dispose();
-              launch();
-            }
-          });
-          setTimeout(() => {
-            sub.dispose();
-            launch();
-          }, 2500);
         }
         return;
       }
@@ -388,11 +309,9 @@ export function openDashboardPanel(
             continue; // ตัวถัดไปยังต้องได้โอกาสปิด — อย่าเงียบและอย่าหยุดทั้งชุด
           }
           // Drop any reused attach-terminal for the now-dead session.
-          const term = _sessionTerminals.get(target);
-          if (term) {
-            term.dispose();
-            _sessionTerminals.delete(target);
-          }
+          const term = sessionTerminal(target);
+          if (term) term.dispose();
+          forgetSessionTerminal(target);
         }
         if (!survivors.length && extra.length)
           void vscode.window.showInformationMessage(
@@ -689,15 +608,6 @@ async function doOrchLaunch(panel: vscode.WebviewPanel, orch: string) {
   );
 }
 
-
-function listTmuxSessions(): Promise<TmuxSession[]> {
-  return new Promise((resolve) => {
-    cp.execFile("tmux", ["list-sessions", "-F", TMUX_FMT], { timeout: 700 }, (err, stdout) => {
-      // No server / error → treat as zero sessions (not a failure).
-      resolve(err ? [] : parseTmuxSessions(stdout.toString()));
-    });
-  });
-}
 
 /** List one session's windows (index/name/active-command) for the Bento
  *  session-row expand. `name` is whitelisted by isSafeSessionName before we get

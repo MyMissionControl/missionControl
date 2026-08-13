@@ -1,11 +1,20 @@
+import * as cp from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import * as vscode from "vscode";
 
-import { type ClaudeTarget, buildClaudeTmuxCommand, projectSessionName } from "./claudeSessions";
+import {
+  type ClaudeTarget,
+  buildClaudeDetachedArgs,
+  buildClaudeTmuxCommand,
+  projectSessionName,
+} from "./claudeSessions";
 import { trackClaudeTerminal } from "./claudeTerminals";
+import { getClaudeViewMode } from "./settingsOps";
+import { tmuxHasSession } from "./startOrchestrator";
+import { openClaudeView } from "../webview/claudeView";
 
 // "Open Claude" pops a picker of targets, then opens Claude Code CLI inside a
 // tmux session in the EDITOR area. Running inside tmux means closing the tab
@@ -53,7 +62,14 @@ function discoverTargets(): ClaudeTarget[] {
   return targets;
 }
 
-export async function claudeCommand(context: vscode.ExtensionContext) {
+/**
+ * "Open Claude" — pick a project, then open its REPL in whichever view the user
+ * chose (Settings → หน้าตา Claude REPL; default = our chat).
+ *
+ * `forceNative` is the always-terminal escape hatch behind
+ * missioncontrol.claudeNative, so a raw TUI stays reachable in chat mode.
+ */
+export async function claudeCommand(context: vscode.ExtensionContext, forceNative = false) {
   // Drop closed terminals from the reuse map (registered once per session).
   if (!_cleanupRegistered) {
     _cleanupRegistered = true;
@@ -73,6 +89,26 @@ export async function claudeCommand(context: vscode.ExtensionContext) {
   );
   if (!pick) return; // cancelled
   const { session, cwd } = pick.target;
+
+  // Chat mode: the webview can only MIRROR a session, so bring it up headless
+  // (create-or-noop, detached) and then open the chat on it. A tmux failure
+  // falls through to the terminal path rather than leaving the user with nothing.
+  if (!forceNative && getClaudeViewMode() === "chat") {
+    let up = false;
+    try {
+      cp.execFileSync("tmux", buildClaudeDetachedArgs(session, cwd), { stdio: "ignore" });
+      up = true;
+    } catch {
+      up = tmuxHasSession(session); // `-A` races another opener → fine if it exists now
+    }
+    if (up) {
+      await openClaudeView(context, session);
+      return;
+    }
+    void vscode.window.showWarningMessage(
+      `เปิด session '${session}' แบบ headless ไม่สำเร็จ — เปิดเป็น terminal ให้แทน`,
+    );
+  }
 
   // Reuse a still-open terminal for this session instead of stacking tabs.
   const existing = _claudeTerminals.get(session);

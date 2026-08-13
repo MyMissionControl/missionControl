@@ -4,10 +4,15 @@ import * as os from "os";
 import * as path from "path";
 
 import {
+  CLAUDE_VIEW_MODE_KEY,
+  DEFAULT_CLAUDE_VIEW_MODE,
+  getClaudeViewMode,
   getDefaultMemberModel,
   listSettings,
   modelOptions,
+  normalizeClaudeViewMode,
   readConfig,
+  SETTINGS_SCHEMA,
   setSetting,
 } from "./settingsOps";
 import { DEFAULT_MODEL, MODEL_ALIASES } from "./teamsModel";
@@ -226,5 +231,61 @@ describe("Settings: live model list", () => {
     const merge = listSettings(LIVE).find((e) => e.key === "merge_mode");
     expect(merge?.options?.map((o) => o.value)).toEqual(["online", "local"]);
     expect(() => setSetting("merge_mode", "claude-fable-5", LIVE)).toThrow();
+  });
+});
+
+describe("claude_view_mode (which face the Claude REPL gets)", () => {
+  test("no config file → chat, the user-requested default", () => {
+    const f = listSettings().find((e) => e.key === CLAUDE_VIEW_MODE_KEY);
+    expect(f?.value).toBe("chat");
+    expect(f?.known).toBe(true);
+    expect(f?.type).toBe("select");
+    expect(f?.options?.map((o) => o.value)).toEqual(["chat", "native"]);
+    expect(getClaudeViewMode()).toBe("chat");
+  });
+
+  test("a stored value wins over the default", () => {
+    writeCfg({ [CLAUDE_VIEW_MODE_KEY]: "native" });
+    expect(listSettings().find((e) => e.key === CLAUDE_VIEW_MODE_KEY)?.value).toBe("native");
+    expect(getClaudeViewMode()).toBe("native");
+  });
+
+  test("setSetting persists the choice and leaves other keys alone", () => {
+    writeCfg({ agents: 3 });
+    setSetting(CLAUDE_VIEW_MODE_KEY, "native");
+    expect(readConfig()[CLAUDE_VIEW_MODE_KEY]).toBe("native");
+    expect(readConfig().agents).toBe(3);
+    expect(getClaudeViewMode()).toBe("native");
+  });
+
+  test("setSetting rejects anything outside the two options", () => {
+    expect(() => setSetting(CLAUDE_VIEW_MODE_KEY, "mirror")).toThrow();
+    expect(() => setSetting(CLAUDE_VIEW_MODE_KEY, "terminal")).toThrow();
+    expect(() => setSetting(CLAUDE_VIEW_MODE_KEY, "")).toThrow();
+  });
+
+  // A hand-edited / stale file must degrade to the default, never become a third
+  // state: every caller branches chat-vs-native and nothing handles "mirror".
+  test("a junk stored value degrades to chat rather than becoming a third state", () => {
+    for (const junk of ["mirror", "Native", "NATIVE", "", 0, null, [], {}]) {
+      writeCfg({ [CLAUDE_VIEW_MODE_KEY]: junk as unknown });
+      expect(getClaudeViewMode()).toBe("chat");
+    }
+  });
+
+  test("normalizeClaudeViewMode is total — only exact 'native' opts out", () => {
+    expect(normalizeClaudeViewMode("native")).toBe("native");
+    for (const v of ["chat", "Native", "NATIVE", " native", "mirror", "", null, undefined, 0, {}, []]) {
+      expect(normalizeClaudeViewMode(v as unknown)).toBe("chat");
+    }
+  });
+
+  test("the schema default and the accessor default cannot drift apart", () => {
+    const schema = SETTINGS_SCHEMA.find((f) => f.key === CLAUDE_VIEW_MODE_KEY);
+    expect(schema?.default).toBe(DEFAULT_CLAUDE_VIEW_MODE);
+    // every offered option must survive normalization unchanged
+    for (const o of schema?.options ?? []) {
+      expect(normalizeClaudeViewMode(o.value)).toBe(o.value);
+    }
   });
 });

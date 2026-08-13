@@ -9,7 +9,6 @@ import {
 } from "../commands/gitStatus";
 import {
   annotateLiveState,
-  attachToProject,
   cancelContinueRun,
   defaultTeamFor,
   launchContinueRun,
@@ -18,6 +17,7 @@ import {
   listTmuxSessionsSafe,
   projectDrivenState,
   reapSession,
+  resolveProjectSession,
   scanProjects,
   sessionCreatedAt,
   resolveOwnerRoot,
@@ -33,7 +33,7 @@ import {
 } from "../commands/projectDocs";
 import { listBackedUpProjects, type BackupEntry } from "../commands/docsBackup";
 import { openDataViewPanel } from "./dataView";
-import { openMirrorPanel } from "./mirror";
+import { openClaudeViewDeferred } from "./claudeView";
 import {
   isPreviewAvailable,
   isPreviewRunning,
@@ -491,13 +491,13 @@ function pickTeam(panel: vscode.WebviewPanel, name: string) {
   }
 }
 
-/** Open the Claude Chat for `sess` AUTOMATICALLY, deferred a short beat so the just-
- *  created (detached) tmux session has a moment to come up before the chat's first poll.
- *  No terminal is involved anymore — the launch runs HEADLESS (see launchOrchestrator) —
- *  so there is no blank-terminal collision and nothing to dispose; the chat is the sole
- *  interface. No poll, no user click. */
-function openChatDeferred(ctx: vscode.ExtensionContext, sess: string): void {
-  setTimeout(() => void openMirrorPanel(ctx, sess), 800);
+/** Open the Claude REPL for `sess` AUTOMATICALLY, in whichever view the user chose
+ *  (Settings → หน้าตา Claude REPL; default = our chat), deferred a short beat so the
+ *  just-created (detached) tmux session has a moment to come up before the chat's
+ *  first poll. The launch itself runs HEADLESS (see launchOrchestrator), so this is
+ *  the sole interface — no poll, no user click. */
+function openViewDeferred(ctx: vscode.ExtensionContext, sess: string): void {
+  openClaudeViewDeferred(ctx, sess, {}, 800);
 }
 
 async function doLaunch(panel: vscode.WebviewPanel, orch: string) {
@@ -516,13 +516,13 @@ async function doLaunch(panel: vscode.WebviewPanel, orch: string) {
     vscode.window.showErrorMessage(`Orchestrator: ${r.error}`);
     return;
   }
-  // Auto-open the Claude Chat (deferred a short beat so the detached session comes up
-  // first). The launch is headless — no terminal — so the chat is the only tab.
-  if (_ctx && r.session) openChatDeferred(_ctx, r.session);
+  // Auto-open the chosen Claude view (deferred a short beat so the detached session
+  // comes up first). The launch is headless, so this is the only tab it gets.
+  if (_ctx && r.session) openViewDeferred(_ctx, r.session);
   vscode.window.showInformationMessage(
     `Orchestrator: ปลุก '${orch}' (team ${_st.team.name})` +
       (_st.project ? ` · resume ${_st.project.name}` : "") +
-      " — Claude Chat กำลังเปิด…",
+      " — กำลังเปิด Claude…",
   );
   panel.dispose();
 }
@@ -636,10 +636,13 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         annotateLiveState([p]);
         const driven = projectDrivenState(p);
         if (driven.state !== "none") {
-          const attached = attachToProject(p, driven.session);
+          // ⛔ เดิมเรียก attachToProject (เปิด terminal) แล้วเปิด chat ตามอีกที =
+          //    กดปุ่มเดียวได้สองหน้าต่างบน session เดียวกัน · ตอนนี้แค่ "หา session"
+          //    แล้วเปิดหน้าเดียวตามที่ user ตั้งไว้
+          const attached = resolveProjectSession(p, driven.session);
           if (attached) {
             // deferred auto-open (session already live).
-            if (_ctx) openChatDeferred(_ctx, attached);
+            if (_ctx) openViewDeferred(_ctx, attached);
             vscode.window.showInformationMessage(
               `Orchestrator: attach เข้า session '${attached}' ที่ขับ '${p.name}' อยู่ (ไม่สร้างใหม่)`,
             );
@@ -800,10 +803,12 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         if (!p) return;
         const r = launchContinueRun(p);
         if (r.error) vscode.window.showWarningMessage(`Continue: ${r.error}`);
-        else if (r.attached)
+        else if (r.attached) {
+          if (_ctx && r.session) openViewDeferred(_ctx, r.session);
           vscode.window.showInformationMessage(
             `Continue: '${p.name}' กำลังทำอยู่แล้ว — เปิด session เดิมให้ (ไม่ launch ซ้ำ)`,
           );
+        }
         await pushProjectsScreen(panel);
         startSpinPoll(panel);
         return;
@@ -821,10 +826,12 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         }
         const r = launchContinueRun(p, n);
         if (r.error) vscode.window.showWarningMessage(`Continue: ${r.error}`);
-        else if (r.attached)
+        else if (r.attached) {
+          if (_ctx && r.session) openViewDeferred(_ctx, r.session);
           vscode.window.showInformationMessage(
             `Continue: '${p.name}' กำลังทำอยู่แล้ว — เปิด session เดิมให้ (ไม่ launch ซ้ำ)`,
           );
+        }
         else
           vscode.window.showInformationMessage(
             `Continue: '${p.name}' เริ่มทำ ${n} sprint รวด (background)`,

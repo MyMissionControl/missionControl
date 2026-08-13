@@ -113,6 +113,10 @@
         "title": "Mission Control: Open Claude (Chat)"
       },
       {
+        "command": "missioncontrol.claudeNative",
+        "title": "Mission Control: Open Claude (Terminal)"
+      },
+      {
         "command": "missioncontrol.attachToClaude",
         "title": "Mission Control: Attach File/Image to Claude"
       },

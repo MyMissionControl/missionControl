@@ -47,6 +47,12 @@ export function resolveInstanceSession(
  *  On a failed up the rename/kill are skipped and attach still drops the user on
  *  the `_boot` shell with the error in scrollback.
  *
+ *  `attach` is the VIEW choice (Settings → หน้าตา Claude REPL): native ends with
+ *  `tmux attach` so the hosting terminal IS the REPL; chat ends after the wake and
+ *  leaves the session detached — the Claude Chat webview is the interface, and an
+ *  attached terminal would fight it for focus on every send-keys (the same reason
+ *  the orchestrator launch passes attach=false).
+ *
  *  `--force` + `--only` per member is what makes the button reliable:
  *   - `--force` stops team up RESUMING a member whose pane lingers from a prior
  *     run (it would send `claude … --continue` and, on the default engine, hit the
@@ -68,6 +74,7 @@ export function buildTeamUpCommand(
   cwd: string,
   members: string[],
   models: Record<string, string> = {}, // member → Team Config model (config.json members[].model)
+  attach = true, // false → leave the session detached (chat view hosts it instead)
 ): string {
   const up = members.length
     ? members
@@ -97,7 +104,7 @@ export function buildTeamUpCommand(
     `tmux rename-window -t "=${session}:$w" "\${w#*-}" 2>/dev/null ; done ; ` +
     `${modelStep}` +
     `tmux kill-window -t '=${session}:_boot' 2>/dev/null ; ` +
-    `tmux attach -t '=${session}' ; }`
+    (attach ? `tmux attach -t '=${session}' ; }` : `}`)
   );
 }
 
@@ -108,12 +115,14 @@ export function buildTeamUpCommand(
  *  user is attached to. The `/awaken` send is BEST-EFFORT: one settle wait for
  *  claude to reach its prompt (the ritual then prompts for language/mode in-pane);
  *  a cold start slower than the wait means /awaken lands in the shell and the user
- *  re-sends it manually. team/session/oracle are validated by the caller. */
+ *  re-sends it manually. team/session/oracle are validated by the caller.
+ *  `attach` follows the view setting, exactly as in buildTeamUpCommand. */
 export function buildAwakenMemberCommand(
   team: string,
   session: string,
   cwd: string,
   oracle: string,
+  attach = true,
 ): string {
   return (
     `tmux new-session -A -d -s '${session}' -n _boot -c '${cwd}' && { ` +
@@ -122,7 +131,7 @@ export function buildAwakenMemberCommand(
     `tmux rename-window -t "=${session}:$w" "\${w#*-}" 2>/dev/null ; done ; ` +
     `tmux kill-window -t '=${session}:_boot' 2>/dev/null ; ` +
     `sleep 10 ; tmux send-keys -t '=${session}:${oracle}' '/awaken' Enter ; ` +
-    `tmux attach -t '=${session}' ; }`
+    (attach ? `tmux attach -t '=${session}' ; }` : `}`)
   );
 }
 

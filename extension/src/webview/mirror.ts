@@ -8,10 +8,11 @@ import { listOrchestratorTeams } from "../commands/startOrchestrator";
 import { isSafeOracleName, type OracleTeam } from "../commands/teams";
 import { droppedFilePath } from "../commands/claudeSessions";
 import {
+  isMirrorableSession,
   isSafeSessionName,
   paneRoleAndLabel,
   parseTmuxSessions,
-  sessionCanAttach,
+  pickGridPanes,
   TMUX_FMT,
   workersForSession,
   type TmuxSession,
@@ -72,9 +73,7 @@ function mirrorableSessions(): TmuxSession[] {
   } catch {
     return [];
   }
-  return parseTmuxSessions(raw).filter(
-    (s) => isSafeSessionName(s.name) && (sessionCanAttach(s.cmd) || !!s.orchesLabel),
-  );
+  return parseTmuxSessions(raw).filter((s) => isMirrorableSession(s, isSafeSessionName));
 }
 
 export async function openMirrorPanel(
@@ -111,14 +110,15 @@ export async function openMirrorPanel(
 }
 
 // One whole-session (`-s`) list-panes row carries: the pane fields (0-5), whether its
-// window is the active/layout one (6), and the session options @orch_oracles (7) +
+// window is the active/layout one (6), the session options @orch_oracles (7) +
 // @orches_label (8) — session opts resolve INSIDE list-panes -F even on a DETACHED session
-// (unlike display-message, which needs the `=session:` colon). So a SINGLE subprocess yields
-// grid panes + roster + label + awake set, replacing 4 blocking spawns/tick.
+// (unlike display-message, which needs the `=session:` colon) — and whether the pane is its
+// own window's active one (9, the team-session grid; see pickGridPanes). So a SINGLE
+// subprocess yields grid panes + roster + label + awake set, replacing 4 blocking spawns/tick.
 const PANE_ROSTER_FMT = [
   "#{pane_id}", "#{@orch_role}", "#{@orch_member}", "#{@claude_session}",
   "#{window_name}", "#{pane_current_command}",
-  "#{window_active}", "#{@orch_oracles}", "#{@orches_label}",
+  "#{window_active}", "#{@orch_oracles}", "#{@orches_label}", "#{pane_active}",
 ].join("\t");
 
 interface SessionScan {
@@ -145,7 +145,7 @@ function scanSession(session: string): SessionScan {
   const rows = raw
     .split(/\r?\n/)
     .map((l) => l.split("\t"))
-    .filter((f) => f.length >= 9 && /^%\d+$/.test(f[0]));
+    .filter((f) => f.length >= 10 && /^%\d+$/.test(f[0]));
   if (!rows.length) return scan;
   scan.any = true;
   scan.roster = (rows[0][7] || "").split(/\s+/).filter(Boolean).filter(isSafeOracleName);
@@ -154,10 +154,27 @@ function scanSession(session: string): SessionScan {
   for (const f of rows) {
     if (f[2] && inRoster.has(f[2])) scan.awake.add(f[2]);
     else if (f[4] && inRoster.has(f[4])) scan.awake.add(f[4]); // worker still in its own window <worker>
-    if (f[6] === "1") {
-      const { role, label } = paneRoleAndLabel({ orchRole: f[1], orchMember: f[2], winName: f[4], cmd: f[5] }, session);
-      scan.panes.push({ id: f[0], role, label, csid: f[3] || "", win: f[4] || "" });
-    }
+  }
+  // /orches → the active (layout) window IS the grid; a team session → one window
+  // per member, so the grid is each window's active pane. See pickGridPanes.
+  // `_boot` is dropped first: it is the team-up bootstrap window (a bash shell that
+  // runs `maw team up` and is killed when the wake finishes), and a chat panel bound
+  // to a SHELL would turn anything the user types into a shell command. The roster /
+  // label / awake reads above stay on the unfiltered rows — session options are on
+  // every row, and during the bootstrap `_boot` may be the only one.
+  const grid = pickGridPanes(
+    rows.filter((f) => f[4] !== "_boot").map((f) => ({
+      f,
+      orchRole: f[1] || "",
+      orchMember: f[2] || "",
+      windowActive: f[6] === "1",
+      paneActive: f[9] === "1",
+    })),
+    scan.roster.length > 0,
+  );
+  for (const { f } of grid) {
+    const { role, label } = paneRoleAndLabel({ orchRole: f[1], orchMember: f[2], winName: f[4], cmd: f[5] }, session);
+    scan.panes.push({ id: f[0], role, label, csid: f[3] || "", win: f[4] || "" });
   }
   return scan;
 }
@@ -673,6 +690,7 @@ function renderHtml(webview: vscode.Webview, mediaRoot: vscode.Uri, session: str
   #orchCol { flex: 1.25 1 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
   #workerCol { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
   #grid.no-workers #workerCol { display: none; }           /* no visible workers → orchestrator takes the full width */
+  #grid.no-orch #orchCol { flex: 1 1 0; }                  /* team session (no orchestrator): peers, so even columns */
   #wakeBar { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 5px 12px;
     background: var(--vscode-editorWidget-background); border-bottom: 1px solid var(--vscode-panel-border); }
   #wakeBar:empty { display: none; }

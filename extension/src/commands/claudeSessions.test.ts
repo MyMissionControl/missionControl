@@ -3,6 +3,7 @@ import { test, expect } from "bun:test";
 import {
   buildAttachText,
   buildClaudeSendKeysArgs,
+  buildClaudeDetachedArgs,
   buildClaudeTmuxCommand,
   buildCompactSendKeysArgs,
   clipboardImagePath,
@@ -146,4 +147,17 @@ test("clipboardImagePath builds <dir>/mc-clip-<stamp>.png and trims trailing sla
   expect(clipboardImagePath("/tmp", 1234)).toBe("/tmp/mc-clip-1234.png");
   expect(clipboardImagePath("/tmp/", 1234)).toBe("/tmp/mc-clip-1234.png");
   expect(clipboardImagePath("/var/folders/x//", 99)).toBe("/var/folders/x/mc-clip-99.png");
+});
+
+// Chat mode cannot spawn a session (the webview only mirrors one), so "Open
+// Claude" brings it up detached first, then points the chat at it.
+test("buildClaudeDetachedArgs: create-or-noop, never takes over the terminal", () => {
+  expect(buildClaudeDetachedArgs("claude-foo", "/home/u/p")).toEqual([
+    "new-session", "-A", "-d", "-s", "claude-foo", "-c", "/home/u/p", "claude",
+  ]);
+  // argv, not a shell string → a space in the path is one argument, not two
+  const args = buildClaudeDetachedArgs("claude-x", "/home/u/my project");
+  expect(args[6]).toBe("/home/u/my project");
+  // -d is what keeps it headless; losing it would hijack the caller's terminal
+  expect(args).toContain("-d");
 });

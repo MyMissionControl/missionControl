@@ -25,6 +25,49 @@ export function sessionCanAttach(cmd: string): boolean {
   return cmd.trim() === "claude";
 }
 
+/** True when the Claude Chat webview can actually render this session: its active
+ *  pane runs claude, or it is an orches session (which carries @orches_label and
+ *  whose claude panes may be behind a non-active window). A session that fails
+ *  this — a bare shell, a `maw` window, a dev server — has no transcript to show,
+ *  so the chat would open empty; those fall back to a native terminal REGARDLESS
+ *  of the view-mode setting. Shared by mirror.ts (which sessions may be chatted)
+ *  and claudeView.ts (whether the setting can be honoured for a given session),
+ *  so the two definitions cannot drift. */
+export function isMirrorableSession(
+  s: { name: string; cmd: string; orchesLabel?: string },
+  isSafeName: (n: string) => boolean,
+): boolean {
+  return isSafeName(s.name) && (sessionCanAttach(s.cmd) || !!s.orchesLabel);
+}
+
+/** A pane row of the chat's whole-session scan, reduced to what decides whether
+ *  it belongs in the grid. */
+export interface GridPaneRow {
+  orchRole: string; // @orch_role  (stamped by /orches on the orchestrator pane)
+  orchMember: string; // @orch_member (stamped by /orches on a worker pane)
+  windowActive: boolean; // #{window_active} — this pane's window is the session's current one
+  paneActive: boolean; // #{pane_active}  — this pane is its own window's active one
+}
+
+/** Which panes the Claude Chat grid shows, for the two session SHAPES it gets:
+ *
+ *  /orches — one window holding every pane; "open/close worker" moves a pane in
+ *    and out of it (break-pane → its own window). The grid is therefore exactly
+ *    the ACTIVE window: a closed worker still exists in a window of its own, and
+ *    listing it would resurrect panels the user just closed.
+ *  maw team up — one WINDOW per member (that is how `maw team up` wakes them), no
+ *    open/close concept. Taking the active window would show exactly ONE member of
+ *    the team, so the grid is each window's active pane instead.
+ *
+ *  Shape is read off the /orches stamps rather than guessed from the session name:
+ *  a roster (@orch_oracles) or any @orch_role/@orch_member pane means /orches. A
+ *  team session carries none of them. Pure — mirror.ts feeds it the scan rows. */
+export function pickGridPanes<T extends GridPaneRow>(rows: T[], hasRoster: boolean): T[] {
+  const orches =
+    hasRoster || rows.some((r) => r.orchRole === "orchestrator" || !!r.orchMember);
+  return rows.filter((r) => (orches ? r.windowActive : r.paneActive));
+}
+
 // A session counts as IDLE (and is hidden from the dashboard Bento Sessions
 // card) when it's a single bare-shell window with no live process. A multi-
 // window session, or one whose active pane runs anything other than a shell

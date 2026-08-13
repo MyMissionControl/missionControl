@@ -65,10 +65,14 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.localhosts", () => localhostsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.settings", () => settingsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.dashboard", () => dashboardCommand(context)),
+    // Opens the REPL in whichever view Settings says (หน้าตา Claude REPL, default chat).
     vscode.commands.registerCommand("missioncontrol.claude", () => claudeCommand(context)),
-    // Open a live Claude REPL inside a webview (xterm mirror + in-chat context
-    // meter + Thai-safe HTML composer + file attach). Sibling to "Open Claude".
+    // ── The two ALWAYS-<x> escape hatches, so neither view can become unreachable
+    //    whatever the setting is. Everything else routes through webview/claudeView.ts.
+    // Always the chat webview (transcript-backed, Thai-safe composer, file attach).
     vscode.commands.registerCommand("missioncontrol.mirror", () => openMirrorPanel(context)),
+    // Always a real terminal (full TUI: Esc / Ctrl-C / Shift+Tab / the / and @ menus).
+    vscode.commands.registerCommand("missioncontrol.claudeNative", () => claudeCommand(context, true)),
     // Attach a file/image to a live Claude REPL: pick it in VS Code, type its
     // absolute path into the tmux pane; Claude Code reads it from disk.
     vscode.commands.registerCommand("missioncontrol.attachToClaude", () => attachToClaudeCommand()),

@@ -116,6 +116,13 @@
 
   function onPanes(list) {
     var seen = {};
+    // A team session (maw team up) has NO orchestrator — every pane is a plain
+    // member. Sending them all to the "everything else" column would stack them
+    // in the right half with the left half blank, so with no orchestrator the
+    // panes just fill both columns in order.
+    var hasOrch = (list || []).some(function (p) { return p.role === "orchestrator"; });
+    grid.classList.toggle("no-orch", !hasOrch); // even columns when there is no wider orchestrator panel
+    var i = 0;
     (list || []).forEach(function (p) {
       seen[p.id] = true;
       var rec = panels.get(p.id) || createPanel(p.id);
@@ -125,8 +132,10 @@
       rec.roleEl.textContent = p.role || "";
       rec.labelEl.textContent = stripEmoji(p.label || p.id);
       rec.el.classList.toggle("orchestrator", isOrch);
-      // place/move into the correct column: orchestrator LEFT, everything else RIGHT
-      var col = isOrch ? orchCol : workerCol;
+      // place/move into the correct column: orchestrator LEFT, everything else
+      // RIGHT — or, with no orchestrator at all, alternate to use both columns.
+      var col = hasOrch ? (isOrch ? orchCol : workerCol) : (i % 2 === 0 ? orchCol : workerCol);
+      i++;
       if (rec.el.parentNode !== col) col.appendChild(rec.el);
     });
     panels.forEach(function (rec, id) { if (!seen[id]) { if (rec.el.parentNode) rec.el.parentNode.removeChild(rec.el); panels.delete(id); } });

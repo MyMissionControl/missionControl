@@ -38,6 +38,14 @@ export function buildClaudeTmuxCommand(session: string, cwd: string): string {
   return `tmux new-session -A -s ${shQuote(session)} -c ${shQuote(cwd)} claude`;
 }
 
+/** argv (NO shell) for create-or-noop DETACHED — `-A -d` = attach if it exists,
+ *  otherwise create, and never take over this terminal. Chat mode needs this
+ *  because the chat webview can only MIRROR a session, not spawn one: we bring
+ *  the session up headless first, then point the chat at it. */
+export function buildClaudeDetachedArgs(session: string, cwd: string): string[] {
+  return ["new-session", "-A", "-d", "-s", session, "-c", cwd, "claude"];
+}
+
 // ── Attach file/image to a live Claude REPL ────────────────────────────────
 // The "Claude REPL" is the real `claude` CLI running in a tmux pane opened by
 // "Open Claude". On this Linux/xrdp box you can't drag-drop or paste an image

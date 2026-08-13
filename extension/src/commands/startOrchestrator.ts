@@ -28,7 +28,6 @@ import {
   runSessionLiveForProject,
   writeRunMarker,
 } from "./continueRun";
-import { trackClaudeTerminal } from "./claudeTerminals";
 import {
   classifyDriven,
   dedupeByRealpath,
@@ -287,36 +286,10 @@ export function defaultTeamFor(project: ResumableProject, teams: OracleTeam[]): 
   );
 }
 
-// One editor terminal PER orchestrator (keyed by oracle name), so launching a
-// second orchestrator never closes the first — many can run side by side. Only
-// re-launching the SAME orch reuses/refreshes its own tab.
-const _orchTerminals = new Map<string, vscode.Terminal>();
-
-/** Run a command in an editor terminal once shell integration is ready (or after
- *  a short fallback) so long-running tmux-attach commands survive. */
-function runInTerminal(term: vscode.Terminal, command: string): void {
-  let done = false;
-  const go = () => {
-    if (done || term.exitStatus !== undefined) return;
-    done = true;
-    if (term.shellIntegration) term.shellIntegration.executeCommand(command);
-    else term.sendText(command);
-  };
-  if (term.shellIntegration) {
-    go();
-  } else {
-    const sub = vscode.window.onDidChangeTerminalShellIntegration((e) => {
-      if (e.terminal === term) {
-        sub.dispose();
-        go();
-      }
-    });
-    setTimeout(() => {
-      sub.dispose();
-      go();
-    }, 2500);
-  }
-}
+// This module no longer owns any terminal: launches are headless and the one
+// place that opens a REPL view is webview/claudeView.ts (which delegates the
+// native flavour to webview/attachTerminal.ts). The per-orchestrator terminal
+// map and its runInTerminal helper went with attachToProject.
 
 /** If `project` is already being driven by a live orchestrator (its team's
  *  orchestrator tmux session is up), open/reveal THAT session's terminal —
@@ -326,7 +299,14 @@ function runInTerminal(term: vscode.Terminal, command: string): void {
  *  running session instead of spawning a conflicting one on top. Returns the
  *  attached session name (truthy) so the caller can open the chat for it; null
  *  when nothing live was found. */
-export function attachToProject(project: ResumableProject, preferSession?: string): string | null {
+/** WHICH live session is driving `project` — the resolution half of
+ *  attachToProject, with no terminal side effect. Split out so a caller can ask
+ *  "what session?" and then open it in whichever view the user chose (see
+ *  webview/claudeView.ts); attachToProject itself is now the native-only path. */
+export function resolveProjectSession(
+  project: ResumableProject,
+  preferSession?: string,
+): string | null {
   const meta = readMeta(project.path);
   const team = meta?.team ? readTeams().find((t) => t.name === meta.team) : undefined;
   const orch = team?.orchestrators[0];
@@ -339,23 +319,14 @@ export function attachToProject(project: ResumableProject, preferSession?: strin
     ...(meta?.session ? [meta.session] : []),
     ...(orch && isSafeOracleName(orch) ? [readSessionPin(orch)?.trim() || `claude-${orch}`] : []),
   ];
-  const session = candidates.find((s) => /^[\w.-]+$/.test(s) && tmuxHasSession(s));
-  if (!session) return null; // nothing awake → let the caller launch fresh
-  const prev = _orchTerminals.get(session);
-  if (prev && prev.exitStatus === undefined) {
-    prev.show(false); // already have its tab open → just reveal it
-    return session;
-  }
-  const term = vscode.window.createTerminal({
-    name: orch ? `orchestrator: ${orch}` : `orchestrator: ${session}`,
-    location: vscode.TerminalLocation.Editor,
-  });
-  _orchTerminals.set(session, term);
-  trackClaudeTerminal(term, session); // context pill follows this orchestrator REPL
-  term.show(false);
-  runInTerminal(term, `tmux attach -t '=${session}'`);
-  return session;
+  return candidates.find((s) => /^[\w.-]+$/.test(s) && tmuxHasSession(s)) ?? null;
 }
+
+// ⛔ attachToProject (resolve + force-open an editor terminal) was REMOVED once the
+//    view became a user setting: it was the last path that decided the view for the
+//    user, and leaving a dead exported terminal-opener around is how a later caller
+//    silently bypasses the setting. Callers now use resolveProjectSession above and
+//    hand the session to webview/claudeView.openClaudeView.
 
 export function tmuxHasSession(session: string): boolean {
   try {
@@ -515,7 +486,10 @@ export function launchContinueRun(
   const action = decideContinueAction(driven.state);
   if (action === "already-running") return { session: driven.session };
   if (action === "attach") {
-    if (attachToProject(project, driven.session)) return { attached: true };
+    // Resolve only — the CALLER opens it in whichever view the setting says
+    // (webview/claudeView.ts). Opening a terminal from in here would ignore it.
+    const live = resolveProjectSession(project, driven.session);
+    if (live) return { attached: true, session: live };
     return {
       error: `'${project.name}' กำลังถูกขับอยู่ (session ${driven.session ?? "?"}) — เปิด session นั้น ไม่ launch ซ้ำ`,
     };
@@ -672,7 +646,9 @@ export async function launchOrchestrator(opts: {
     annotateLiveState([project]);
     const driven = projectDrivenState(project);
     if (driven.state !== "none") {
-      const attached = attachToProject(project, driven.session);
+      // Resolve only; every caller opens `session` through claudeView, so the
+      // view-mode setting decides chat-vs-terminal (this used to force a terminal).
+      const attached = resolveProjectSession(project, driven.session);
       if (attached) return { session: attached }; // real attached session (driven.session is undefined for the 'worker' state)
       return {
         error: `'${project.name}' กำลังถูกขับโดย session '${driven.session ?? "?"}' อยู่แล้ว — เข้า session นั้นแทน (ไม่สร้างซ้ำ)`,
@@ -753,11 +729,8 @@ export async function launchOrchestrator(opts: {
   // terminal). A terminal here was vestigial once attach became false AND could not be
   // disposed reliably — it lingered as a stray tab and, being the only other editor tab,
   // kept yanking focus back to the garbled-Thai REPL whenever the user typed in the
-  // chat. The Claude Chat webview is the sole interface. Drop any stale bootstrap
-  // terminal for this session left by an older build.
-  const prevTerm = _orchTerminals.get(session);
-  if (prevTerm && prevTerm.exitStatus === undefined) prevTerm.dispose();
-  _orchTerminals.delete(session);
+  // chat. The chosen REPL view (Settings → หน้าตา Claude REPL) is opened by the
+  // caller once this returns the session name.
   try {
     cp.execSync(command, { stdio: "ignore", env: process.env, timeout: 15000 });
   } catch (e) {
