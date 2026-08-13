@@ -33,7 +33,7 @@ test("โซน SSH ต้องไม่กลับมา (ทั้ง HTML, 
 
 test("โซน Git: ปุ่มทุกตัวมี handler จริง (ไม่ใช่ปุ่มตาย)", () => {
   const js = clientScript();
-  for (const cls of ["git-add", "gtest", "gedit", "gdel"]) {
+  for (const cls of ["git-add", "gtest", "gedit", "gdel", "gexp"]) {
     expect(js).toContain('t.classList.contains("' + cls + '")');
   }
   // สลับโซนต้องซ่อน/โชว์ทั้งสองฝั่ง ไม่ใช่โชว์ทับกัน
@@ -56,14 +56,48 @@ test("⛔ view ของโซน Git ต้องไม่มีคำว่า
   expect(block).not.toMatch(/secret|password|token/i);
 });
 
-test("โซน Git: ปุ่ม 'วันหมดอายุ' มี handler + ส่งวันเดิมไปด้วย", () => {
+test("โซน Git: ปุ่ม 'วันหมดอายุ' เปิด modal โหมด exp + พาวันเดิมไปด้วย", () => {
   const js = clientScript();
-  expect(js).toContain('t.classList.contains("gexp")');
-  expect(js).toContain('post("git_expiry"');
-  // ต้องพาวันเดิมไปให้ช่องกรอกตั้งค่าไว้ ไม่ใช่ให้พิมพ์ใหม่ทุกครั้ง
-  expect(js).toContain('t.getAttribute("data-e")');
+  expect(js).toContain('openCred("exp", h, u, t.getAttribute("data-e")');
   // ⛔ gexp ต้องถูกเช็คก่อน .del ตัวท้าย (ปุ่มลบของ account AI) ไม่งั้นคลิกผิดเรื่อง
   expect(js.indexOf('contains("gexp")')).toBeLessThan(js.lastIndexOf('contains("del")'));
+});
+
+// ⛔ user ไม่ชอบ showInputBox ของ host: มันโผล่เป็นแถบเล็ก ๆ ที่ขอบบนจอ (ที่เดียวกับ command
+//    palette) ย้ายไปกลางจอไม่ได้ → 2026-08-13 เปลี่ยนเป็น modal ใน webview ทั้ง 3 ทาง
+test("ใส่ credential ต้องผ่าน modal กลางจอ ไม่ใช่ showInputBox ของ host", () => {
+  const js = clientScript();
+  expect(SRC).toContain('id="cmodal"');
+  expect(SRC).toContain('class="modal-backdrop"');
+  expect(SRC).toContain(".modal-card {");
+  // ทั้ง 3 ทางเข้าเปิด modal ตัวเดียวกัน คนละโหมด
+  for (const mode of ['openCred("add")', 'openCred("pat"', 'openCred("exp"']) {
+    expect(js).toContain(mode);
+  }
+  // host ต้องไม่มี showInputBox สำหรับ PAT/วันหมดอายุเหลืออยู่
+  expect(SRC).not.toContain("promptPat");
+  expect(SRC).not.toContain("promptExpiry");
+});
+
+test("modal: ปุ่มบันทึกติดไว้จนกรอกครบ + เช็ค URL ผ่าน host", () => {
+  const js = clientScript();
+  expect(js).toContain('post("git_url_check"');
+  expect(js).toContain('m.type === "git_url_result"');
+  expect(js).toContain('post("git_cred_save"');
+  expect(js).toContain('post("git_expiry_save"');
+  // ⛔ ผลของ URL เก่าที่มาช้าต้องถูกทิ้ง ไม่ใช่เขียนทับสถานะของ URL ปัจจุบัน
+  expect(js).toContain('if (m.url !== cmEl("cm-url").value.trim()) return;');
+  // ⛔ PAT ต้องถูกล้างออกจาก DOM ตอนปิด (retainContextWhenHidden ทำให้หน้าค้างอยู่)
+  expect(js).toContain('cmEl("cm-pat").value = "";');
+  expect(SRC).toContain('type="password"');
+});
+
+test("⛔ host ต้องไม่เชื่อ host/user ที่ webview ส่งมาโดยไม่ validate", () => {
+  // setGitCredential เป็นด่าน (whitelist + กัน newline) — ต้องถูกเรียกจาก case ที่รับ pat
+  const i = SRC.indexOf('case "git_cred_save"');
+  const j = SRC.indexOf('case "git_expiry_save"');
+  expect(i).toBeGreaterThan(0);
+  expect(SRC.slice(i, j)).toContain("setGitCredential(host, user, pat, exp)");
 });
 
 test("โซน Git: แถวโชว์สถานะหมดอายุ + แยกสีตาม level", () => {
