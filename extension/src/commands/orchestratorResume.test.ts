@@ -11,6 +11,7 @@ import {
   parseOrchesMeta,
   parsePlan,
   parseStateValue,
+  orderForProjectScreen,
   partitionStarred,
   projectScanDirs,
   type ResumableProject,
@@ -219,4 +220,52 @@ test("partitionStarred: starred float to top, sub-order preserved within groups"
   expect(
     partitionStarred(list, new Set(["/x/a", "/x/b", "/x/c", "/x/d"])).map((x) => x.name),
   ).toEqual(["a", "b", "c", "d"]); // all → order unchanged
+});
+
+// The hero card claims "ทำต่อจากล่าสุด". A star must never buy that slot.
+const proj = (name: string): ResumableProject => ({
+  name,
+  path: "/x/" + name,
+  sprintDocs: 0,
+  openWorktrees: 0,
+});
+
+test("orderForProjectScreen: starring an old project does NOT make it the hero", () => {
+  const list = [proj("newest"), proj("b"), proj("ancient"), proj("d")];
+  // ⛔ the bug: partitionStarred put 'ancient' at index 0, i.e. in the hero card.
+  expect(partitionStarred(list, new Set(["/x/ancient"])).map((x) => x.name)[0]).toBe("ancient");
+  // fixed: hero stays 'newest', the star pins 'ancient' to the top of the queue.
+  expect(orderForProjectScreen(list, new Set(["/x/ancient"])).map((x) => x.name)).toEqual([
+    "newest",
+    "ancient",
+    "b",
+    "d",
+  ]);
+});
+
+test("orderForProjectScreen: several stars keep their relative order under the hero", () => {
+  const list = [proj("newest"), proj("b"), proj("c"), proj("d")];
+  expect(orderForProjectScreen(list, new Set(["/x/d", "/x/b"])).map((x) => x.name)).toEqual([
+    "newest",
+    "b",
+    "d",
+    "c",
+  ]);
+});
+
+test("orderForProjectScreen: starring the hero itself changes nothing (no duplicate)", () => {
+  const list = [proj("newest"), proj("b"), proj("c")];
+  expect(orderForProjectScreen(list, new Set(["/x/newest"])).map((x) => x.name)).toEqual([
+    "newest",
+    "b",
+    "c",
+  ]);
+});
+
+test("orderForProjectScreen: no stars → untouched; 0/1 project → untouched copy", () => {
+  const list = [proj("a"), proj("b"), proj("c")];
+  expect(orderForProjectScreen(list, new Set()).map((x) => x.name)).toEqual(["a", "b", "c"]);
+  expect(orderForProjectScreen([], new Set(["/x/a"]))).toEqual([]);
+  expect(orderForProjectScreen([proj("only")], new Set(["/x/only"])).map((x) => x.name)).toEqual(["only"]);
+  expect(orderForProjectScreen(list, new Set())).not.toBe(list); // copy, never mutates
 });

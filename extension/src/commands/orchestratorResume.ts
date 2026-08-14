@@ -148,6 +148,25 @@ export function partitionStarred(
   return [...top, ...rest];
 }
 
+/** Order for the Projects screen, where index 0 is rendered as the HERO card
+ *  titled "ทำต่อจากล่าสุด".
+ *
+ *  ⛔ Why this is not just partitionStarred: the hero slot is a CLAIM ("this is
+ *  the last thing you worked on"), not a ranking slot. Floating starred projects
+ *  through the whole list put a project last touched months ago into that slot,
+ *  which reads as a lie about your own history. A star means "keep this handy" —
+ *  so it pins to the top of the QUEUE, under a hero that stays the genuine
+ *  most-recent project (list arrives sortResumable'd = most recent first).
+ *  Starring the hero itself changes nothing: it is already on top. Pure. */
+export function orderForProjectScreen(
+  list: ResumableProject[],
+  starred: ReadonlySet<string>,
+): ResumableProject[] {
+  if (list.length <= 1) return [...list];
+  const [hero, ...rest] = list;
+  return [hero, ...partitionStarred(rest, starred)];
+}
+
 export type DrivenState = "worker" | "run" | "owner" | "labeled" | "none";
 
 /** Which live signal (if any) proves a project is being driven RIGHT NOW, by

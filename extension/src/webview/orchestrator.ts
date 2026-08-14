@@ -23,7 +23,7 @@ import {
   resolveOwnerRoot,
   tmuxHasSession,
 } from "../commands/startOrchestrator";
-import { partitionStarred, sortResumable, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
+import { orderForProjectScreen, sortResumable, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
 import { removeProjectDir } from "../commands/deleteProject";
 import {
   listDetailDocs,
@@ -204,7 +204,9 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
   const projects = _st?.projects ?? [];
   annotateLiveState(projects); // refresh the live "doing" flag each render (cheap: one tmux call)
   const starred = new Set(starredList());
-  const ordered = partitionStarred(projects, starred); // starred float to top; sub-order preserved
+  // hero (index 0) stays the most-recent project; stars pin to the top of the
+  // queue UNDER it — the hero card is labelled "ทำต่อจากล่าสุด".
+  const ordered = orderForProjectScreen(projects, starred);
   const states = await computeGitStates(ordered, fetch === true);
   // Green-row detector: share ONE `tmux list-sessions` across all rows, computed
   // every render (incl. spin ticks) so an owner/label-driven project doesn't
