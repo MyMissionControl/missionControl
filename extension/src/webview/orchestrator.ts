@@ -199,8 +199,25 @@ function ghView(name: string): boolean | null {
   }
 }
 
+// Navigation token — bumped by every screen push. A push that awaits (git status
+// per project, a GitHub remote lookup) checks it again before posting and drops
+// its result if the user has navigated since.
+//
+// ⛔ Why: on a cold open, pushProjectsScreen spends ~1s reading git state. The user
+// clicks a project during that second, Detail renders — and then the stale list
+// post lands and throws them back to the list, so every project needs TWO clicks
+// (reported 2026-08-14). A screen-name check alone is not enough: clicking project
+// B while A's Detail push is in flight leaves both on "detail", and A could still
+// win. Always compare the token immediately before postMessage, never before the
+// awaits.
+let _nav = 0;
+function stillCurrent(panel: vscode.WebviewPanel, token: number): boolean {
+  return _panel === panel && _nav === token;
+}
+
 async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "spin" = false) {
   _screen = "projects";
+  const token = ++_nav;
   const projects = _st?.projects ?? [];
   annotateLiveState(projects); // refresh the live "doing" flag each render (cheap: one tmux call)
   const starred = new Set(starredList());
@@ -212,6 +229,7 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
   // every render (incl. spin ticks) so an owner/label-driven project doesn't
   // flicker gray between full renders. `fetch==="spin"` only skips the git fetch.
   const sessions = listTmuxSessionsSafe();
+  if (!stillCurrent(panel, token)) return; // user drilled into a project while we read git
   panel.webview.postMessage({
     type: "screen_projects",
     // Full inventory — every dir under projects/, no filter, no view toggle.
@@ -450,16 +468,27 @@ async function pushDetailScreen(panel: vscode.WebviewPanel) {
   const p = _st?.project;
   if (!p) return;
   _screen = "detail";
+  const token = ++_nav;
   const archived = _st?.archived === true;
   const githubUrl = archived ? null : await gitOps.getGithubWebUrl(p.path);
   const docs = listDetailDocs(p.path);
   const deletedAt = archived
     ? (_st?.backups?.find((b) => b.backupDir === p.path)?.deletedAt ?? null)
     : null;
+  // Mirror of the guard in pushProjectsScreen: the GitHub-remote lookup above is a
+  // git call. A Back during it must not drag the user into Detail, and picking a
+  // second project must not land on the first.
+  if (!stillCurrent(panel, token)) return;
   panel.webview.postMessage({
     type: "screen_detail",
-    title: `📁 ${p.name}`,
-    subtitle: archived ? `ลบไปแล้วเมื่อ ${(deletedAt ?? "").slice(0, 10) || "?"}` : `project: ${p.name}`,
+    // No folder emoji: it renders as a blank tofu box in this webview's font, and
+    // the subtitle is the FULL PATH rather than the name again — the old
+    // "project: <name>" line was the title a second time, and the one thing that
+    // page could not tell you was where the project actually lives. Click = copy.
+    title: p.name,
+    subtitle: archived
+      ? `${p.path} · ลบไปแล้วเมื่อ ${(deletedAt ?? "").slice(0, 10) || "?"}`
+      : p.path,
     path: p.path,
     githubUrl,
     archived, // client hides git/preview/continue/delete when true
@@ -674,6 +703,17 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
           return; // do NOT fall through to spawn a twin
         }
         await pushTeamsScreen(panel);
+        return;
+      }
+      case "copy_path": {
+        // Subtitle click on the Detail screen. The path is taken from the HOST's
+        // own state, never from the message — the webview only says "copy it", so
+        // a stray/forged message cannot put arbitrary text on the clipboard.
+        const p = _st.project;
+        if (!p) return;
+        void vscode.env.clipboard.writeText(p.path).then(() => {
+          panel.webview.postMessage({ type: "path_copied" });
+        });
         return;
       }
       case "open_doc": {
@@ -1004,6 +1044,13 @@ function renderShell(): string {
     padding: 10px 16px; border-bottom: 1px solid var(--vscode-panel-border); }
   .topbar h1 { font-size: 14px; margin: 0; font-weight: 600; }
   .topbar .sub { font-size: 11px; opacity: 0.6; margin-top: 3px; font-weight: 400; }
+  /* Detail screen: the sub-line is the project's absolute path — click copies it.
+     Monospace because it is a path, and inline-block so the hover target is the
+     text itself, not the full-width row. */
+  .topbar .sub.copyable { font-family: 'JetBrains Mono', var(--vscode-editor-font-family), ui-monospace, monospace;
+    cursor: pointer; display: inline-block; border-bottom: 1px dashed transparent; }
+  .topbar .sub.copyable:hover { opacity: 0.95; border-bottom-color: currentColor; }
+  .topbar .sub.copied { opacity: 1; color: #3fb950; }
   .topbar .actions { display: flex; gap: 6px; }
   button { background: transparent; color: var(--vscode-foreground);
     border: 1px solid var(--vscode-panel-border); padding: 4px 10px; border-radius: 3px;
@@ -1364,6 +1411,30 @@ function renderShell(): string {
   function el(id){ return document.getElementById(id); }
   function post(t,x){ vscode.postMessage(Object.assign({type:t}, x||{})); }
 
+  // ── Subtitle ──
+  // One setter for every screen, because the Detail screen makes it CLICKABLE
+  // (copies the project's absolute path) and any screen that set it the old way
+  // would inherit a live copy affordance pointing at the previous project.
+  var _subCopy = false;
+  function setSubtitle(text, copyable){
+    var s = el("subtitle");
+    s.textContent = text || '';
+    _subCopy = !!copyable;
+    s.classList.toggle('copyable', _subCopy);
+    s.title = _subCopy ? 'คลิกเพื่อคัดลอก path' : '';
+  }
+  el("subtitle").addEventListener('click', function(){ if(_subCopy) post('copy_path'); });
+  // Confirmation comes from the HOST after the clipboard write actually resolved —
+  // a click that flashes "คัดลอกแล้ว" on its own would be a claim, not a fact.
+  var _copiedT = null;
+  function flashCopied(){
+    var s = el("subtitle"); if(!_subCopy) return;
+    var was = s.textContent;
+    s.classList.add('copied'); s.textContent = 'คัดลอก path แล้ว';
+    if(_copiedT) clearTimeout(_copiedT);
+    _copiedT = setTimeout(function(){ s.classList.remove('copied'); s.textContent = was; }, 1200);
+  }
+
   // "ทำหลาย sprint" centered modal (in-webview so it floats center, not the
   // top command-palette bar that host showInputBox is stuck in). Confirm posts
   // continue_multi{path,count}; host clamps + launches N sprints headless.
@@ -1658,7 +1729,7 @@ function renderShell(): string {
   }
   function renderSplit(){
     el("title").textContent = _detail.title;
-    el("subtitle").textContent = _detail.subtitle;
+    setSubtitle(_detail.subtitle, true); // Detail: the absolute path, click to copy
     el("actions").innerHTML = detailActionsHtml(_detail.githubUrl); wireDetailActions();
     var treeHtml = treeRowsHtml(_tree, 0) || '<div class="tempty">ไม่มีไฟล์ .md</div>';
     var body = _selected
@@ -1775,7 +1846,7 @@ function renderShell(): string {
     el("title").textContent = m.title;
     // No legend when there are projects (keeps the header clean); the plain
     // "no projects" line still shows when the list is empty.
-    el("subtitle").innerHTML = (m.items && m.items.length) ? "" : esc(m.subtitle);
+    setSubtitle((m.items && m.items.length) ? "" : m.subtitle, false);
     el("actions").innerHTML = actionsHtml(false, true, true, true, false, true, 'active'); wireActions(false);
     var items = m.items||[];
     // การ์ด project ที่หลุดจาก list (เสร็จ/หาย) ระหว่างที่ยัง arm ค้าง → เลิก arm+timer ทิ้ง (กันยิงตอนการ์ดไม่อยู่แล้ว)
@@ -1902,7 +1973,7 @@ function renderShell(): string {
   // to switch back to the live list.
   function renderArchived(m){
     _lastProjKey = null;                 // returning to live projects must re-render
-    el("title").textContent = m.title; el("subtitle").textContent = m.subtitle;
+    el("title").textContent = m.title; setSubtitle(m.subtitle, false);
     el("actions").innerHTML = actionsHtml(false, false, false, false, false, true, 'deleted'); wireActions(false);
     var arb=el("archBtn"); if(arb) arb.classList.add('on');
     var items = m.items||[];
@@ -2037,7 +2108,7 @@ function renderShell(): string {
   // same color, and the color space is effectively unlimited (not a fixed palette).
   function tsHue(s){ var h=0; s=String(s||''); for(var i=0;i<s.length;i++){ h=(h*31 + s.charCodeAt(i))>>>0; } return h%360; }
   function renderTeams(m){ disarmAll(); _lastProjKey=null;  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด (+invalidate skip-guard)
-    el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
+    el("title").textContent=m.title; setSubtitle(m.subtitle, false);
     el("actions").innerHTML=actionsHtml(m.canBack, false, false, false, m.githubUrl); wireActions(m.canBack);
     var items=m.items||[];
     if(!items.length){ el("content").innerHTML='<div class="empty">ยังไม่มีทีม — สร้างในหน้า Teams ก่อน</div>'; return; }
@@ -2057,7 +2128,7 @@ function renderShell(): string {
       c.addEventListener('click',function(){post('pick_team',{name:c.dataset.name});});});
   }
   function renderOrch(m){ disarmAll(); _lastProjKey=null;  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด (+invalidate skip-guard)
-    el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
+    el("title").textContent=m.title; setSubtitle(m.subtitle, false);
     el("actions").innerHTML=actionsHtml(false, false); wireActions(false);
     el("content").innerHTML=(m.items||[]).map(function(it){
       return '<div class="card" data-name="'+esc(it.name)+'"><button class="pick">'
@@ -2080,6 +2151,7 @@ function renderShell(): string {
     else if(m.type==="git_auto_result") handleAutoResult(m.path,m.message,m.gen);
     else if(m.type==="open_namemodal") openNameModal(m.default, m.url, m.nameFromUser);
     else if(m.type==="name_result") nmResult(m);
+    else if(m.type==="path_copied") flashCopied();
   });
   post("ready");
 </script></body></html>`;
