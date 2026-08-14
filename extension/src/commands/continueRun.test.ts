@@ -12,6 +12,7 @@ import {
   resolveButtonState,
   resolveContinueTarget,
   decideCancelOutcome,
+  decideAbortOutcome,
   decideContinueAction,
   finishedSessions,
   clampSprintCount,
@@ -170,6 +171,39 @@ test("decideCancelOutcome: sprint already merged → keep_done", () => {
 test("decideCancelOutcome: still running, not merged → revert", () => {
   expect(decideCancelOutcome("running", false)).toBe("revert");
   expect(decideCancelOutcome(undefined, false)).toBe("revert");
+});
+
+// --- Task 4b: decideAbortOutcome — marker ต้องพูดตามที่ abort ทำจริง ---
+// ⛔ เดิม cancel เขียน status "cancelled" ทุกกรณี แม้ execFileSync จะโยน (สคริปต์ engine
+//    ไม่มีในเครื่อง / bash ตาย) — คือ "ยกเลิกแล้วย้อนของคืนแล้ว" ทั้งที่ worktree agents/*
+//    กับ main ยังค้างอยู่ครบ · abort มี 3 คำตอบและมันหมายคนละอย่างกัน จึงต้องอ่านมัน
+
+test("decideAbortOutcome: ABORTED (ย้อน main กลับ base จริง) → cancelled", () => {
+  expect(decideAbortOutcome("ABORTED")).toEqual({ status: "cancelled" });
+});
+
+test("decideAbortOutcome: ABORT_NOOP_AT_BASE (main อยู่ที่ base อยู่แล้ว) → cancelled", () => {
+  expect(decideAbortOutcome("ABORT_NOOP_AT_BASE")).toEqual({ status: "cancelled" });
+});
+
+test("decideAbortOutcome: ABORT_SKIP_PUSHED → done — งานถูก push แล้ว abort จงใจไม่ย้อน", () => {
+  // เรียกว่า cancelled = โกหกว่าถูกย้อนคืน · คำที่ถูกคือ keep-done ตัวเดียวกับ decideCancelOutcome
+  expect(decideAbortOutcome("ABORT_SKIP_PUSHED")).toEqual({ status: "done" });
+});
+
+test("decideAbortOutcome: abort ไม่ได้รัน/พัง → error พร้อมบอกว่าอาจมีของค้าง", () => {
+  const r = decideAbortOutcome(null);
+  expect(r.status).toBe("error");
+  expect(r.errorMsg ?? "").not.toBe("");
+});
+
+test("decideAbortOutcome: คำตอบที่ไม่รู้จัก = ไม่เดาว่าสำเร็จ", () => {
+  expect(decideAbortOutcome("").status).toBe("error");
+  expect(decideAbortOutcome("fatal: not a git repository").status).toBe("error");
+});
+
+test("decideAbortOutcome: verdict คือบรรทัดสุดท้าย (คำเตือนก่อนหน้าไม่กวน)", () => {
+  expect(decideAbortOutcome("land: hard-guard SKIP:no-base\nABORTED\n")).toEqual({ status: "cancelled" });
 });
 
 // --- Task 5: decideContinueAction (▶ ทำต่อ collision guard, state-based) ---

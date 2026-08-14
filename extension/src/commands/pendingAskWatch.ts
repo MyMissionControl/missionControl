@@ -41,6 +41,7 @@ import {
   parsePaneList,
   parseReviewFromPane,
   reviewMatches,
+  sameAsk,
   scanPending,
   type PaneAsk,
   type PendingHit,
@@ -108,9 +109,10 @@ async function sweep(): Promise<PendingHit[]> {
 async function stillUp(hit: PendingHit): Promise<boolean> {
   const text = await capture(hit.pane);
   if (!text) return false;
-  const now = parseAskFromPane(text);
-  if (!now) return false;
-  return now.options.length === hit.ask.options.length && now.question === hit.ask.question;
+  // ⛔ Identity is `askKey`, never a looser local rule (see sameAsk). Comparing
+  // the question plus the option COUNT let a re-asked box through, and the digit
+  // we send is positional — it would land on a different answer.
+  return sameAsk(hit.pane, hit.key, parseAskFromPane(text));
 }
 
 /** Attach to the pane so the human can answer it there — the multi-select shape,

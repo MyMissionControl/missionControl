@@ -262,6 +262,25 @@ export function resolveOrchesLabel(
   return n ? formatOrchesLabel(n, team) : undefined;
 }
 
+/**
+ * env prefix for every interactive `claude` MC launches itself.
+ *
+ * ⛔⛔ Ghost text is Claude Code guessing what a human would type next and drawing
+ * it as the DIM placeholder on an idle pane's `❯` line. The orches engine turns it
+ * off for every pane it opens (orches-integrate.sh `cmd_launch_env`, 2026-08-13) —
+ * panes MC opens never went through that path, so they kept it on. MC is the one
+ * that gets hurt most: `pendingAsk` sends the key `Right`, which is ghost text's
+ * ACCEPT key (bare Enter is safe; accept is Tab/Right only), and `capture-pane -p`
+ * strips the dim attribute so every probe reads the suggestion as text a human left
+ * in the prompt. Measured on newflow6 2026-08-12: 8 distinct strings nobody typed.
+ *
+ * Deliberately a literal and not a shell-out to `orches-integrate.sh launch-env`:
+ * this builder is pure (bun-tested, no fs/child_process) and MC must still launch
+ * on a machine where the skill is not installed. `tests` pin the string on both
+ * sides, so drift shows up as a red test rather than a silently re-enabled feature.
+ */
+const LAUNCH_ENV = "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0 ";
+
 export function buildTmuxLaunchCommand(
   orchestrator: string,
   repoPath: string,
@@ -286,7 +305,7 @@ export function buildTmuxLaunchCommand(
   const modelFlag = model && isSafeModelId(model) ? `--model ${model} ` : "";
   const inner =
     `cd ${shSingleQuote(repoPath)} && ` +
-    `claude ${modelFlag}--dangerously-skip-permissions ${shSingleQuote(kickoff)}`;
+    `${LAUNCH_ENV}claude ${modelFlag}--dangerously-skip-permissions ${shSingleQuote(kickoff)}`;
   // Detached create → lay out → attach (mirrors buildTeamUpCommand). A plain
   // attached `new-session` blocks until the user detaches, so the layout could
   // only run afterward. `-A -d` creates (or no-ops if the session is already

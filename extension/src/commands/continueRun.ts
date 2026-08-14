@@ -199,6 +199,37 @@ export function decideCancelOutcome(
   return "revert";
 }
 
+/**
+ * What the run marker must say once `orches-integrate.sh abort` has spoken.
+ *
+ * ⛔ Cancel used to write `status: "cancelled"` unconditionally — including from
+ * the `catch`, i.e. when bash never ran (engine not installed on this machine) or
+ * died. "cancelled" reads as "the run was stopped AND the tree was put back", so
+ * the card went quiet while `agents/*` worktrees and a moved `main` were still
+ * sitting there. Same unearned-success class as a gate reporting OK it never ran.
+ *
+ * abort has three answers and they mean different things:
+ *   ABORTED            — main was reset back to base. Reverted.
+ *   ABORT_NOOP_AT_BASE — main was already at base; nothing to rewind. Reverted.
+ *   ABORT_SKIP_PUSHED  — origin/main is ahead of base, so abort DELIBERATELY left
+ *                        history alone: the sprint's work is merged upstream and
+ *                        kept. That is keep-done, the same word decideCancelOutcome
+ *                        uses — calling it "cancelled" would claim a revert that
+ *                        was never even attempted.
+ * Anything else (throw, empty, unknown token) = we do not know what state the
+ * repo is in, so say so: `error` renders as a chip carrying errorMsg and leaves
+ * every button enabled, so it informs without blocking.
+ */
+export function decideAbortOutcome(verdict: string | null): { status: RunStatus; errorMsg?: string } {
+  const v = (verdict ?? "").trim().split("\n").pop()?.trim() ?? "";
+  if (v === "ABORTED" || v === "ABORT_NOOP_AT_BASE") return { status: "cancelled" };
+  if (v === "ABORT_SKIP_PUSHED") return { status: "done" };
+  return {
+    status: "error",
+    errorMsg: `ยกเลิก session แล้ว แต่ย้อนของกลับไม่สำเร็จ — abort ตอบว่า "${v || "ไม่ได้ตอบอะไรเลย"}" · worktree agents/* และ main อาจยังค้างอยู่ ต้องตรวจเอง`,
+  };
+}
+
 /** สิ่งที่การ์ด project โชว์ จาก 2 สัญญาณเดิม (ButtonState + driven) + จำนวนงานค้าง:
  *  - busy (spinning/driven) → คงปุ่ม "กำลังทำ" เดิม (คลิกยกเลิก/เข้า session)
  *  - none (ไม่มีงานค้าง) → ไม่มีปุ่ม แม้ marker ค้าง stale/error (0 เหลือ = จบจริง)

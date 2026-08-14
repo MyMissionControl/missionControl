@@ -41,6 +41,23 @@ test("buildTmuxLaunchCommand: default still attaches (unchanged behavior)", () =
   expect(cmd).toContain("tmux attach");
 });
 
+// ⛔⛔ ghost text = ข้อความที่ Claude Code เดาว่าคนจะพิมพ์ต่อ แล้ววาดเป็น placeholder สีจาง
+//    บนบรรทัด ❯ ของเพนที่ว่าง · engine ปิดมันให้ทุกเพนที่ตัวเองเปิดตั้งแต่ 2026-08-13
+//    (orches-integrate.sh cmd_launch_env) แต่เพนที่ **MC เปิดเอง** ไม่ได้ผ่านทางนั้นเลย
+//    MC คือคนที่เจ็บที่สุด: pendingAsk ส่งคีย์ `Right` ซึ่งเป็นปุ่ม accept ของ ghost text
+//    และ `capture-pane -p` ตัดสีจางทิ้ง → อ่านเป็น "มีคนพิมพ์ค้างไว้"
+test("buildTmuxLaunchCommand: ปิด ghost text ในเพนที่ MC เปิดเอง", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/x", "hi", "claude-foreman", [], false);
+  expect(cmd).toContain("&& CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0 claude");
+});
+
+test("buildTmuxLaunchCommand: ปิด ghost text ด้วยแม้ตอนระบุ model", () => {
+  const cmd = buildTmuxLaunchCommand(
+    "foreman", "/x", "hi", "claude-foreman", [], false, undefined, "claude-sonnet-5",
+  );
+  expect(cmd).toContain("&& CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0 claude --model");
+});
+
 test("buildTmuxLaunchCommand: model → 'claude --model <model>' before --dangerously-skip-permissions", () => {
   const cmd = buildTmuxLaunchCommand(
     "foreman", "/x", "hi", "claude-foreman", [], false, undefined, "claude-sonnet-5",

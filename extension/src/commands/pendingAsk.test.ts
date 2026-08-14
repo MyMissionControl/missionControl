@@ -6,6 +6,7 @@ import {
   parseReviewFromPane,
   reviewMatches,
   askKey,
+  sameAsk,
   findOptionByLabel,
   itemLabel,
   buildAnswerArgs,
@@ -200,6 +201,45 @@ describe("askKey", () => {
     const a = parseAskFromPane(REAL_MODAL)!;
     const b = parseAskFromPane(REAL_MODAL.replace("ชอบผลไม้อะไร?", "ชอบสีอะไร?"))!;
     expect(askKey("%1", a)).not.toBe(askKey("%1", b));
+  });
+});
+
+// ── sameAsk — ด่านสุดท้ายก่อนคีย์จะออกไปที่เพน ─────────────────────────────
+// ⛔ ด่านเดิม (pendingAskWatch.stillUp) เทียบแค่ `question` + **จำนวน** ตัวเลือก
+//    กล่องที่ถามคำถามเดิมด้วยชุดตัวเลือกใหม่จึงผ่านด่าน แล้วเลขที่เราส่งไปตกใส่คนละคำตอบ
+//    ตัวตนของกล่องมีนิยามเดียวอยู่แล้วคือ askKey (pane + header + question + ทุก key:label)
+//    ด่านนี้ต้องใช้ตัวเดียวกัน ไม่ใช่กฎที่สองที่หลวมกว่า
+describe("sameAsk", () => {
+  const snap = (text: string) => {
+    const ask = parseAskFromPane(text)!;
+    return { ask, key: askKey("%1", ask) };
+  };
+
+  test("D4 คำถามเดิม + จำนวนตัวเลือกเท่าเดิม แต่ label เปลี่ยน = คนละกล่อง", () => {
+    const before = snap(REAL_MODAL);
+    const now = parseAskFromPane(REAL_MODAL.replace("มะม่วง", "ลำไย"))!;
+    expect(now.options.length).toBe(before.ask.options.length); // ด่านเดิมดูแค่สองอย่างนี้…
+    expect(now.question).toBe(before.ask.question);             // …แล้วปล่อยผ่าน
+    expect(sameAsk("%1", before.key, now)).toBe(false);
+  });
+
+  test("D5 จอเดิมเป๊ะ = กล่องเดิม (ห้าม false negative)", () => {
+    expect(sameAsk("%1", snap(REAL_MODAL).key, parseAskFromPane(REAL_MODAL))).toBe(true);
+  });
+
+  test("D6 เคอร์เซอร์ขยับ / ติ๊ก checkbox ไม่ทำให้กลายเป็นคนละกล่อง", () => {
+    const moved = REAL_MODAL.replace("❯ 1. มะม่วง", "  1. มะม่วง").replace("  2. ทุเรียน", "❯ 2. ทุเรียน");
+    expect(sameAsk("%1", snap(REAL_MODAL).key, parseAskFromPane(moved))).toBe(true);
+    const ticked = REAL_MULTI.replace("1. [ ]", "1. [✔]");
+    expect(sameAsk("%1", snap(REAL_MULTI).key, parseAskFromPane(ticked))).toBe(true);
+  });
+
+  test("D7 ไม่มีกล่องบนจอแล้ว = ไม่ส่ง", () => {
+    expect(sameAsk("%1", snap(REAL_MODAL).key, null)).toBe(false);
+  });
+
+  test("D8 กล่องเดียวกันแต่คนละเพน = ไม่ส่ง", () => {
+    expect(sameAsk("%2", snap(REAL_MODAL).key, parseAskFromPane(REAL_MODAL))).toBe(false);
   });
 });
 

@@ -171,6 +171,25 @@ export function askKey(pane: string, ask: PaneAsk): string {
 }
 
 /**
+ * Is the box on screen RIGHT NOW the same one we snapshotted? The guard that
+ * runs immediately before a digit is sent (pendingAskWatch.stillUp).
+ *
+ * ⛔ It must be `askKey` and nothing looser (fixed 2026-08-14). The old check
+ * compared the question plus the option COUNT, so a box that was answered in the
+ * pane and then re-asked the SAME question with a different option set passed
+ * the guard — and the digit we send is positional, so it lands on a different
+ * answer. Identity of an ask already has one definition in this file; a second,
+ * weaker one at the send site is exactly how the two drift apart.
+ *
+ * Safe against redraws by construction: the parser strips the `❯` cursor and the
+ * `[ ]`/`[✔]` checkbox before the label, so moving the cursor or ticking a box in
+ * the pane does not change the key (test D6).
+ */
+export function sameAsk(pane: string, key: string, now: PaneAsk | null): boolean {
+  return !!now && askKey(pane, now) === key;
+}
+
+/**
  * How an option is written in the QuickPick, and how it is read back.
  *
  * These two are a pair and must never drift: the accept handler receives only

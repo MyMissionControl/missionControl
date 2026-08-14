@@ -22,6 +22,7 @@ import {
 import { readTeamDetailSync } from "./teamsOps";
 import {
   decideCancelOutcome,
+  decideAbortOutcome,
   decideContinueAction,
   readRunMarker,
   resolveContinueTarget,
@@ -581,14 +582,19 @@ export async function cancelContinueRun(project: ResumableProject): Promise<void
     writeRunMarker(project.path, { ...(after ?? marker), status: "done" });
     return;
   }
+  // ⛔ ต้องอ่านคำตอบของ abort ไม่ใช่ทิ้ง stdout แล้วเขียน "cancelled" ทุกกรณี:
+  //    execFileSync โยนได้จริง (เครื่องที่ยังไม่ได้ลง skill = ไม่มีไฟล์ engine) แล้วเดิม catch
+  //    กลืนไว้ → การ์ดเงียบเหมือนย้อนของคืนเรียบร้อย ทั้งที่ worktree agents/* ยังอยู่ครบ
+  let verdict: string | null = null;
   try {
-    cp.execFileSync("bash", [intg, "abort", project.path, marker.baseMainSha ?? ""], {
-      stdio: "ignore",
+    verdict = cp.execFileSync("bash", [intg, "abort", project.path, marker.baseMainSha ?? ""], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
     });
   } catch {
-    /* abort is best-effort; still mark cancelled so the button frees up */
+    verdict = null; // ไม่ได้รัน / รันแล้วพัง — decideAbortOutcome จะตีเป็น error ไม่ใช่ cancelled
   }
-  writeRunMarker(project.path, { ...marker, status: "cancelled" });
+  writeRunMarker(project.path, { ...marker, ...decideAbortOutcome(verdict) });
 }
 
 /** Extra kickoff block for a twin session — same oracle, second brain-thread.
