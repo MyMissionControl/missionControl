@@ -5,6 +5,9 @@ import * as path from "node:path";
 
 import * as vscode from "vscode";
 
+import { fetchSkillsFromGitHub } from "./skillsFetch";
+import { installFetchedSkills } from "./skillsInstall";
+
 // Frontend-only build: skills are read straight off disk from
 // ~/.claude/skills/<name>/SKILL.md — no backend involved. Each skill is a
 // directory containing a SKILL.md whose YAML frontmatter carries `name` and
@@ -100,6 +103,18 @@ export function openSkillsPanel(
       });
       return;
     }
+    if (msg?.type === "upload_url" && typeof msg.url === "string") {
+      void handleUrlUpload(msg.url, (m) => panel.webview.postMessage(m)).then((res) => {
+        skills = listSkills(); // partial success still installed something
+        panel.webview.postMessage({ type: "render_list", skills });
+        panel.webview.postMessage(
+          res.ok
+            ? { type: "upload_url_ok", installed: res.installed, skipped: res.skipped, warning: res.warning }
+            : { type: "upload_error", message: res.message },
+        );
+      });
+      return;
+    }
     if (msg?.type === "toggle_skill" && typeof msg.name === "string") {
       const res = toggleSkill(msg.name, skills);
       if (res.ok) {
@@ -192,7 +207,10 @@ function splitFrontmatter(raw: string): { fm: string; body: string } {
   return m ? { fm: m[1], body: m[2] } : { fm: "", body: raw };
 }
 
-/** Minimal single-line YAML reader for the two keys we need. */
+/** Minimal YAML reader for the four keys we need — single-line values, plus block
+ *  scalars (`description: |-` followed by indented lines), which real skills use
+ *  for long multi-paragraph descriptions (anthropics/skills claude-api does). The
+ *  single-line reader alone put the literal "|-" on the card. */
 function parseFrontmatter(fm: string): {
   name?: string;
   description?: string;
@@ -200,9 +218,22 @@ function parseFrontmatter(fm: string): {
   category?: string;
 } {
   const out: { name?: string; description?: string; installer?: string; category?: string } = {};
+  const lines = fm.split(/\r?\n/);
   for (const key of ["name", "description", "installer", "category"] as const) {
-    const m = fm.match(new RegExp(`^${key}:[ \\t]*(.*)$`, "m"));
-    if (m) out[key] = unquoteYaml(m[1].trim());
+    const idx = lines.findIndex((l) => new RegExp(`^${key}:`).test(l));
+    if (idx < 0) continue;
+    const inline = lines[idx].slice(key.length + 1).trim();
+    if (/^[|>][-+\d]*$/.test(inline)) {
+      // block scalar: take the following indented lines, joined into one string
+      const block: string[] = [];
+      for (let i = idx + 1; i < lines.length; i++) {
+        if (lines[i].trim() && !/^\s/.test(lines[i])) break; // back to column 0 = next key
+        block.push(lines[i].replace(/^\s+/, ""));
+      }
+      out[key] = block.join(" ").replace(/\s+/g, " ").trim();
+    } else {
+      out[key] = unquoteYaml(inline);
+    }
   }
   return out;
 }
@@ -313,6 +344,44 @@ async function handleUpload(
       /* best effort — temp dir cleanup */
     }
   }
+}
+
+// ── Uploading skills from a GitHub URL ───────────────────────────────────────
+
+/** Paste a github.com URL → install EVERY skill under it, each tagged uploaded.
+ *  A folder-of-skills link (…/tree/main/skills) installs the whole set in one go;
+ *  a single skill's folder installs just that one.
+ *
+ *  Already-installed names are skipped, not overwritten — the same rule the .zip
+ *  uploader has always had, and it keeps a re-paste from silently reverting a skill
+ *  the user edited locally. To take an update, delete the skill first.
+ *
+ *  Each skill is written to a temp dir and moved in only once ALL its files are on
+ *  disk, so a mid-download failure can never leave a half-skill that Claude would
+ *  load and act on. Never throws. */
+async function handleUrlUpload(
+  url: string,
+  post: (m: unknown) => void,
+): Promise<
+  | { ok: true; installed: string[]; skipped: string[]; warning?: string }
+  | { ok: false; message: string }
+> {
+  const SKILLS_DIR = skillsDir();
+  const res = await fetchSkillsFromGitHub(url, {
+    skipName: (name) => fs.existsSync(path.join(SKILLS_DIR, name)),
+    onProgress: (p) =>
+      post({ type: "upload_progress", done: p.done, total: p.total, name: p.name }),
+  });
+  if (!res.ok) return res;
+
+  const { installed, failed } = installFetchedSkills(SKILLS_DIR, res.skills, UPLOAD_MARKER);
+  const skipped = [...res.skipped];
+  const failText = failed.map((f) => `${f.name} (${f.message})`).join(" · ");
+  if (!installed.length && !skipped.length) {
+    return { ok: false, message: failText ? `Could not write: ${failText}` : "No skill found" };
+  }
+  const warning = [res.warning, failText ? `could not write: ${failText}` : ""].filter(Boolean).join(" · ");
+  return { ok: true, installed, skipped, warning: warning || undefined };
 }
 
 /** Find the directory holding SKILL.md — the extraction root, or a nested
@@ -542,11 +611,29 @@ function renderShell(): string {
   .localrow .l2 { font-size: 10.5px; color: var(--muted); margin-top: 3px; }
   .localrow .kc { font-family: var(--mono); font-size: 10px; color: var(--faint); border: 1px solid var(--border2); border-radius: 5px; padding: 2px 6px; }
 
+  /* URL row: paste a github link, get every skill under it. Sits UNDER the
+     local-file row — margins live on the separator and the hint, so the two
+     options can be reordered without leaving a double gap. */
+  .urlrow { display: flex; gap: 8px; }
+  .urlrow input { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; font-family: var(--mono); font-size: 11.5px;
+    background: var(--bg); color: var(--txt); border: 1px solid var(--border2); }
+  .urlrow input:focus { outline: none; border-color: var(--accent); }
+  .urlrow button { flex: none; padding: 0 14px; border-radius: 10px; font-size: 12px; font-weight: 700; cursor: pointer;
+    background: var(--accentSoft); color: var(--txt); border: 1px solid var(--accent); }
+  .urlrow button:hover { filter: brightness(1.15); }
+  .urlrow button[disabled] { opacity: .5; cursor: default; filter: none; }
+  .urlhint { font-size: 10.5px; color: var(--muted); margin: 7px 0 0; line-height: 1.5; }
+  .urlhint code { font-family: var(--mono); font-size: 10px; color: var(--faint); }
+  .dsep { display: flex; align-items: center; gap: 10px; margin: 13px 0; color: var(--faint); font-size: 10.5px; }
+  .dsep::before, .dsep::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
   /* Toast */
   #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 70; display: none;
     font-size: 12px; padding: 9px 16px; border-radius: 9px; background: var(--panel); border: 1px solid var(--border2);
     box-shadow: 0 10px 30px rgba(0,0,0,.4); }
-  #toast.ok { color: #5ecf8f; } #toast.err { color: #f4796b; }
+  /* warn = nothing to do (already installed) — neither a success nor a failure,
+     so it must not be red: red reads as "the paste broke". */
+  #toast.ok { color: #5ecf8f; } #toast.err { color: #f4796b; } #toast.warn { color: #e0b341; }
 </style>
 </head>
 <body>
@@ -580,13 +667,19 @@ function renderShell(): string {
 
 <div class="scrim" id="scrim" hidden>
   <div class="dialog">
-    <div class="dhead"><span class="dt">Browse skills</span><span class="spacer"></span><button class="dclose" id="dclose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+    <div class="dhead"><span class="dt">Add a skill</span><span class="spacer"></span><button class="dclose" id="dclose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
     <div class="dbody">
       <div class="localrow" id="localrow">
         <svg class="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg>
-        <div class="lt"><div class="l1">เลือก skill จากเครื่อง</div><div class="l2">เปิด file browser ของระบบ</div></div>
+        <div class="lt"><div class="l1">Pick a skill from this machine</div><div class="l2">Opens the system file browser</div></div>
         <span class="kc">Ctrl O</span>
       </div>
+      <div class="dsep">or</div>
+      <div class="urlrow">
+        <input id="urlInput" type="text" spellcheck="false" placeholder="Paste a GitHub link — https://github.com/anthropics/skills/tree/main/skills" />
+        <button id="urlGo">Fetch</button>
+      </div>
+      <div class="urlhint">A link to a folder of skills installs every skill in it at once · a single skill's link works too · all land under <code>uploaded</code> · ones you already have are skipped</div>
     </div>
   </div>
 </div>
@@ -729,14 +822,40 @@ function renderShell(): string {
   }
   async function handleFile(file) {
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".zip")) { toast("รองรับเฉพาะไฟล์ .zip", "err"); return; }
-    if (file.size > 25 * 1024 * 1024) { toast("ไฟล์ใหญ่เกิน (สูงสุด 25 MB)", "err"); return; }
+    if (!file.name.toLowerCase().endsWith(".zip")) { toast("Only .zip files are supported", "err"); return; }
+    if (file.size > 25 * 1024 * 1024) { toast("File too large (max 25 MB)", "err"); return; }
     closeModal();
-    toast("กำลังอัปโหลด " + file.name + " …", "");
+    toast("Uploading " + file.name + " …", "");
     try {
       var buf = await file.arrayBuffer();
       vscode.postMessage({ type: "upload_skill", filename: file.name, dataB64: toB64(buf) });
-    } catch (e) { toast("อ่านไฟล์ไม่ได้: " + (e && e.message ? e.message : e), "err"); }
+    } catch (e) { toast("Could not read the file: " + (e && e.message ? e.message : e), "err"); }
+  }
+
+  // ── Pull skills from a GitHub URL ──
+  // The button locks while the host works: one paste can be 400 files, and a second
+  // click would run the whole traversal again against a half-written skills dir.
+  var urlBusy = false;
+  function setUrlBusy(on) {
+    urlBusy = on;
+    var b = document.getElementById("urlGo");
+    if (on) b.setAttribute("disabled", ""); else b.removeAttribute("disabled");
+    b.textContent = on ? "Fetching…" : "Fetch";
+  }
+  function submitUrl() {
+    if (urlBusy) return;
+    var input = document.getElementById("urlInput");
+    var url = (input.value || "").trim();
+    if (!url) { toast("Paste a GitHub link first", "err"); return; }
+    // No regex on purpose — this script lives in a TS template literal where a
+    // backslash is eaten (see the IMPORTANT note above renderShell).
+    var lower = url.toLowerCase();
+    if (lower.indexOf("http://") !== 0 && lower.indexOf("https://") !== 0) {
+      toast("The link must start with http(s)://", "err"); return;
+    }
+    setUrlBusy(true);
+    toast("Reading the skill list…", "");
+    vscode.postMessage({ type: "upload_url", url: url });
   }
 
   // ── Events (delegated) ──
@@ -754,6 +873,7 @@ function renderShell(): string {
     var id = (t.closest ? t.closest("[id]") : null);
     id = id ? id.id : "";
     if (id === "reload") { vscode.postMessage({ type: "reload" }); }
+    else if (id === "urlGo") { submitUrl(); }
     else if (id === "upload") { openModal(); }
     else if (id === "dclose" || id === "scrim") { closeModal(); }
     else if (id === "localrow") { fileInput.click(); }
@@ -763,7 +883,11 @@ function renderShell(): string {
   document.addEventListener("input", function (e) {
     if (e.target && e.target.id === "q") { STATE.query = e.target.value || ""; STATE.page = 0; render(); }
   });
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeModal(); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closeModal();
+    // Enter in the URL box = press Fetch. Paste-and-go is the whole point of the row.
+    else if (e.key === "Enter" && e.target && e.target.id === "urlInput") { e.preventDefault(); submitUrl(); }
+  });
   fileInput.addEventListener("change", function () {
     var f = fileInput.files && fileInput.files[0];
     if (f) handleFile(f);
@@ -785,8 +909,27 @@ function renderShell(): string {
     var m = ev.data;
     if (!m || typeof m.type !== "string") return;
     if (m.type === "render_list") { STATE.skills = m.skills || []; render(); }
-    else if (m.type === "upload_ok") { STATE.filter = "uploaded"; STATE.page = 0; render(); toast("อัปโหลด " + m.name + " แล้ว", "ok"); }
-    else if (m.type === "upload_error") { toast(m.message || "อัปโหลดไม่สำเร็จ", "err"); }
+    else if (m.type === "upload_ok") { STATE.filter = "uploaded"; STATE.page = 0; render(); toast("Installed " + m.name, "ok"); }
+    else if (m.type === "upload_progress") {
+      // "3/17 · pdf" — a 10 MB repo takes a while and a silent toast reads as a hang.
+      toast("Fetching " + (m.done + 1) + "/" + m.total + (m.name ? " · " + m.name : "") + " …", "");
+    }
+    else if (m.type === "upload_url_ok") {
+      setUrlBusy(false);
+      closeModal();
+      STATE.filter = "uploaded"; STATE.page = 0; render();
+      var names = m.installed || [], skips = m.skipped || [];
+      var ins = names.length, sk = skips.length;
+      // Nothing installed because it is ALREADY here is not a failure and must not
+      // read like "no skill found" — that wording belongs to an empty link.
+      var msg;
+      if (ins) msg = "Installed " + ins + " skill" + (ins > 1 ? "s" : "") + (sk ? " · " + sk + " already installed" : "");
+      else if (sk === 1) msg = "Skill already installed: " + skips[0];
+      else msg = sk + " skills already installed";
+      if (m.warning) msg += " · " + m.warning;
+      toast(msg, ins ? "ok" : "warn");
+    }
+    else if (m.type === "upload_error") { setUrlBusy(false); toast(m.message || "Upload failed", "err"); }
   });
 
   vscode.postMessage({ type: "ready" });

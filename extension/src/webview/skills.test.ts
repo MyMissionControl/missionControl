@@ -38,6 +38,26 @@ describe("listSkills grouping", () => {
     }
   });
 
+  test("a block-scalar description (|-) reads as text, not the literal '|-'", async () => {
+    // Real skills use this for long descriptions (anthropics/skills claude-api),
+    // and they arrive here through the GitHub uploader.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mc-skills-"));
+    process.env.MC_SKILLS_DIR = tmp;
+    try {
+      writeSkill(tmp, "blocky", "name: blocky\ndescription: |-\n  first line here.\n  second line here.");
+      writeSkill(tmp, "folded", "name: folded\ndescription: >\n  folded text.\ninstaller: auto-skill\ncategory: testing");
+      const { listSkills } = await import("./skills");
+      const byName = Object.fromEntries(listSkills().map((s) => [s.name, s]));
+      expect(byName["blocky"].description).toBe("first line here. second line here.");
+      expect(byName["folded"].description).toBe("folded text.");
+      // keys AFTER the block scalar are still read — the block must stop at column 0
+      expect(byName["folded"].category).toBe("testing");
+    } finally {
+      delete process.env.MC_SKILLS_DIR;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("generated skills can be toggled off/on (rename SKILL.md <-> .disabled); system skills cannot", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mc-skills-"));
     process.env.MC_SKILLS_DIR = tmp;
