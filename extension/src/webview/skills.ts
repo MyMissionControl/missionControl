@@ -6,6 +6,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 
 import { fetchSkillsFromGitHub } from "./skillsFetch";
+import { browseHub, fetchHubSkill, isSafeHubName, isSafeHubOwner, isSafeHubVersion } from "./skillsHub";
 import { installFetchedSkills } from "./skillsInstall";
 
 // Frontend-only build: skills are read straight off disk from
@@ -112,6 +113,64 @@ export function openSkillsPanel(
             ? { type: "upload_url_ok", installed: res.installed, skipped: res.skipped, warning: res.warning }
             : { type: "upload_error", message: res.message },
         );
+      });
+      return;
+    }
+    if (msg?.type === "hub_browse") {
+      const q = typeof msg.q === "string" ? msg.q : "";
+      const cursor = typeof msg.cursor === "string" ? msg.cursor : null;
+      void browseHub({ q, cursor }).then((res) => {
+        panel.webview.postMessage(
+          res.ok
+            ? {
+                type: "hub_list",
+                append: !!cursor,
+                // "installed" is decided HERE, by the same folder check the installer
+                // refuses on — so the button can never offer a download that would
+                // then be rejected.
+                items: res.value.items.map((s) => ({
+                  ...s,
+                  installed: fs.existsSync(path.join(skillsDir(), s.name)),
+                })),
+                nextCursor: res.value.nextCursor,
+              }
+            : { type: "hub_error", message: res.message },
+        );
+      });
+      return;
+    }
+    if (msg?.type === "hub_install") {
+      const name = msg.name;
+      const version = msg.version;
+      // owner disambiguates: several publishers use the same package name and the
+      // registry answers 409 without it.
+      const owner = typeof msg.owner === "string" ? msg.owner : "";
+      if (!isSafeHubName(name) || !isSafeHubVersion(version) || (owner && !isSafeHubOwner(owner))) {
+        panel.webview.postMessage({ type: "hub_error", message: "Unsafe skill name, version or owner" });
+        return;
+      }
+      if (fs.existsSync(path.join(skillsDir(), name))) {
+        // Someone installed it between the list and the click.
+        panel.webview.postMessage({ type: "hub_installed", name, already: true });
+        return;
+      }
+      void fetchHubSkill(name, version, owner).then((res) => {
+        if (!res.ok) {
+          panel.webview.postMessage({ type: "hub_error", name, message: res.message });
+          return;
+        }
+        const rep = installFetchedSkills(skillsDir(), [res.value], UPLOAD_MARKER);
+        if (!rep.installed.length) {
+          panel.webview.postMessage({
+            type: "hub_error",
+            name,
+            message: rep.failed[0]?.message ?? "Could not write the skill",
+          });
+          return;
+        }
+        skills = listSkills();
+        panel.webview.postMessage({ type: "render_list", skills });
+        panel.webview.postMessage({ type: "hub_installed", name });
       });
       return;
     }
@@ -550,17 +609,37 @@ function renderShell(): string {
   .grid-head .gl { font-family: var(--mono); font-size: 10.5px; letter-spacing: 2px; font-weight: 600; color: var(--faint); }
   .grid-head .rng { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
   .grid-head .spacer { flex: 1; }
-  .pager { display: flex; align-items: center; gap: 7px; }
+  .pager { display: flex; align-items: center; gap: 6px; }
+  /* the hidden attribute alone loses to display:flex — without this the pager
+     showed even when there is a single page. */
+  .pager[hidden] { display: none; }
+  .pager .pnums { display: flex; align-items: center; gap: 5px; }
   .pager .pg { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
     border-radius: 7px; background: var(--card); border: 1px solid var(--border2); color: var(--txt); cursor: pointer; }
   .pager .pg svg { width: 13px; height: 13px; }
   .pager .pg:hover:not([disabled]) { border-color: var(--accent); }
   .pager .pg[disabled] { color: var(--faint); opacity: .4; cursor: default; }
-  .pager .pi { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 34px; text-align: center; }
+  /* Numbered pages: you can see how many there are and jump straight to one. */
+  .pager .pgn { height: 26px; min-width: 26px; padding: 0 7px; border-radius: 7px; font-family: var(--mono); font-size: 11px;
+    background: var(--card); border: 1px solid var(--border2); color: var(--muted); cursor: pointer; }
+  .pager .pgn:hover { border-color: var(--accent); color: var(--txt); }
+  .pager .pgn.cur { background: var(--accentSoft); border-color: var(--accent); color: var(--txt); font-weight: 700; }
+  /* The one page whose rows are not downloaded yet — dashed = "this one fetches". */
+  .pager .pgn.more { border-style: dashed; }
+  .pager .pgn[disabled] { opacity: .5; cursor: default; }
+  .pager .gap { font-family: var(--mono); font-size: 11px; color: var(--faint); padding: 0 1px; }
 
+  /* grid-auto-rows: max-content is load-bearing. With plain auto rows, a grid
+     taller than its own box squeezes EVERY row to an equal slice of that box
+     (measured: 42px rows holding 177px cards) and .scard's overflow:hidden then
+     silently ate the summary and half the download button. Rows size to their
+     content; the GRID scrolls. */
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; align-content: start;
-    flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px; }
+    grid-auto-rows: max-content; flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px; }
   @media (max-width: 780px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  /* A ClawHub row carries a registry name + owner + version + downloads + summary,
+     which does not fit a local-skill column: wider columns, fewer of them. */
+  .grid.hub { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
 
   .scard { position: relative; padding: 13px 13px 13px 16px; border-radius: 11px; background: var(--card);
     border: 1px solid var(--border); overflow: hidden; cursor: pointer; }
@@ -571,7 +650,11 @@ function renderShell(): string {
   .scard .ctext { flex: 1; min-width: 0; }
   .scard .cname { font-family: var(--mono); font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .scard .ccat { font-family: var(--mono); font-size: 9px; letter-spacing: 1.2px; color: var(--faint); margin-top: 4px; }
-  .scard .cdesc { font-size: 10.5px; color: var(--muted); line-height: 1.55; margin-top: 9px; }
+  /* Three lines, then an ellipsis: a registry summary can run six lines in a
+     narrow column, which turns the grid into a wall of text with no two cards
+     the same height. The full text is on the card's title attribute. */
+  .scard .cdesc { font-size: 10.5px; color: var(--muted); line-height: 1.55; margin-top: 9px;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 
   /* On/off switch (generated + uploaded) */
   .sw { flex: none; position: relative; width: 32px; height: 18px; border-radius: 9px; cursor: pointer;
@@ -587,6 +670,27 @@ function renderShell(): string {
   .badge svg { width: 9px; height: 9px; }
 
   .empty { color: var(--faint); font-size: 13px; padding: 30px 4px; }
+
+  /* ClawHub (remote catalogue) cards: same shell as a local skill card, but the
+     card is not clickable (there is no local file to open yet) and the control is
+     a download button on its OWN row. Sharing the local card's top row put a
+     ~90px button beside the title in a ~270px column, which chopped every name
+     down to "self-improv…" — the name now owns the full width and wraps once. */
+  .scard.hub { cursor: default; padding: 13px 14px 12px 16px; }
+  .scard.hub .cname { white-space: normal; overflow: hidden; text-overflow: clip; font-size: 12.5px; line-height: 1.35;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .scard.hub .ccat { text-transform: none; letter-spacing: 0; font-family: var(--mono); font-size: 9.5px; }
+  .scard.hub .cdesc { margin-top: 8px; }
+  .hfoot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 11px; }
+  .hfoot .off { margin-right: auto; font-family: var(--mono); font-size: 9.5px; color: var(--faint); }
+  .hbtn { flex: none; padding: 6px 14px; border-radius: 8px; font-size: 11.5px; font-weight: 700; cursor: pointer;
+    background: rgba(139,124,246,.16); color: var(--txt); border: 1px solid #8b7cf6; }
+  .hbtn:hover { filter: brightness(1.2); }
+  .hbtn[disabled], .hbtn.busy { opacity: .55; cursor: default; filter: none; }
+  /* "Installed" is a STATE, not a button — flat, no hover, nothing to press. */
+  .hbtn.done { background: transparent; border-color: var(--border2); color: var(--faint); cursor: default; font-weight: 600; }
+  .scard.hub.installed { opacity: .72; }
+  .hretry { display: flex; justify-content: center; padding: 6px 0 2px; }
 
   /* Browse-skills modal */
   .scrim { position: fixed; inset: 0; background: rgba(3,8,12,.62); display: flex; align-items: center; justify-content: center;
@@ -656,7 +760,7 @@ function renderShell(): string {
         <span class="spacer"></span>
         <div class="pager" id="pager" hidden>
           <button class="pg" id="pg-prev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
-          <span class="pi" id="pg-info"></span>
+          <span class="pnums" id="pg-nums"></span>
           <button class="pg" id="pg-next"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
         </div>
       </div>
@@ -693,12 +797,19 @@ function renderShell(): string {
     document.documentElement.dataset.theme = (b.contains("vscode-light") || b.contains("vscode-high-contrast-light")) ? "light" : "dark"; })();
 
   var PAGE_SIZE = 15;
+  var HUB_PAGE = 12;   // rows per SCREEN; the host fetches 100 rows per request
   var STATE = { skills: [], filter: "all", page: 0, query: "" };
+  // ClawHub tab: a REMOTE catalogue, so it keeps its own list/cursor/errors and
+  // never mixes into STATE.skills (which is "what is on this machine").
+  // HUB.page is a page of what has been downloaded so far — one request brings
+  // 100 rows, i.e. pages 1–9, and only page 10 has to go back to the network.
+  var HUB = { items: [], cursor: null, loading: false, error: "", loaded: false, q: "", busy: {}, page: 0 };
   var CATS = [
     { key: "all", label: "ALL SKILLS", color: "var(--accent2)" },
     { key: "system", label: "SYSTEM", color: "#4f9cf9" },
     { key: "generated", label: "GENERATED", color: "#e8a33d" },
-    { key: "uploaded", label: "UPLOADED", color: "#e879a8" }
+    { key: "uploaded", label: "UPLOADED", color: "#e879a8" },
+    { key: "clawhub", label: "CLAWHUB", color: "#8b7cf6" }
   ];
   function catMeta(k) { for (var i = 0; i < CATS.length; i++) if (CATS[i].key === k) return CATS[i]; return CATS[0]; }
   function catColor(g) { return catMeta(g === "system" || g === "generated" || g === "uploaded" ? g : "all").color; }
@@ -745,15 +856,133 @@ function renderShell(): string {
   }
   function renderRail() {
     var html = CATS.map(function (c) {
+      var active = STATE.filter === c.key ? " active" : "";
+      // CLAWHUB counts nothing local — its sub-line says what it is, and its
+      // count is however many rows are loaded from the registry so far.
+      if (c.key === "clawhub") {
+        return '<div class="tile' + active + '" data-filter="clawhub" style="--tc:' + c.color + '">' +
+          '<span class="cbar"></span>' +
+          '<div class="tb"><div class="tl">' + c.label + '</div><div class="ts">online catalogue</div></div>' +
+          '<div class="tc">' + (HUB.items.length ? HUB.items.length + (HUB.cursor ? "+" : "") : "→") + "</div></div>";
+      }
       var n = counts(c.key);
       var sub = c.key === "system" ? "always on" : (n.on + " / " + n.total + " on");
-      var active = STATE.filter === c.key ? " active" : "";
       return '<div class="tile' + active + '" data-filter="' + c.key + '" style="--tc:' + c.color + '">' +
         '<span class="cbar"></span>' +
         '<div class="tb"><div class="tl">' + c.label + '</div><div class="ts">' + sub + "</div></div>" +
         '<div class="tc">' + n.total + "</div></div>";
     }).join("");
     document.getElementById("rail").innerHTML = html;
+  }
+
+  // ── ClawHub cards ──
+  function fmtNum(n) {
+    n = Number(n) || 0;
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k";
+    return String(n);
+  }
+  // The download control sits on its OWN row: sharing the title row put a ~90px
+  // button in a ~270px column and every name came out as "self-improv…".
+  function hubCard(s) {
+    var busy = !!HUB.busy[s.name];
+    var btn = s.installed
+      ? '<span class="hbtn done">Installed</span>'
+      : '<button class="hbtn' + (busy ? " busy" : "") + '" data-get="' + esc(s.name) + '" data-ver="' + esc(s.version) + '" data-owner="' + esc(s.owner) + '"' +
+        (busy ? " disabled" : "") + '>' + (busy ? "Downloading…" : "Download") + '</button>';
+    var meta = '@' + esc(s.owner) + ' · v' + esc(s.version) + ' · ' + fmtNum(s.downloads) + ' dl';
+    return '<div class="scard hub' + (s.installed ? " installed" : "") + '" style="--sc:#8b7cf6" title="' + esc(s.name) + '">' +
+      '<span class="cbar"></span>' +
+      '<div class="cname">' + esc(s.displayName) + "</div>" +
+      '<div class="ccat">' + meta + "</div>" +
+      '<div class="cdesc" title="' + esc(s.summary) + '">' + (s.summary ? esc(s.summary) : "(no description)") + "</div>" +
+      '<div class="hfoot">' + btn + "</div></div>";
+  }
+
+  function requestHub(cursor) {
+    HUB.loading = true;
+    HUB.error = "";
+    if (!cursor) { HUB.items = []; HUB.cursor = null; HUB.page = 0; }
+    HUB.q = STATE.query;
+    render();
+    vscode.postMessage({ type: "hub_browse", q: STATE.query, cursor: cursor || null });
+  }
+
+  // Jump to a ClawHub page. Pages past what is downloaded are legal: the page
+  // number itself pulls the next 100 rows and then lands there, which is why the
+  // pager can offer page N+1 before its rows exist.
+  function gotoHubPage(n) {
+    if (n < 0) return;
+    var loaded = Math.ceil(HUB.items.length / HUB_PAGE);
+    if (n >= loaded) {
+      if (!HUB.cursor || HUB.loading) return;
+      HUB.page = n;
+      requestHub(HUB.cursor);
+      return;
+    }
+    HUB.page = n;
+    render();
+    document.getElementById("grid").scrollTop = 0;
+  }
+
+  function renderHub() {
+    var grid = document.getElementById("grid");
+    grid.classList.add("hub");
+    var total = HUB.items.length;
+    var loaded = Math.max(1, Math.ceil(total / HUB_PAGE));
+    if (!HUB.loading && HUB.page > loaded - 1) HUB.page = loaded - 1;
+    if (HUB.page < 0) HUB.page = 0;
+    var start = HUB.page * HUB_PAGE;
+    var slice = HUB.items.slice(start, start + HUB_PAGE);
+
+    document.getElementById("grid-label").textContent = "CLAWHUB";
+    document.getElementById("grid-range").textContent = slice.length
+      ? ("— " + (start + 1) + "–" + (start + slice.length) + " of " + total + (HUB.cursor ? "+" : "") +
+        (STATE.query ? ' for "' + esc(STATE.query) + '"' : " by downloads"))
+      : "";
+
+    var body;
+    if (HUB.error) body = '<div class="empty">' + esc(HUB.error) + '<div class="hretry"><button class="hbtn" id="hub-retry">Retry</button></div></div>';
+    else if (HUB.loading && !slice.length) body = '<div class="empty">Loading from ClawHub…</div>';
+    else if (!total) body = '<div class="empty">No skill found on ClawHub</div>';
+    else body = slice.map(hubCard).join("");
+    grid.innerHTML = body;
+
+    // One extra page number when the registry says there is more — clicking it
+    // fetches. Everything before it is already in memory and switches instantly.
+    // The pager is drawn from what is LOADED, not from what is on screen, so it
+    // stays put while that fetch runs instead of blinking away for a second.
+    renderPager(HUB.page, HUB.error || !total ? 0 : loaded + (HUB.cursor ? 1 : 0), !!HUB.cursor);
+  }
+
+  // ── Pager ──
+  // Up to 7 slots: first, last, current ±1, "…" for what is skipped.
+  function pageWindow(cur, pages) {
+    var out = [], i;
+    if (pages <= 7) { for (i = 1; i <= pages; i++) out.push(i); return out; }
+    var lo = Math.max(2, cur - 1), hi = Math.min(pages - 1, cur + 1);
+    if (cur <= 3) { lo = 2; hi = 4; }
+    if (cur >= pages - 2) { lo = pages - 3; hi = pages - 1; }
+    out.push(1);
+    if (lo > 2) out.push("gap");
+    for (i = lo; i <= hi; i++) out.push(i);
+    if (hi < pages - 1) out.push("gap");
+    out.push(pages);
+    return out;
+  }
+  function renderPager(cur, pages, lastNeedsFetch) {
+    var pager = document.getElementById("pager");
+    if (pages <= 1) { pager.setAttribute("hidden", ""); return; }
+    pager.removeAttribute("hidden");
+    document.getElementById("pg-nums").innerHTML = pageWindow(cur + 1, pages).map(function (p) {
+      if (p === "gap") return '<span class="gap">…</span>';
+      var more = lastNeedsFetch && p === pages;
+      return '<button class="pgn' + (p === cur + 1 ? " cur" : "") + (more ? " more" : "") +
+        '" data-page="' + p + '" title="' + (more ? "Load the next 100 from ClawHub" : "Page " + p) + '">' + p + "</button>";
+    }).join("");
+    var prev = document.getElementById("pg-prev"), next = document.getElementById("pg-next");
+    if (cur <= 0) prev.setAttribute("disabled", ""); else prev.removeAttribute("disabled");
+    if (cur >= pages - 1) next.setAttribute("disabled", ""); else next.removeAttribute("disabled");
   }
 
   function skillCard(s) {
@@ -775,6 +1004,7 @@ function renderShell(): string {
   function render() {
     renderPill();
     renderRail();
+    if (STATE.filter === "clawhub") { renderHub(); return; }
     var list = filtered();
     var total = list.length;
     var pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -787,21 +1017,13 @@ function renderShell(): string {
     document.getElementById("grid-range").textContent = total ? ("— " + (start + 1) + "–" + (start + slice.length) + " จาก " + total) : "";
 
     var grid = document.getElementById("grid");
+    grid.classList.remove("hub");
     if (!total) {
       grid.innerHTML = '<div class="empty">' + (STATE.query ? "ไม่พบ skill ที่ตรงกับคำค้น" : "ไม่พบ skill ในหมวดนี้") + "</div>";
     } else {
       grid.innerHTML = slice.map(skillCard).join("");
     }
-
-    var pager = document.getElementById("pager");
-    if (pages <= 1) { pager.setAttribute("hidden", ""); }
-    else {
-      pager.removeAttribute("hidden");
-      document.getElementById("pg-info").textContent = (STATE.page + 1) + " / " + pages;
-      var prev = document.getElementById("pg-prev"), next = document.getElementById("pg-next");
-      if (STATE.page <= 0) prev.setAttribute("disabled", ""); else prev.removeAttribute("disabled");
-      if (STATE.page >= pages - 1) next.setAttribute("disabled", ""); else next.removeAttribute("disabled");
-    }
+    renderPager(STATE.page, total ? pages : 0, false);
   }
 
   // ── Upload / modal ──
@@ -862,13 +1084,38 @@ function renderShell(): string {
   document.addEventListener("click", function (e) {
     var t = e.target;
     var tile = t.closest ? t.closest(".tile") : null;
-    if (tile) { STATE.filter = tile.getAttribute("data-filter"); STATE.page = 0; render(); return; }
+    if (tile) {
+      STATE.filter = tile.getAttribute("data-filter"); STATE.page = 0;
+      // Fetch the catalogue the first time the tab is opened, not on panel load —
+      // a user who never opens it never calls out to the network.
+      if (STATE.filter === "clawhub" && !HUB.loaded && !HUB.loading) { HUB.loaded = true; requestHub(null); return; }
+      render(); return;
+    }
+
+    var get = t.closest ? t.closest(".hbtn[data-get]") : null;
+    if (get) {
+      e.stopPropagation();
+      var gname = get.getAttribute("data-get");
+      if (HUB.busy[gname]) return;          // already downloading this one
+      HUB.busy[gname] = true; render();
+      vscode.postMessage({ type: "hub_install", name: gname, version: get.getAttribute("data-ver"), owner: get.getAttribute("data-owner") });
+      return;
+    }
+
+    var pgn = t.closest ? t.closest(".pgn[data-page]") : null;
+    if (pgn) {
+      var pnum = Number(pgn.getAttribute("data-page")) - 1;
+      if (STATE.filter === "clawhub") gotoHubPage(pnum);
+      else { STATE.page = pnum; render(); document.getElementById("grid").scrollTop = 0; }
+      return;
+    }
 
     var tog = t.closest ? t.closest(".sw") : null;
     if (tog) { e.stopPropagation(); vscode.postMessage({ type: "toggle_skill", name: tog.getAttribute("data-tog") }); return; }
 
     var card = t.closest ? t.closest(".scard") : null;
-    if (card) { vscode.postMessage({ type: "open_skill", name: card.getAttribute("data-name") }); return; }
+    // A ClawHub card is not a local file — nothing to open in the editor.
+    if (card && !card.classList.contains("hub")) { vscode.postMessage({ type: "open_skill", name: card.getAttribute("data-name") }); return; }
 
     var id = (t.closest ? t.closest("[id]") : null);
     id = id ? id.id : "";
@@ -877,11 +1124,28 @@ function renderShell(): string {
     else if (id === "upload") { openModal(); }
     else if (id === "dclose" || id === "scrim") { closeModal(); }
     else if (id === "localrow") { fileInput.click(); }
-    else if (id === "pg-prev") { if (STATE.page > 0) { STATE.page--; render(); document.getElementById("grid").scrollTop = 0; } }
-    else if (id === "pg-next") { STATE.page++; render(); document.getElementById("grid").scrollTop = 0; }
+    else if (id === "pg-prev") {
+      if (STATE.filter === "clawhub") gotoHubPage(HUB.page - 1);
+      else if (STATE.page > 0) { STATE.page--; render(); document.getElementById("grid").scrollTop = 0; }
+    }
+    else if (id === "pg-next") {
+      if (STATE.filter === "clawhub") gotoHubPage(HUB.page + 1);
+      else { STATE.page++; render(); document.getElementById("grid").scrollTop = 0; }
+    }
+    else if (id === "hub-retry") { requestHub(null); }
   });
+  // The one search box drives both views. Local filtering is instant, so it stays
+  // keystroke-by-keystroke; ClawHub is a network call, so it waits for a pause.
+  var hubDebounce = null;
   document.addEventListener("input", function (e) {
-    if (e.target && e.target.id === "q") { STATE.query = e.target.value || ""; STATE.page = 0; render(); }
+    if (!e.target || e.target.id !== "q") return;
+    STATE.query = e.target.value || ""; STATE.page = 0;
+    if (STATE.filter === "clawhub") {
+      if (hubDebounce) clearTimeout(hubDebounce);
+      hubDebounce = setTimeout(function () { HUB.loaded = true; requestHub(null); }, 350);
+      return;
+    }
+    render();
   });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") closeModal();
@@ -930,6 +1194,29 @@ function renderShell(): string {
       toast(msg, ins ? "ok" : "warn");
     }
     else if (m.type === "upload_error") { setUrlBusy(false); toast(m.message || "Upload failed", "err"); }
+    else if (m.type === "hub_list") {
+      HUB.loading = false; HUB.error = "";
+      HUB.items = m.append ? HUB.items.concat(m.items || []) : (m.items || []);
+      HUB.cursor = m.nextCursor || null;
+      if (STATE.filter === "clawhub") { render(); document.getElementById("grid").scrollTop = 0; }
+    }
+    else if (m.type === "hub_error") {
+      HUB.loading = false;
+      if (m.name) { delete HUB.busy[m.name]; toast(m.message || "Download failed", "err"); }
+      // A page we already have must stay on screen: only a first page that never
+      // arrived turns the whole grid into an error with a Retry.
+      else if (HUB.items.length) toast(m.message || "ClawHub unreachable", "err");
+      else HUB.error = m.message || "ClawHub unreachable";
+      render();
+    }
+    else if (m.type === "hub_installed") {
+      delete HUB.busy[m.name];
+      // Flip THIS card to "Installed" in place — no re-fetch of the catalogue, and
+      // the button can never be clicked twice into a duplicate install.
+      for (var hi = 0; hi < HUB.items.length; hi++) if (HUB.items[hi].name === m.name) HUB.items[hi].installed = true;
+      render();
+      toast(m.already ? ("Skill already installed: " + m.name) : ("Installed " + m.name), m.already ? "warn" : "ok");
+    }
   });
 
   vscode.postMessage({ type: "ready" });
