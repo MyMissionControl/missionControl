@@ -113,11 +113,22 @@ export function buildCloneKickoffNote(
   ].join(" ");
 }
 
-/** Resume kickoff — injected when the user picks "⏮ ทำต่อ" instead of a fresh
- *  build. Unlike buildKickoffPrompt (which tells the orchestrator to ASK for a
- *  new requirement), this points it at an EXISTING project and tells it to read
- *  the leftover state and pick up where the last run stopped. Pairs with the
- *  `/orches-drive` resume mode (skip Step 0-1, read state → propose next sprint). */
+/** Resume kickoff — injected when the user picks "⏮ ทำต่อ" / "▶ ทำต่อ" instead of
+ *  a fresh build. Unlike buildKickoffPrompt (which tells the orchestrator to ASK
+ *  for a new requirement), this points it at an EXISTING project, tells it to read
+ *  the leftover state, report, and then WAIT.
+ *
+ *  ⛔ It used to open with "รัน skill /orches-drive แบบ RESUME", so every visit to a
+ *  project became a sprint. user 2026-08-14: "บางครั้ง user แค่อยากเข้ามาเช็คหรือหาบัค
+ *  ไม่ได้จะทำเป็น sprint อย่างเดียว" → the button now opens the door, it doesn't start
+ *  the machine. Sprint-on-purpose still has its own buttons (ทำ 1 sprint / ทำ N
+ *  sprint → buildContinueKickoff, which really is `/orches-drive --once`).
+ *
+ *  ⛔ The fragile half is the way BACK IN, which is why it is spelled out here: an
+ *  agent cannot run a slash command by writing "/orches-drive" in its own reply —
+ *  it must invoke the SKILL. And the user is not going to say a magic word, so the
+ *  kickoff carries the skill name, how to call it, and a spread of phrasings to
+ *  read as intent. Locked by orchestratorResume.test.ts. */
 export function buildResumeKickoff(
   projectName: string,
   projectPath: string,
@@ -131,12 +142,20 @@ export function buildResumeKickoff(
   const lines = [
     `คุณคือ orchestrator ชื่อ ${orchestrator} ของทีม ${team}.`,
     `Workers ที่ dispatch ได้: ${w}.`,
-    `รัน skill /orches-drive แบบ RESUME กับ project ที่ค้างอยู่: "${projectName}" (absolute path: ${projectPath}).`,
-    `อย่าถาม build requirement ใหม่ — แทนที่ด้วย: อ่าน state เดิมก่อน` +
+    `ผมเปิด project ที่ค้างอยู่: "${projectName}" (absolute path: ${projectPath}) — ยังไม่ได้สั่งให้ทำ sprint นะ.`,
+    `เริ่มด้วยการอ่าน state เดิม` +
       ` (docs/*sprint-*.md — ชื่อใหม่ <project>-sprint-N.md หรือชื่อเก่า sprint-N.md, git log --oneline, git worktree list, .orches-notes.md ใน worktree agents/* ที่ยังเปิด) →` +
-      ` สรุปให้ user ฟังสั้นๆ ว่าทำถึง sprint ไหน ค้างอะไร → เสนอ sprint ถัดไป → รอ user สั่งไปต่อ.`,
-    `จากนั้นวน /orches-drive ปกติ: แจกงาน worker → poll .orches-done → verify → git merge เข้า main → capture memory. อย่า dispatch งานให้ตัวเอง.`,
-    `อย่ารัน /orches (bootstrap — คุณผ่านมาแล้ว).`,
+      ` สรุปให้ผมฟังสั้นๆ ว่าทำถึง sprint ไหน ค้างอะไร เหลืออะไร → แล้วรอคำสั่งผม.`,
+    `⛔ อย่าเพิ่งเริ่ม sprint อย่าแจกงาน worker และอย่าถาม build requirement ใหม่ จนกว่าผมจะสั่ง —` +
+      ` รอบนี้ผมอาจแค่เข้ามาดูของ ตามหาบัค หรือถามอะไรบางอย่าง. ถามตอบ อ่านโค้ด debug แก้เล็กๆ` +
+      ` ทำตรงนั้นได้เลย ไม่ต้องตั้ง sprint ไม่ต้องปลุก worker.`,
+    `พอผมสั่งให้ไปต่อจริง ให้เรียก skill ชื่อ 'orches-drive' ผ่าน Skill tool แล้วเดินโหมด resume ตามปกติ` +
+      ` (ข้าม Step 0-1 → อ่าน state → เสนอ sprint ถัดไป → แจกงาน worker → poll .orches-done → verify →` +
+      ` git merge เข้า main → capture memory) และอย่า dispatch งานให้ตัวเอง.`,
+    `ไม่มีคำสั่งที่ต้องพูดเป๊ะ — ตีความจากความหมาย เช่น "ไปต่อ", "ทำ sprint ต่อ", "ลุยเลย", "แจกงานได้",` +
+      ` "ทำ sprint N", "resume", "เอาต่อจากที่ค้าง" ล้วนแปลว่าให้เข้าโหมด sprint. กำกวมก็ถามผมสั้นๆ ก่อนหนึ่งคำถาม.`,
+    `⛔ การพิมพ์ข้อความว่า "/orches-drive" ในคำตอบของคุณเองไม่ทำให้ skill ทำงาน — ต้องเรียกผ่าน Skill tool เท่านั้น.`,
+    `อย่ารัน /orches (bootstrap เลือกทีม/ปลุก — คุณผ่านมาแล้ว).`,
   ];
   return lines.join(" ");
 }

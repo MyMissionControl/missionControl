@@ -149,7 +149,9 @@ test("sortResumable: recent lastRun first, then sprint count, then name", () => 
   expect(out.map((x) => x.name)).toEqual(["expense", "morse", "aaa", "bbb"]);
 });
 
-test("buildResumeKickoff: names project + tells it NOT to ask a new requirement", () => {
+// ⛔ "ทำต่อ" เคยยัด `/orches-drive` RESUME ทันที = ทุกครั้งที่เปิด project กลายเป็น sprint.
+//   user สั่ง 2026-08-14: บางทีแค่เข้ามาดู/หาบัค → kickoff ต้องเปิดแบบ "อ่าน state แล้วรอคำสั่ง".
+test("buildResumeKickoff: เปิด project แบบไม่ผูก sprint — สรุป state แล้วรอคำสั่ง", () => {
   const k = buildResumeKickoff(
     "expense-tracker",
     "/home/u/projects/expense-tracker",
@@ -159,10 +161,29 @@ test("buildResumeKickoff: names project + tells it NOT to ask a new requirement"
   );
   expect(k).toContain("expense-tracker");
   expect(k).toContain("/home/u/projects/expense-tracker");
-  expect(k).toContain("RESUME");
   expect(k).toContain("อย่าถาม build requirement ใหม่");
   expect(k).toContain("foreman");
   expect(k).toContain("bob, jack");
+  // เปิดมาต้องรอ ไม่ใช่ลุย
+  expect(k).toContain("รอคำสั่งผม");
+  expect(k).toContain("อย่าเพิ่งเริ่ม sprint");
+  // ⛔ ห้ามกลับไปเป็นคำสั่งลุยทันทีอีก
+  expect(k).not.toContain("รัน skill /orches-drive แบบ RESUME");
+});
+
+// ⛔ ครึ่งหลังของเคส: user อยากทำ sprint จริง. ทางกลับเข้าโหมดนั้นคือจุดเปราะ — orchestrator
+//   ต้อง "เรียก skill" ไม่ใช่พิมพ์ /orches-drive ใส่คำตอบตัวเอง (พิมพ์แล้วไม่เกิดอะไรขึ้น) และ
+//   ต้องไม่มีคำวิเศษที่ user ต้องพูดเป๊ะ → kickoff ต้องพก ชื่อ skill + วิธีเรียก + ตัวอย่างคำสั่ง.
+test("buildResumeKickoff: บอกทางกลับเข้าโหมด sprint — เรียก skill orches-drive ผ่าน Skill tool", () => {
+  const k = buildResumeKickoff("rpn", "/p/rpn", "carbon", "foreman", ["bob"]);
+  expect(k).toContain("orches-drive");
+  expect(k).toContain("Skill tool");
+  // ไม่ต้องรอคำเป๊ะ — มีตัวอย่างเจตนาให้ตีความ
+  expect(k).toContain("ไปต่อ");
+  expect(k).toContain("ทำ sprint ต่อ");
+  // พิมพ์เองไม่นับ
+  expect(k).toMatch(/พิมพ์[^.]*\/orches-drive[^.]*ไม่ทำให้ skill ทำงาน/);
+  expect(k).toContain("อย่ารัน /orches ");
 });
 
 test("projectScanDirs: scans owner-root/projects AND the derived ghq-root/projects (location-tolerant)", () => {

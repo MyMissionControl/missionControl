@@ -1647,7 +1647,7 @@ function renderShell(): string {
       : '<button id="lhBtn" class="disabled" disabled title="โปรเจคนี้ไม่มี .orches-preview.sh — เปิด localhost ไม่ได้">🌐 localhost</button>';
     return back
       + lh
-      + '<button id="contBtn" class="dt-cont" title="ไปเลือกทีม / เข้า session ที่ทำอยู่">▶ ทำต่อ</button>'
+      + '<button id="contBtn" class="dt-cont" title="เข้า session ของโปรเจกต์นี้ (คุยกับ orchestrator / หาบัค) — ไม่เริ่ม sprint ให้เอง สั่งเองทีหลังได้">▶ ทำต่อ</button>'
       + '<button id="dvBtn" title="ดู sprint/task ของโปรเจกต์นี้ (กดปุ่มกลับเพื่อดูทุกโปรเจกต์)">Data View</button>'
       + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">GitHub</button>' : '');
   }
@@ -1914,7 +1914,7 @@ function renderShell(): string {
         +'<div class="h-eye"><span class="lbl">ทำต่อจากล่าสุด</span>'+runBadge(it)+star+'</div>'
         +'<div class="h-body"><div class="h-left"><div class="h-name">'+esc(it.name)+c.crashChip+'</div>'
         +'<div class="h-meta">'+meta+'</div>'+bar+'</div>'
-        +'<div class="h-cta">'+c.gitBadge+c.contBtn+c.multiBtn+'<button class="resume" title="ทำต่อ / เข้า session">ทำต่อ →</button>'+c.delBtn+'</div></div>'
+        +'<div class="h-cta">'+c.gitBadge+c.contBtn+c.multiBtn+'<button class="resume" title="เข้า session ของโปรเจกต์นี้ (คุยกับ orchestrator / หาบัค) — ไม่เริ่ม sprint ให้เอง">ทำต่อ →</button>'+c.delBtn+'</div></div>'
         +c.gitEd+'</div>';
     }
     function rowHtml(it){
