@@ -21,6 +21,7 @@ import { DEFAULT_MODEL, MODEL_ALIASES } from "./teamsModel";
 // ~/.mission-control/config.json.
 let tmp: string;
 let cfgPath: string;
+let mergePath: string;
 
 function writeCfg(obj: Record<string, unknown>): void {
   fs.writeFileSync(cfgPath, JSON.stringify(obj));
@@ -30,10 +31,16 @@ beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mc-settings-"));
   cfgPath = path.join(tmp, "config.json");
   process.env.MC_CONFIG_PATH = cfgPath;
+  // ⛔ MUST be redirected before any setSetting("merge_mode", …) runs: the save
+  //    now mirrors into the flat file the bash engine reads, and without this the
+  //    suite would rewrite the developer's REAL ~/.config/mission-control/merge-mode.
+  mergePath = path.join(tmp, "merge-mode");
+  process.env.MC_MERGE_MODE_PATH = mergePath;
 });
 
 afterEach(() => {
   delete process.env.MC_CONFIG_PATH;
+  delete process.env.MC_MERGE_MODE_PATH;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -92,6 +99,34 @@ describe("setSetting", () => {
 
   test("rejects an invalid select option", () => {
     expect(() => setSetting("merge_mode", "sideways")).toThrow();
+  });
+
+  // ⛔⛔ merge_mode ใน config.json ไม่มีใครอ่าน — engine อ่าน **ไฟล์แบน**
+  //    $HOME/.config/mission-control/merge-mode (orches-integrate.sh cmd_mode_get)
+  //    ⇒ ปุ่มใน Settings กดแล้วไม่มีผลมาตลอด resolve เป็น online เสมอ (user เคาะให้ทำงานจริง 2026-08-14)
+  test("merge_mode ต้องเขียนไฟล์แบนที่ engine อ่านจริงด้วย", () => {
+    setSetting("merge_mode", "local");
+    expect(fs.readFileSync(mergePath, "utf8").trim()).toBe("local");
+    setSetting("merge_mode", "online");
+    expect(fs.readFileSync(mergePath, "utf8").trim()).toBe("online");
+  });
+
+  test("merge_mode สร้างโฟลเดอร์ให้เองถ้ายังไม่มี", () => {
+    const deep = path.join(tmp, "nope", "mission-control", "merge-mode");
+    process.env.MC_MERGE_MODE_PATH = deep;
+    setSetting("merge_mode", "local");
+    expect(fs.readFileSync(deep, "utf8").trim()).toBe("local");
+  });
+
+  test("หน้า Settings ต้องโชว์ค่าที่ engine เชื่อ ไม่ใช่ค่าที่ config.json จำไว้", () => {
+    writeCfg({ merge_mode: "online" });            // ค่าเก่าที่ค้างใน config.json
+    fs.writeFileSync(mergePath, "local\n");        // ค่าที่ engine อ่านจริง
+    expect(listSettings().find((e) => e.key === "merge_mode")?.value).toBe("local");
+  });
+
+  test("ไม่มีไฟล์แบน = ตกกลับไปใช้ config.json เหมือนเดิม", () => {
+    writeCfg({ merge_mode: "local" });
+    expect(listSettings().find((e) => e.key === "merge_mode")?.value).toBe("local");
   });
 
   test("boolean coerces from string 'true'/'false'", () => {

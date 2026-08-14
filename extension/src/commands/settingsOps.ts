@@ -4,8 +4,10 @@ import * as path from "node:path";
 
 import { isAutoSkillEnabled, setAutoSkillEnabled } from "./autoSkillOps";
 import {
+  readMergeModeFile,
   readTestCapNoLimit,
   readTestCapNumber,
+  writeMergeModeFile,
   writeTestCapNoLimit,
   writeTestCapNumber,
 } from "./orchesConfigFile";
@@ -274,6 +276,11 @@ export function listSettings(modelIds?: readonly string[]): SettingEntry[] {
   if (testCap) testCap.value = Number(readTestCapNumber());
   const testCapNoLimit = entries.find((e) => e.key === "orches_test_cap_nolimit");
   if (testCapNoLimit) testCapNoLimit.value = readTestCapNoLimit();
+  // merge_mode's truth is the flat file the bash engine reads, not config.json —
+  // show what the engine would actually obey. Absent file → config.json/default.
+  const mergeMode = entries.find((e) => e.key === "merge_mode");
+  const mergeOnDisk = readMergeModeFile();
+  if (mergeMode && mergeOnDisk) mergeMode.value = mergeOnDisk;
   for (const k of Object.keys(raw)) {
     if (SCHEMA_BY_KEY.has(k)) continue;
     if (k.startsWith("search.")) continue; // owned by the Search/Oracle section, not a generic knob
@@ -356,6 +363,11 @@ export function setSetting(
       next = n;
     } else next = String(value);
   }
+
+  // Mirror into the flat file orches-integrate.sh actually reads. Written AFTER
+  // validation (so an invalid option never reaches disk) and BEFORE config.json,
+  // because the file the engine obeys is the one that must not be missed.
+  if (key === "merge_mode") writeMergeModeFile(String(next));
 
   raw[key] = next;
   const p = configPath();

@@ -92,6 +92,53 @@ export function writeTestCapNumber(raw: string | number): string {
   return readTestCapNumber();
 }
 
+// ── merge mode ───────────────────────────────────────────────────────────────
+// ⛔⛔ The Settings page used to write `merge_mode` into config.json and nothing
+// read it: orches-integrate.sh resolves the global merge mode from a FLAT FILE —
+//   GLOBAL_SETTING="$HOME/.config/mission-control/merge-mode"   (contents: online|local)
+// — so the toggle was inert and every project resolved `online`. Same class as
+// the orches cap knobs above: a knob whose truth lives in a file the bash reads
+// directly has to be written to THAT file, not to MC's own config.
+//
+// Resolution order in the engine (cmd_mode_get) is worth knowing before flipping
+// it: the project's own `.orches-mode` pin wins, then $ORCHES_MERGE_MODE, then
+// this file, then `online`. Every project pins itself at Step 1.5, so changing
+// this affects the NEXT project to start, not one already running.
+
+/** Path to the flat merge-mode file, mirroring the engine's own resolution.
+ *  `MC_MERGE_MODE_PATH` exists so tests never touch the real one. */
+export function mergeModePath(): string {
+  return (
+    process.env.MC_MERGE_MODE_PATH ||
+    path.join(
+      process.env.HOME || process.env.USERPROFILE || os.homedir(),
+      ".config",
+      "mission-control",
+      "merge-mode",
+    )
+  );
+}
+
+/** What the engine would read right now, or null when the file is absent/blank.
+ *  Whitespace is stripped the same way `tr -d '[:space:]'` does on the bash side. */
+export function readMergeModeFile(): string | null {
+  try {
+    const v = fs.readFileSync(mergeModePath(), "utf8").replace(/\s+/g, "");
+    return v === "online" || v === "local" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the mode where the engine reads it. Caller validates the value first
+ *  (setSetting's select check); this refuses anything else outright anyway. */
+export function writeMergeModeFile(mode: string): void {
+  if (mode !== "online" && mode !== "local") throw new Error(`merge_mode: '${mode}' is not a valid option`);
+  const fp = mergeModePath();
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  fs.writeFileSync(fp, mode + "\n", "utf8");
+}
+
 /** Set the "loop until pass" slide toggle, preserving the finite count (so
  *  turning it off restores the previously-typed number). */
 export function writeTestCapNoLimit(on: boolean): boolean {
