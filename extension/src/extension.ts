@@ -29,6 +29,7 @@ import { openDataViewPanel } from "./webview/dataView";
 import { openMirrorPanel } from "./webview/mirror";
 import { openOrchestratorPanel } from "./webview/orchestrator";
 import { registerSidebar } from "./webview/sidebar";
+import { initTabIcons } from "./webview/tabIcon";
 
 export function activate(context: vscode.ExtensionContext) {
   // Restore the last-used project_id from the workspace's globalState BEFORE
@@ -37,6 +38,9 @@ export function activate(context: vscode.ExtensionContext) {
   // beat on startup.
   const savedPid = context.globalState.get<string | null>(PROJECT_STATE_KEY, null);
   if (savedPid) setCurrentProjectId(savedPid);
+
+  // Where the per-panel tab icons live. Must run before any panel opens.
+  initTabIcons(context.extensionUri);
 
   const registrations: vscode.Disposable[] = [
     vscode.commands.registerCommand("missioncontrol.install", () => installCommand(context)),

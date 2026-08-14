@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 import { scanLocalhostsEnriched, type EnrichedGroup } from "../commands/localhostScan";
+import { setTabIcon } from "./tabIcon";
 import {
   stopAllLocalhosts,
   stopGroupLocalhosts,
@@ -42,6 +43,7 @@ export function openLocalhostsPanel(): vscode.WebviewPanel {
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   _panel = panel;
 
   panel.onDidDispose(() => {

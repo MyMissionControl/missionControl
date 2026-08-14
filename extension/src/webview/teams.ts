@@ -21,6 +21,7 @@ import {
 } from "../commands/teamsModel";
 import { getDefaultMemberModel } from "../commands/settingsOps";
 import { awakenMember, teamUp, teamUpMember, type TeamUpResult } from "../commands/teamUp";
+import { setTabIcon } from "./tabIcon";
 
 // Editor-area panel for browsing + editing maw oracle-teams. Mirrors skills.ts:
 // singleton _panel, renderShell HTML, postMessage list/detail, a message switch.
@@ -101,6 +102,7 @@ export function openTeamsPanel(
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   _panel = panel;
   panel.onDidDispose(() => {
     _panel = undefined;

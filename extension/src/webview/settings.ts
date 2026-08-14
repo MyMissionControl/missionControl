@@ -20,6 +20,7 @@ import {
 import { graphifyRefreshCommand } from "../commands/graphifyRefresh"; // [graphify-temp]
 import { availableModels } from "../commands/teamsOps";
 import { confirmIsolateMessage, setMode } from "../commands/oracleMemoryOps";
+import { setTabIcon } from "./tabIcon";
 import {
   buildOracleMemoryState,
   oracleMemorySectionBody,
@@ -126,6 +127,7 @@ export function openSettingsPanel(): vscode.WebviewPanel {
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   _panel = panel;
   panel.onDidDispose(() => {
     _panel = undefined;

@@ -31,6 +31,8 @@ import * as cp from "node:child_process";
 import * as vscode from "vscode";
 
 import { renderAskPopup } from "../webview/askPopup";
+import { setTabIcon } from "../webview/tabIcon";
+import { tabLabel } from "../webview/tabModel";
 import {
   PANE_LIST_FMT,
   buildAnswerArgs,
@@ -222,10 +224,14 @@ async function answerSingle(hit: PendingHit, key: number): Promise<{ ok: boolean
 function showBox(hit: PendingHit): void {
   const panel = vscode.window.createWebviewPanel(
     "mcPendingAsk",
-    `${hit.session} รอคำตอบ · ${title(hit.ask)}`,
+    // WHO is asking goes in the tab (the question itself is right there in the
+    // popup) — a tab carrying both ran ~60 characters and pushed every other tab
+    // off the bar.
+    tabLabel("รอคำตอบ", hit.session, 16),
     { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   panel.webview.html = renderAskPopup({ session: hit.session, pane: hit.pane, ask: hit.ask });
 
   panel.webview.onDidReceiveMessage((m: { type?: string; key?: number; keys?: number[] }) => {

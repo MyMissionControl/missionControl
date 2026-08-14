@@ -62,6 +62,7 @@ import { cloneRepoInto, parseRepoUrl } from "../commands/repoClone";
 import * as cp from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { setTabIcon } from "./tabIcon";
 
 // Single "Projects" webview panel (its OWN editor tab, mirroring teams.ts) — the
 // one entry point for both continuing a project and starting a new build:
@@ -580,6 +581,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   _panel = panel;
   panel.onDidDispose(() => {
     stopSpinPoll();
@@ -1042,16 +1044,25 @@ function renderShell(): string {
     background: var(--vscode-editor-background); display: flex; flex-direction: column; overflow: hidden; }
   .topbar { display: flex; align-items: center; justify-content: space-between;
     padding: 10px 16px; border-bottom: 1px solid var(--vscode-panel-border); }
-  .topbar h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  /* The title block may shrink; the buttons may not. Without this pair, a long
+     absolute path (monospace, no break opportunities) won the space fight and
+     squeezed the action row until "ทำต่อ" wrapped onto two lines. */
+  .topbar > div:first-child { min-width: 0; }
+  .topbar h1 { font-size: 14px; margin: 0; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .topbar .sub { font-size: 11px; opacity: 0.6; margin-top: 3px; font-weight: 400; }
   /* Detail screen: the sub-line is the project's absolute path — click copies it.
      Monospace because it is a path, and inline-block so the hover target is the
-     text itself, not the full-width row. */
+     text itself, not the full-width row. ONE line, ellipsised: the full path is a
+     click away (and the folder it ends in is already the title above it). */
   .topbar .sub.copyable { font-family: 'JetBrains Mono', var(--vscode-editor-font-family), ui-monospace, monospace;
-    cursor: pointer; display: inline-block; border-bottom: 1px dashed transparent; }
+    cursor: pointer; display: inline-block; max-width: 100%; vertical-align: bottom;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-bottom: 1px dashed transparent; }
   .topbar .sub.copyable:hover { opacity: 0.95; border-bottom-color: currentColor; }
   .topbar .sub.copied { opacity: 1; color: #3fb950; }
-  .topbar .actions { display: flex; gap: 6px; }
+  .topbar .actions { display: flex; gap: 6px; flex: none; }
+  .topbar .actions button { white-space: nowrap; }
   button { background: transparent; color: var(--vscode-foreground);
     border: 1px solid var(--vscode-panel-border); padding: 4px 10px; border-radius: 3px;
     font-size: 11px; cursor: pointer; }

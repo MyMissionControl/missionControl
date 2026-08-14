@@ -8,6 +8,7 @@ import * as vscode from "vscode";
 import { fetchSkillsFromGitHub } from "./skillsFetch";
 import { browseHub, fetchHubSkill, isSafeHubName, isSafeHubOwner, isSafeHubVersion } from "./skillsHub";
 import { installFetchedSkills } from "./skillsInstall";
+import { setTabIcon } from "./tabIcon";
 
 // Frontend-only build: skills are read straight off disk from
 // ~/.claude/skills/<name>/SKILL.md — no backend involved. Each skill is a
@@ -65,6 +66,7 @@ export function openSkillsPanel(
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   _panel = panel;
   panel.onDidDispose(() => {
     _panel = undefined;
@@ -781,7 +783,7 @@ function renderShell(): string {
       <div class="dsep">or</div>
       <div class="urlrow">
         <input id="urlInput" type="text" spellcheck="false" placeholder="Paste a GitHub link — https://github.com/anthropics/skills/tree/main/skills" />
-        <button id="urlGo">Fetch</button>
+        <button id="urlGo">Install</button>
       </div>
       <div class="urlhint">A link to a folder of skills installs every skill in it at once · a single skill's link works too · all land under <code>uploaded</code> · ones you already have are skipped</div>
     </div>
@@ -1029,13 +1031,26 @@ function renderShell(): string {
   // ── Upload / modal ──
   var fileInput = document.getElementById("fileInput");
   function openModal() { document.getElementById("scrim").removeAttribute("hidden"); }
-  function closeModal() { document.getElementById("scrim").setAttribute("hidden", ""); }
-  function toast(text, kind) {
+  // Closing the dialog throws the pasted link away — reopening it must never offer
+  // a stale link (from a run that already finished, or one the user backed out of)
+  // sitting in the box ready to be pressed again.
+  function closeModal() {
+    document.getElementById("scrim").setAttribute("hidden", "");
+    var u = document.getElementById("urlInput");
+    if (u) u.value = "";
+  }
+  // hold = stay on screen until something replaces it. Installing 13 skills off one
+  // link runs for a minute, and a progress line that vanishes after 3 seconds reads
+  // as "it died" — so every step of a run holds, and only the line that ENDS the run
+  // (installed / failed) gets a timer.
+  var HOLD_MS = 4500; // the closing line lingers a beat longer than a plain notice
+  function toast(text, kind, hold) {
     var t = document.getElementById("toast");
     t.textContent = text; t.className = kind || "";
     t.style.display = "block";
-    if (t._h) clearTimeout(t._h);
-    t._h = setTimeout(function () { t.style.display = "none"; }, 3200);
+    if (t._h) { clearTimeout(t._h); t._h = null; }
+    if (hold) return;
+    t._h = setTimeout(function () { t.style.display = "none"; }, kind === "ok" || kind === "warn" ? HOLD_MS : 3200);
   }
   function toB64(buf) {
     var bytes = new Uint8Array(buf), bin = "", chunk = 0x8000;
@@ -1047,7 +1062,7 @@ function renderShell(): string {
     if (!file.name.toLowerCase().endsWith(".zip")) { toast("Only .zip files are supported", "err"); return; }
     if (file.size > 25 * 1024 * 1024) { toast("File too large (max 25 MB)", "err"); return; }
     closeModal();
-    toast("Uploading " + file.name + " …", "");
+    toast("Uploading " + file.name + " …", "", true);
     try {
       var buf = await file.arrayBuffer();
       vscode.postMessage({ type: "upload_skill", filename: file.name, dataB64: toB64(buf) });
@@ -1062,7 +1077,7 @@ function renderShell(): string {
     urlBusy = on;
     var b = document.getElementById("urlGo");
     if (on) b.setAttribute("disabled", ""); else b.removeAttribute("disabled");
-    b.textContent = on ? "Fetching…" : "Fetch";
+    b.textContent = on ? "Installing…" : "Install";
   }
   function submitUrl() {
     if (urlBusy) return;
@@ -1076,7 +1091,11 @@ function renderShell(): string {
       toast("The link must start with http(s)://", "err"); return;
     }
     setUrlBusy(true);
-    toast("Reading the skill list…", "");
+    // The box is emptied the moment the run starts: the link has been handed over,
+    // and leaving it sitting there invites a second press that re-walks the whole
+    // repo. The run's progress lives in the toast from here on.
+    input.value = "";
+    toast("Reading the skill list…", "", true);
     vscode.postMessage({ type: "upload_url", url: url });
   }
 
@@ -1149,7 +1168,7 @@ function renderShell(): string {
   });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") closeModal();
-    // Enter in the URL box = press Fetch. Paste-and-go is the whole point of the row.
+    // Enter in the URL box = press Install. Paste-and-go is the whole point of the row.
     else if (e.key === "Enter" && e.target && e.target.id === "urlInput") { e.preventDefault(); submitUrl(); }
   });
   fileInput.addEventListener("change", function () {
@@ -1175,8 +1194,9 @@ function renderShell(): string {
     if (m.type === "render_list") { STATE.skills = m.skills || []; render(); }
     else if (m.type === "upload_ok") { STATE.filter = "uploaded"; STATE.page = 0; render(); toast("Installed " + m.name, "ok"); }
     else if (m.type === "upload_progress") {
-      // "3/17 · pdf" — a 10 MB repo takes a while and a silent toast reads as a hang.
-      toast("Fetching " + (m.done + 1) + "/" + m.total + (m.name ? " · " + m.name : "") + " …", "");
+      // "Downloading 3/17 · pdf" — a 10 MB repo takes a while and a silent toast
+      // reads as a hang. Holds until the next step replaces it.
+      toast("Downloading " + (m.done + 1) + "/" + m.total + (m.name ? " · " + m.name : "") + " …", "", true);
     }
     else if (m.type === "upload_url_ok") {
       setUrlBusy(false);

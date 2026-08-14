@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 
 import * as vscode from "vscode";
+import { setTabIcon } from "./tabIcon";
 
 import {
   loadDataIndex,
@@ -32,6 +33,7 @@ export async function openDataViewPanel(projectPath?: string): Promise<vscode.We
     vscode.ViewColumn.Active,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   current = panel;
   panel.onDidDispose(() => {
     if (current === panel) current = undefined;

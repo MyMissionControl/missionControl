@@ -78,6 +78,26 @@ test("skillDirsUnder: every SKILL.md folder under the pasted subPath, and only t
   expect(skillDirsUnder(REAL_SHAPE, "skills/pdf")).toEqual(["skills/pdf"]);
 });
 
+// A link to ONE skill must never drag in the neighbour whose name merely starts
+// with the same letters — the difference between installing "pdf" and installing
+// "pdf" + "pdf-extra" off a single paste.
+test("skillDirsUnder: a sibling that shares the name prefix is not swept in", () => {
+  const tree: TreeEntry[] = [
+    blob("skills/pdf/SKILL.md"),
+    blob("skills/pdf-extra/SKILL.md"),
+    blob("skills/pdfmm/SKILL.md"),
+    blob("skills/word-docx/SKILL.md"),
+  ];
+  expect(skillDirsUnder(tree, "skills/pdf")).toEqual(["skills/pdf"]);
+  expect(skillDirsUnder(tree, "skills/pdf/")).toEqual(["skills/pdf"]);
+  expect(skillDirsUnder(tree, "skills")).toEqual([
+    "skills/pdf",
+    "skills/pdf-extra",
+    "skills/pdfmm",
+    "skills/word-docx",
+  ]);
+});
+
 test("skillDirsUnder: SKILL.md at the repo root → the root itself", () => {
   expect(skillDirsUnder([blob("SKILL.md"), blob("scripts/run.sh")], "")).toEqual([""]);
 });

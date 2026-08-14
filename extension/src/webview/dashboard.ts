@@ -53,6 +53,7 @@ import {
   teamFromOrchesLabel,
 } from "./sessions";
 import { listSkills } from "./skills";
+import { setTabIcon } from "./tabIcon";
 
 type Project = {
   id: string;
@@ -118,6 +119,7 @@ export function openDashboardPanel(
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   _panel = panel;
 
   // Belt-and-suspenders: if caller passed null, re-read at this exact moment.

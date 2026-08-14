@@ -19,6 +19,8 @@ import {
 } from "./sessions";
 import { contextFromCsid, transcriptPath } from "./mirrorContext";
 import { parseTranscript, type ChatMsg } from "./transcriptChat";
+import { setTabIcon } from "./tabIcon";
+import { tabLabel } from "./tabModel";
 
 // Mission Control — "Claude Chat" grid. Renders a live /orches tmux session as a
 // grid of per-pane CHAT panels (orchestrator + workers), each showing that
@@ -183,10 +185,11 @@ function createChat(context: vscode.ExtensionContext, session: string): void {
   const mediaRoot = vscode.Uri.joinPath(context.extensionUri, "media");
   const panel = vscode.window.createWebviewPanel(
     "missioncontrol.mirror",
-    `Claude Chat · ${session}`,
+    tabLabel("Chat", session),
     vscode.ViewColumn.Active,
     { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [mediaRoot] },
   );
+  setTabIcon(panel);
   const chat: Chat = { panel, session, panes: new Map(), tick: 0, emptyPolls: 0, warnedEmpty: false, revealedLive: false, workers: [], workersResolved: false, workerResolveTries: 0, lastTeamPost: "", pendingWorkers: new Set() };
   _chats.set(session, chat);
 

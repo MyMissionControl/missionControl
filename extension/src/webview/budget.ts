@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 
 import { type ProjectDetail, buildDetail } from "../budget-detail";
 import { openBudgetDetailPanel } from "./budget-detail-page";
+import { setTabIcon } from "./tabIcon";
 import {
   type ProjectAggLive,
   type ProjectPeriods,
@@ -268,6 +269,7 @@ export function openBudgetPanel(): vscode.WebviewPanel {
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   _panel = panel;
   panel.onDidDispose(() => {
     _panel = undefined;

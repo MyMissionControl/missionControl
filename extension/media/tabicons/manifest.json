@@ -1,0 +1,54 @@
+{
+  "dashboard": {
+    "dark": "dark/dashboard.fb1226f6.svg",
+    "light": "light/dashboard.4cabe590.svg"
+  },
+  "skills": {
+    "dark": "dark/skills.c5ae0826.svg",
+    "light": "light/skills.d0e8977f.svg"
+  },
+  "connections": {
+    "dark": "dark/connections.73063f50.svg",
+    "light": "light/connections.d75eeca9.svg"
+  },
+  "localhosts": {
+    "dark": "dark/localhosts.95aae268.svg",
+    "light": "light/localhosts.58948a5d.svg"
+  },
+  "requirement": {
+    "dark": "dark/requirement.9ea8af8d.svg",
+    "light": "light/requirement.ecb243b5.svg"
+  },
+  "projects": {
+    "dark": "dark/projects.f8316fca.svg",
+    "light": "light/projects.2e089d56.svg"
+  },
+  "settings": {
+    "dark": "dark/settings.1878195f.svg",
+    "light": "light/settings.49fe5925.svg"
+  },
+  "teams": {
+    "dark": "dark/teams.a475ec8a.svg",
+    "light": "light/teams.f711bdf4.svg"
+  },
+  "dataView": {
+    "dark": "dark/dataView.cd6ccf74.svg",
+    "light": "light/dataView.be82ce30.svg"
+  },
+  "budget": {
+    "dark": "dark/budget.c32a25ff.svg",
+    "light": "light/budget.093e9faf.svg"
+  },
+  "budgetDetail": {
+    "dark": "dark/budgetDetail.44dc4b9b.svg",
+    "light": "light/budgetDetail.106744ac.svg"
+  },
+  "chat": {
+    "dark": "dark/chat.0754cb99.svg",
+    "light": "light/chat.37c5d490.svg"
+  },
+  "ask": {
+    "dark": "dark/ask.00702a9b.svg",
+    "light": "light/ask.18d221a4.svg"
+  }
+}

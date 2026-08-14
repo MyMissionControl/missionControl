@@ -14,6 +14,7 @@ import {
 } from "../commands/accountsOps";
 import { listAzurePats } from "../commands/azurePats";
 import { fetchClaudeUsage } from "../commands/usage";
+import { setTabIcon } from "./tabIcon";
 import {
   CRED_FILE,
   credTargetFromUrl,
@@ -180,6 +181,7 @@ export function openAccountsPanel(): vscode.WebviewPanel {
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   _panel = panel;
   panel.onDidDispose(() => {
     _panel = undefined;

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import * as vscode from "vscode";
+import { setTabIcon } from "./tabIcon";
 
 import {
   REQUIREMENT_TEMPLATE,
@@ -194,6 +195,7 @@ export function openCreateRequirementPanel(context: vscode.ExtensionContext): vs
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   _panel = panel;
 
   panel.onDidDispose(() => {

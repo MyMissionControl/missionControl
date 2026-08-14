@@ -2,6 +2,8 @@ import * as vscode from "vscode";
 
 import { type UsageSummary } from "../usage";
 import { scanProjectUsage } from "../commands/projectUsageScan";
+import { setTabIcon } from "./tabIcon";
+import { tabLabel } from "./tabModel";
 
 // Editor-area panel: ONE project's Claude usage — the "Project Usage" drill-down.
 // Opened from a project row on the Budget page. The rich per-hour / per-session /
@@ -27,7 +29,7 @@ export function openBudgetDetailPanel(
   _name = projectName;
 
   if (_panel) {
-    _panel.title = projectName + " — Usage";
+    _panel.title = tabLabel("Usage", projectName);
     _panel.reveal();
     postUsage(_panel);
     return _panel;
@@ -35,10 +37,11 @@ export function openBudgetDetailPanel(
 
   const panel = vscode.window.createWebviewPanel(
     "missioncontrol.budget-detail",
-    projectName + " — Usage",
+    tabLabel("Usage", projectName),
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  setTabIcon(panel);
   _panel = panel;
   panel.onDidDispose(() => {
     _panel = undefined;
