@@ -281,6 +281,35 @@ export function resolveOrchesLabel(
  */
 const LAUNCH_ENV = "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0 ";
 
+/**
+ * `--settings` payload for every interactive `claude` MC launches itself.
+ *
+ * Byte-identical to `orches-integrate.sh launch-settings --orch` (re-read from
+ * the live skill 2026-08-14). Same hole as ghost text above: the engine attaches
+ * this to every pane IT opens, but the orchestrator pane is opened by MC and never
+ * went through `cmd_launch_cmd` — so the driver ran UNTRIMMED while its own workers
+ * ran trimmed. Measured on the 08-13 21:58 run: worker `skill_listing` 8,294 tok vs
+ * orchestrator 9,778 tok, with dataviz / code-review / artifact-* / update-config /
+ * claude-api / security-review visible only to the orchestrator (~1.5k tok it pays
+ * every turn for tools its workers cannot even see).
+ *
+ *  · `autoCompactWindow` — the sprint-boundary /compact design is a package with
+ *    this cap; raising the ceiling alone creates no headroom, it just moves the
+ *    level the pane floats at.
+ *  · `disableBundledSkills` — bundled skills were invoked 0 times across all 9
+ *    newflow6 sessions (2026-08-12); the skills actually used live in ~/.claude/skills.
+ *  · `disableClaudeAiConnectors` — 14 `mcp__claude_ai_*` tool names for connectors
+ *    whose auth does not even pass. ⛔ Does NOT touch `mcpServers` in ~/.claude.json,
+ *    so arra-oracle-v3 + skills stay available (the closing protocol needs them).
+ *
+ * Same reasoning as LAUNCH_ENV for keeping it a literal instead of shelling out to
+ * the skill: this builder must stay pure (bun-tested, no fs/child_process) and MC
+ * must still launch on a machine where the skill is not installed. Both sides are
+ * pinned by tests — orches side in `skills/orches-drive/tests/context-bounding.sh`.
+ */
+const LAUNCH_SETTINGS =
+  '{"autoCompactWindow":500000,"disableBundledSkills":true,"disableClaudeAiConnectors":true}';
+
 export function buildTmuxLaunchCommand(
   orchestrator: string,
   repoPath: string,
@@ -303,9 +332,13 @@ export function buildTmuxLaunchCommand(
   // command. Shared with the per-member `/model` send (teamUpModel) so the two
   // paths can no longer disagree about what a valid model id is.
   const modelFlag = model && isSafeModelId(model) ? `--model ${model} ` : "";
+  // `--settings` sits after --dangerously-skip-permissions (the engine puts it first)
+  // purely so the flag pins in teams.test.ts stay contiguous substrings; claude does
+  // not care about flag order, and the kickoff stays the trailing positional.
   const inner =
     `cd ${shSingleQuote(repoPath)} && ` +
-    `${LAUNCH_ENV}claude ${modelFlag}--dangerously-skip-permissions ${shSingleQuote(kickoff)}`;
+    `${LAUNCH_ENV}claude ${modelFlag}--dangerously-skip-permissions ` +
+    `--settings ${shSingleQuote(LAUNCH_SETTINGS)} ${shSingleQuote(kickoff)}`;
   // Detached create → lay out → attach (mirrors buildTeamUpCommand). A plain
   // attached `new-session` blocks until the user detaches, so the layout could
   // only run afterward. `-A -d` creates (or no-ops if the session is already

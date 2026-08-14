@@ -58,6 +58,34 @@ test("buildTmuxLaunchCommand: ปิด ghost text ด้วยแม้ตอ�
   expect(cmd).toContain("&& CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0 claude --model");
 });
 
+// ── ctx-trim parity กับ engine (2026-08-14) ──
+//    orches แนบ --settings ให้ทุกเพนที่ตัวเองเปิด (cmd_launch_settings) แต่เพน orchestrator
+//    MC เปิดเอง ไม่ผ่าน cmd_launch_cmd → คนขับรัน "ไม่ trim" ทั้งที่ worker ของตัวเอง trim
+//    วัดจาก run 08-13 21:58: worker skill_listing 8,294 tok · orchestrator 9,778 tok
+//    (dataviz/code-review/artifact-*/update-config/claude-api/security-review โผล่เฉพาะคนขับ)
+//    ⚠️ assert เป็น "คีย์" ไม่ใช่ทั้งก้อนพร้อม quote เพราะ inner ถูก shSingleQuote ซ้อนอีกชั้น
+//    (single quote กลายเป็น '\'' ในคำสั่งสุดท้าย) — argv จริงพิสูจน์ด้วย tmux stub ตอน verify
+test("buildTmuxLaunchCommand: แนบ --settings ชุดเดียวกับ orches (ctx trim)", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/x", "hi", "claude-foreman", [], false);
+  expect(cmd).toContain("--settings ");
+  expect(cmd).toContain('"autoCompactWindow":500000');
+  expect(cmd).toContain('"disableBundledSkills":true');
+  expect(cmd).toContain('"disableClaudeAiConnectors":true');
+});
+
+test("buildTmuxLaunchCommand: --settings มาพร้อม --model ด้วย (ไม่ตกทางใดทางหนึ่ง)", () => {
+  const cmd = buildTmuxLaunchCommand(
+    "foreman", "/x", "hi", "claude-foreman", [], false, undefined, "claude-sonnet-5",
+  );
+  expect(cmd).toContain("claude --model claude-sonnet-5 --dangerously-skip-permissions --settings ");
+  expect(cmd).toContain('"disableBundledSkills":true');
+});
+
+test("buildTmuxLaunchCommand: --settings ใส่ครั้งเดียว (ไม่ซ้ำ)", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/x", "hi", "claude-foreman", [], true);
+  expect(cmd.match(/--settings /g)?.length).toBe(1);
+});
+
 test("buildTmuxLaunchCommand: model → 'claude --model <model>' before --dangerously-skip-permissions", () => {
   const cmd = buildTmuxLaunchCommand(
     "foreman", "/x", "hi", "claude-foreman", [], false, undefined, "claude-sonnet-5",
