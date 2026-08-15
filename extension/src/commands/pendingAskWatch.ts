@@ -36,8 +36,11 @@ import { tabLabel } from "../webview/tabModel";
 import {
   PANE_LIST_FMT,
   buildAnswerArgs,
+  buildInModeArgs,
   buildKeyArgs,
+  buildUncopyArgs,
   isDigitAnswerable,
+  isInMode,
   isMultiAnswerable,
   parseAskFromPane,
   parsePaneList,
@@ -173,6 +176,7 @@ async function awaitReview(pane: string): Promise<ReturnType<typeof parseReviewF
 async function answerMulti(hit: PendingHit, keys: number[]): Promise<{ ok: boolean; text: string }> {
   const chosen = hit.ask.options.filter((o) => keys.includes(o.key));
   if (!chosen.length) return { ok: false, text: "ยังไม่ได้เลือกอะไร" };
+  await leaveCopyMode(hit.pane);
   if (!(await stillUp(hit))) return { ok: false, text: "กล่องปิดไปแล้ว — ไม่ได้ส่งอะไร" };
 
   for (const o of chosen) {
@@ -201,10 +205,27 @@ async function answerMulti(hit: PendingHit, keys: number[]): Promise<{ ok: boole
   return { ok: true, text: `ส่งให้ ${hit.session} แล้ว: ${labels.join(", ")}` };
 }
 
+/**
+ * Clear tmux copy-mode before any keystroke goes out.
+ *
+ * ⛔⛔ Live 2026-08-14 (`09-foreman`): the pane was in copy-mode, so every digit
+ * this watcher sent was swallowed — `send-keys` still succeeded, the popup
+ * reported success, and the agent stayed blocked on its review screen. The pane
+ * looked normal, which is why it read as "the run is just slow".
+ *
+ * Deliberately unconditional-on-failure: a probe that errors is treated as "not
+ * in a mode" and we send anyway. Refusing to answer because a probe failed would
+ * turn a rare tmux hiccup into the very stall this exists to prevent.
+ */
+async function leaveCopyMode(pane: string): Promise<void> {
+  if (isInMode(await tmux(buildInModeArgs(pane)))) await tmux(buildUncopyArgs(pane));
+}
+
 /** Answer a single-select box — one digit both picks and submits (live-proved 2026-08-07). */
 async function answerSingle(hit: PendingHit, key: number): Promise<{ ok: boolean; text: string }> {
   const opt = hit.ask.options.find((o) => o.key === key);
   if (!opt) return { ok: false, text: "ตัวเลือกนี้ไม่อยู่ในกล่องแล้ว" };
+  await leaveCopyMode(hit.pane);
   if (!(await stillUp(hit))) return { ok: false, text: "กล่องปิดไปแล้ว — ไม่ได้ส่งคำตอบซ้ำ" };
   if ((await tmux(buildAnswerArgs(hit.pane, opt.key))) === null) {
     return { ok: false, text: `ส่งคำตอบไม่สำเร็จ — เพน ${hit.pane}` };

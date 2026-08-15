@@ -231,6 +231,37 @@ export function buildAnswerArgs(paneId: string, digit: number): string[] {
   return ["send-keys", "-t", paneId, String(digit)];
 }
 
+/**
+ * Copy-mode guard.
+ *
+ * ⛔⛔ A pane sitting in tmux copy-mode SWALLOWS every `send-keys` — the command
+ * still exits 0, nothing appears, and the agent stays blocked. Caught live
+ * 2026-08-14 on `09-foreman`: the run parked on the ask's review screen while
+ * both this popup's keys and hand-sent ones vanished; `#{pane_in_mode}` was 1.
+ *
+ * The entry is not a user error we can design away: the orches layout sets
+ * `mouse on` (that is what makes the status bar clickable), so one wheel notch
+ * over a pane enters copy-mode. Cancelling costs only that scroll position,
+ * while not cancelling costs the whole answer — so we always clear before we
+ * send, and never the other way round.
+ */
+export function buildInModeArgs(paneId: string): string[] {
+  if (!/^%\d+$/.test(paneId)) throw new Error(`unsafe pane id: ${paneId}`);
+  return ["display-message", "-p", "-t", paneId, "#{pane_in_mode}"];
+}
+
+/** `tmux send-keys -X … cancel` argv — leaves copy-mode, sends no keystroke. */
+export function buildUncopyArgs(paneId: string): string[] {
+  if (!/^%\d+$/.test(paneId)) throw new Error(`unsafe pane id: ${paneId}`);
+  return ["send-keys", "-X", "-t", paneId, "cancel"];
+}
+
+/** tmux prints `1` when the pane is in a mode. Anything else (including a failed
+ *  call → null) means "not in a mode": never block answering on a probe error. */
+export function isInMode(raw: string | null | undefined): boolean {
+  return (raw ?? "").trim() === "1";
+}
+
 /** Named keys we are willing to send. A whitelist, not a string pass-through:
  *  `send-keys` with unknown text types it into whatever has focus, and the thing
  *  with focus here is a blocked agent's prompt. */

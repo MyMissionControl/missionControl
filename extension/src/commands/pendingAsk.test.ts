@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  buildInModeArgs,
   buildKeyArgs,
+  buildUncopyArgs,
+  isInMode,
   isMultiAnswerable,
   parseReviewFromPane,
   reviewMatches,
@@ -441,5 +444,29 @@ describe("multi-select submit", () => {
     expect(() => buildKeyArgs("bad", "Right")).toThrow();
     // @ts-expect-error — ห้ามส่งคีย์ที่ไม่ได้ whitelist (ตัวอักษรหลุดเข้า prompt ของ agent ได้)
     expect(() => buildKeyArgs("%2", "rm -rf /")).toThrow();
+  });
+});
+
+// ⛔⛔ copy-mode: เพนที่ติดโหมดนี้กลืน send-keys ทุกตัวแบบเงียบ (เจอสด 2026-08-14 กับ 09-foreman —
+//   คีย์ของ popup หายหมด agent จอดที่หน้า review ส่วน popup รายงานว่าส่งสำเร็จ)
+describe("copy-mode guard", () => {
+  test("K1 ถามสถานะโหมดของเพนตัวนั้นตรง ๆ (ไม่ใช่ session)", () => {
+    expect(buildInModeArgs("%7")).toEqual(["display-message", "-p", "-t", "%7", "#{pane_in_mode}"]);
+    expect(() => buildInModeArgs("=09-foreman")).toThrow();
+  });
+
+  test("K2 ปลดด้วย -X cancel = ไม่มีคีย์ตัวไหนหลุดเข้า prompt ของ agent", () => {
+    expect(buildUncopyArgs("%7")).toEqual(["send-keys", "-X", "-t", "%7", "cancel"]);
+    expect(buildUncopyArgs("%7")).not.toContain("Enter");
+    expect(() => buildUncopyArgs("bad")).toThrow();
+  });
+
+  test("K3 มีแต่ '1' เท่านั้นที่แปลว่าติดโหมด — probe พังต้องไม่บล็อกการตอบ", () => {
+    expect(isInMode("1")).toBe(true);
+    expect(isInMode("1\n")).toBe(true);
+    expect(isInMode("0\n")).toBe(false);
+    expect(isInMode("")).toBe(false);
+    expect(isInMode(null)).toBe(false);       // tmux ล้ม = ส่งต่อไปเลย ดีกว่าหยุดตอบ
+    expect(isInMode(undefined)).toBe(false);
   });
 });
