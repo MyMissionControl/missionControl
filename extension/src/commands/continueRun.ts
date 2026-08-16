@@ -17,6 +17,8 @@ export type RunStatus = "running" | "done" | "error" | "cancelled";
 export interface RunMarker {
   status: RunStatus;
   sprint?: number;
+  sprints?: number; // how many sprints THIS run does (▶▶ = N); with `sprint`, tells
+  //                   orches-drive which boundary is the last one of the run
   session?: string; // present for a live run; the bare terminal marker orches-drive
   sessionCreatedAt?: number; // tmux #{session_created}, epoch seconds
   baseMainSha?: string;
@@ -46,6 +48,36 @@ export function parseRunMarker(raw: string): RunMarker | null {
 
 export function serializeRunMarker(m: RunMarker): string {
   return JSON.stringify(m, null, 2);
+}
+
+/** The `running` marker for a headless run. Pure so the numbers orches-drive
+ *  depends on are unit-tested here, not only observable after a 5-sprint run.
+ *  ⛔ `sprint` + `sprints` are a CONTRACT with the engine (`compact-should`): a
+ *  multi-sprint run keeps this marker `running` the whole time, so status alone
+ *  cannot tell an intermediate boundary (panes live on) from the final one (MC
+ *  reaps the session). The engine skips its sprint-boundary /compact only once
+ *  `(sprint-1)+sprints` sprints are ticked in plan.md. Dropping either field
+ *  makes it fall back to skipping at EVERY boundary — which is how a worker rode
+ *  to ctx 100% mid-run on newflow8 (2026-08-16). */
+export function buildRunningMarker(o: {
+  plannedDone?: number;
+  sprints?: number;
+  session?: string;
+  sessionCreatedAt?: number;
+  baseMainSha?: string;
+  startedAt?: string;
+}): RunMarker {
+  const done = Number.isFinite(o.plannedDone) ? Math.max(0, Math.floor(o.plannedDone as number)) : 0;
+  const n = Number.isFinite(o.sprints) ? Math.max(1, Math.floor(o.sprints as number)) : 1;
+  return {
+    status: "running",
+    sprint: done + 1,
+    sprints: n,
+    session: o.session,
+    sessionCreatedAt: o.sessionCreatedAt,
+    baseMainSha: o.baseMainSha,
+    startedAt: o.startedAt,
+  };
 }
 
 export function runMarkerPath(projectPath: string): string {

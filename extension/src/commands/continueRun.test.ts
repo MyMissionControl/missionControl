@@ -16,6 +16,7 @@ import {
   decideContinueAction,
   finishedSessions,
   clampSprintCount,
+  buildRunningMarker,
   runSessionLiveForProject,
   resolveCardActions,
   type RunMarker,
@@ -35,6 +36,36 @@ const RUNNING: RunMarker = {
 
 test("parseRunMarker: valid JSON round-trips", () => {
   expect(parseRunMarker(serializeRunMarker(RUNNING))).toEqual(RUNNING);
+});
+
+// ⛔⛔ บั๊กจริง newflow8 (2026-08-16): ปุ่ม "▶▶ ทำหลาย sprint" ปล่อย marker running ค้างทั้งรัน
+//   → engine (compact-should) ที่ดูแค่ status ปิด sprint-boundary /compact ทุกรอยต่อ ทั้งที่ MC
+//   เก็บ session ทิ้งแค่ตอนจบรัน → worker ชน ctx 100% กลางทาง · marker ต้องบอก "รันนี้กี่ sprint"
+//   ให้ engine คำนวณเองได้ว่ารอยต่อไหนคือรอบสุดท้าย (ติ๊กครบ sprint-1+sprints)
+test("buildRunningMarker: พก sprint แรก + จำนวน sprint ของรันนี้ (engine ใช้หาว่ารอบไหนคือรอบสุดท้าย)", () => {
+  const m = buildRunningMarker({
+    plannedDone: 2,
+    sprints: 3,
+    session: "claude-foreman",
+    sessionCreatedAt: 1_700_000_000,
+    baseMainSha: "abc1234",
+    startedAt: "2026-08-16T08:00:00.000Z",
+  });
+  expect(m.status).toBe("running");
+  expect(m.sprint).toBe(3); // plannedDone+1 = sprint แรกของรันนี้
+  expect(m.sprints).toBe(3);
+  expect(parseRunMarker(serializeRunMarker(m))).toEqual(m); // round-trip ผ่าน parser เดิม
+});
+
+test("buildRunningMarker: ปุ่ม 1 sprint / โปรเจกต์ยังไม่ติ๊กอะไร = sprint 1 sprints 1", () => {
+  const m = buildRunningMarker({ session: "s", startedAt: "t" });
+  expect(m.sprint).toBe(1);
+  expect(m.sprints).toBe(1);
+  // ค่าเพี้ยน (NaN/0/ติดลบ/เศษ) ต้องไม่หลุดลง marker — engine ใช้เลขนี้คำนวณโควตารัน
+  expect(buildRunningMarker({ session: "s", startedAt: "t", sprints: 0 }).sprints).toBe(1);
+  expect(buildRunningMarker({ session: "s", startedAt: "t", sprints: -4 }).sprints).toBe(1);
+  expect(buildRunningMarker({ session: "s", startedAt: "t", sprints: 2.7 }).sprints).toBe(2);
+  expect(buildRunningMarker({ session: "s", startedAt: "t", sprints: NaN }).sprints).toBe(1);
 });
 
 test("parseRunMarker: malformed/garbage → null (never throws)", () => {

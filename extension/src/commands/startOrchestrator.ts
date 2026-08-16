@@ -27,6 +27,7 @@ import {
   readRunMarker,
   resolveContinueTarget,
   runSessionLiveForProject,
+  buildRunningMarker,
   writeRunMarker,
 } from "./continueRun";
 import {
@@ -551,14 +552,17 @@ export function launchContinueRun(
   } catch (e) {
     return { error: `launch ล้มเหลว: ${String(e)}` };
   }
-  writeRunMarker(project.path, {
-    status: "running",
-    sprint: (project.plannedDone ?? 0) + 1,
-    session,
-    sessionCreatedAt: sessionCreatedAt(session),
-    baseMainSha,
-    startedAt: new Date().toISOString(),
-  });
+  writeRunMarker(
+    project.path,
+    buildRunningMarker({
+      plannedDone: project.plannedDone,
+      sprints, // ⛔ ต้องส่ง: engine ใช้คู่กับ sprint หาว่ารอยต่อไหนคือรอบสุดท้ายของรัน
+      session,
+      sessionCreatedAt: sessionCreatedAt(session),
+      baseMainSha,
+      startedAt: new Date().toISOString(),
+    }),
+  );
   return { session };
 }
 
