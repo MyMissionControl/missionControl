@@ -17,7 +17,6 @@ import {
   searchSectionScript,
   searchSectionStyle,
 } from "./searchSection";
-import { graphifyRefreshCommand } from "../commands/graphifyRefresh"; // [graphify-temp]
 import { availableModels } from "../commands/teamsOps";
 import { confirmIsolateMessage, setMode } from "../commands/oracleMemoryOps";
 import { setTabIcon } from "./tabIcon";
@@ -146,10 +145,6 @@ export function openSettingsPanel(): vscode.WebviewPanel {
     if (!msg || typeof msg.type !== "string") return;
 
     switch (msg.type) {
-      case "graphifyRefresh": // [graphify-temp]
-        await graphifyRefreshCommand();
-        return;
-
       // The config path is a chip you can click — the host owns the clipboard.
       case "copyPath":
         await vscode.env.clipboard.writeText(configPath());
@@ -348,12 +343,14 @@ function renderShell(): string {
     --pcard:#161f28; --pborder:rgba(255,255,255,.08); --ptxt:#e7eef5; --pmuted:#8a97a4; --pfaint:#5c6773;
     --pfield:rgba(255,255,255,.04); --good:#3fd39a;
     --pmono:'JetBrains Mono', var(--vscode-editor-font-family), ui-monospace, monospace;
+    --pshadow: 0 10px 28px rgba(0,0,0,.45);
     color: var(--ptxt);
   }
   body.vscode-light, body.vscode-high-contrast-light {
     --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); --accentGlow:rgba(14,136,173,.18);
     --pcard:#ffffff; --pborder:rgba(15,30,45,.12); --ptxt:#132029; --pmuted:#5a6b78; --pfaint:#94a1ad;
     --pfield:rgba(15,30,45,.03); --good:#2fa96a;
+    --pshadow: 0 10px 24px rgba(15,30,45,.16);
   }
   .wrap { max-width: 880px; margin: 0 auto; }
   h1 { font-size: 21px; font-weight: 700; margin: 0 0 5px; letter-spacing: .2px; }
@@ -373,15 +370,37 @@ function renderShell(): string {
   .rows { display: flex; flex-direction: column;
     background: var(--pcard); border: 1px solid var(--pborder); border-radius: 12px; overflow: hidden; }
   .row {
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 22px;
-    padding: 14px 16px; border-top: 1px solid var(--pborder); transition: background .15s;
+    display: flex; align-items: center; justify-content: space-between; gap: 22px;
+    padding: 12px 16px; border-top: 1px solid var(--pborder); transition: background .15s;
   }
   .row:first-child { border-top: none; }
   .row:hover { background: var(--accentSoft); }
   .ri { min-width: 0; }
   .rl { font-size: 13px; font-weight: 600; }
-  .rh { font-size: 11.5px; color: var(--pmuted); margin-top: 5px; line-height: 1.6; max-width: 560px; }
-  .ra { flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding-top: 1px; }
+  .ra { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
+
+  /* Explanations are not printed under every row any more — each one hides
+     behind this badge, and only shows after a 2s hover (see the tooltip engine
+     in the script). Any element carrying data-tip gets the same behaviour,
+     including the ones the Search / Oracle sections render. */
+  .hint {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 15px; height: 15px; margin-left: 7px; vertical-align: middle;
+    border: 1px solid var(--pborder); border-radius: 50%;
+    background: var(--pfield); color: var(--pmuted);
+    font-size: 9.5px; font-weight: 700; line-height: 1;
+    cursor: help; user-select: none; transition: .15s;
+  }
+  .hint:hover { color: var(--accent2); border-color: var(--accent); background: var(--accentSoft); }
+  #tip {
+    position: fixed; left: 0; top: 0; z-index: 40; max-width: 320px;
+    pointer-events: none; visibility: hidden; opacity: 0;
+    background: var(--pcard); color: var(--ptxt);
+    border: 1px solid var(--pborder); border-radius: 10px; box-shadow: var(--pshadow);
+    padding: 9px 12px; font-size: 11.5px; line-height: 1.65;
+    transition: opacity .12s ease;
+  }
+  #tip.on { visibility: visible; opacity: 1; }
   select, input[type=text], input[type=number] {
     background: var(--pfield); color: var(--ptxt);
     border: 1px solid var(--pborder); border-radius: 9px;
@@ -412,19 +431,6 @@ function renderShell(): string {
     <b>ทุกค่าในหน้านี้มีตัวอ่านจริง:</b> ค่าที่ไม่มีใครอ่านถูกถอดออกและลบคีย์ทิ้งจากไฟล์แล้ว — ส่วนนั้นใช้ค่า default ในโค้ดตรงๆ
   </div>
 
-  <!-- [graphify-temp] isolated refresh button — remove this section + the other [graphify-temp] blocks to uninstall -->
-  <section class="grp" id="graphify-temp"><h2>Graphify (temporary)</h2>
-    <div class="rows"><div class="row">
-      <div class="ri">
-        <div class="rl">Refresh code graph</div>
-        <div class="rh">Rebuild graph.json + force-directed graph.html for a repo (algorithmic clustering, no LLM). เลือก repo หลังกด; source repo ไม่ถูกแตะ, HTML ไป ~/graphify-view/.</div>
-      </div>
-      <div class="ra">
-        <button class="so-btn" data-act="graphify-refresh">Refresh…</button>
-      </div>
-    </div></div>
-  </section>
-
 <script>
   const vscode = acquireVsCodeApi();
 
@@ -440,6 +446,75 @@ function renderShell(): string {
     if (extra) { for (const k in extra) { m[k] = extra[k]; } }
     vscode.postMessage(m);
   }
+
+  // ---- hover tips -------------------------------------------------------
+  // One floating card, shared by every [data-tip] on the page (rows rendered
+  // here AND the ones the Search / Oracle scripts render — the listeners are on
+  // document, so nothing has to register). Nothing shows until the pointer has
+  // rested on a badge for TIP_DELAY, then the card trails the pointer until it
+  // leaves. It is pointer-events:none, so it can never steal the hover.
+  const TIP_DELAY = 2000;
+  let tipEl = null, tipTimer = null, tipHost = null, tipX = 0, tipY = 0;
+
+  function hint(text) {
+    const s = String(text == null ? "" : text).trim();
+    if (!s) return "";
+    return '<span class="hint" data-tip="' + esc(s) + '" aria-label="' + esc(s) + '">?</span>';
+  }
+  function tipNode() {
+    if (!tipEl) {
+      tipEl = document.createElement("div");
+      tipEl.id = "tip";
+      tipEl.setAttribute("role", "tooltip");
+      document.body.appendChild(tipEl);
+    }
+    return tipEl;
+  }
+  function tipShown() { return !!tipEl && tipEl.classList.contains("on"); }
+  function placeTip(x, y) {
+    const el = tipNode();
+    let left = x + 14, top = y + 18;
+    // Flip to the other side of the pointer rather than letting the card hang
+    // off the window edge.
+    if (left + el.offsetWidth > window.innerWidth - 8) left = x - el.offsetWidth - 14;
+    if (top + el.offsetHeight > window.innerHeight - 8) top = y - el.offsetHeight - 14;
+    el.style.left = Math.max(8, left) + "px";
+    el.style.top = Math.max(8, top) + "px";
+  }
+  function hideTip() {
+    if (tipTimer) { clearTimeout(tipTimer); tipTimer = null; }
+    tipHost = null;
+    if (tipEl) tipEl.classList.remove("on");
+  }
+  document.addEventListener("mouseover", function (e) {
+    const t = e.target;
+    const host = t && t.closest ? t.closest("[data-tip]") : null;
+    if (!host) { if (tipHost) hideTip(); return; }
+    if (host === tipHost) return;
+    hideTip();
+    tipHost = host;
+    tipX = e.clientX; tipY = e.clientY;
+    tipTimer = setTimeout(function () {
+      tipTimer = null;
+      // A re-render can swap the row out from under a pending timer.
+      if (tipHost !== host || host.isConnected === false) return;
+      const el = tipNode();
+      el.textContent = host.getAttribute("data-tip") || "";
+      el.classList.add("on");
+      placeTip(tipX, tipY);
+    }, TIP_DELAY);
+  });
+  document.addEventListener("mousemove", function (e) {
+    if (!tipHost) return;
+    tipX = e.clientX; tipY = e.clientY;
+    if (tipShown()) placeTip(tipX, tipY);
+  });
+  document.addEventListener("mouseout", function (e) {
+    if (!tipHost) return;
+    const to = e.relatedTarget;
+    if (to && tipHost.contains && tipHost.contains(to)) return;
+    hideTip();
+  });
 
   function fieldControl(f) {
     const key = esc(f.key);
@@ -481,8 +556,7 @@ function renderShell(): string {
         const f = fields[j];
         html +=
           '<div class="row"><div class="ri">' +
-            '<div class="rl">' + esc(f.label) + "</div>" +
-            '<div class="rh">' + esc(f.help) + "</div>" +
+            '<div class="rl">' + esc(f.label) + hint(f.help) + "</div>" +
           '</div><div class="ra">' + fieldControl(f) + "</div></div>";
       }
       html += "</div></section>";
@@ -491,6 +565,7 @@ function renderShell(): string {
   }
 
   document.addEventListener("click", function (e) {
+    hideTip(); // a click means the user is done reading
     const t = e.target;
     if (!t || !t.closest) return;
     // Walk up so a click on the switch knob (.kn) still hits the switch.
@@ -499,8 +574,6 @@ function renderShell(): string {
       post("set", { key: sw.getAttribute("data-key"), value: sw.getAttribute("data-next") === "true" });
       return;
     }
-    const gr = t.closest('[data-act="graphify-refresh"]'); // [graphify-temp]
-    if (gr) { post("graphifyRefresh"); return; }
     if (t.closest("#path")) { post("copyPath"); }
   });
   document.addEventListener("change", function (e) {

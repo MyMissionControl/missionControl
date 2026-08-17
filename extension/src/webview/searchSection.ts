@@ -125,12 +125,14 @@ const _script = [
   "    var idxBtn = indexing ? '<button class=\"so-btn\" data-so=\"stop\">Stop</button>' : '<button class=\"so-btn\" data-so=\"index\">Index now</button>';",
   "    var statusRow = '<div class=\"so-status\">'+esc(statusLine)+' '+idxBtn+'</div>';",
   "    var sub = '<div class=\"so-sub'+(v.hybridEnabled?'':' so-disabled')+'\">'",
-  "      + '<div class=\"so-row\"><div><div class=\"so-rl\">Embedding model</div><div class=\"so-rh\">nomic = default</div>'+mLine+'</div>'+modelSel+'</div>'",
+  // Descriptions sit behind a "?" badge (hover 2s) — the tooltip engine lives in
+  // settings.ts and listens on document, so anything with data-tip just works.
+  "      + '<div class=\"so-row\"><div><div class=\"so-rl\">Embedding model<span class=\"hint\" data-tip=\"โมเดลที่ใช้ทำ embedding ของ vector search · ค่าเริ่มต้นคือ nomic\">?</span></div>'+mLine+'</div>'+modelSel+'</div>'",
   "      + (v.modelPath?'<div class=\"so-rh\">model path: '+esc(v.modelPath)+'</div>':'')",
   "      + '</div>';",
   "    var note = v.envOverrideNote ? '<div class=\"so-note\">'+esc(v.envOverrideNote)+'</div>' : '';",
   "    el.innerHTML = '<h2>Search / Oracle</h2>'",
-  "      + '<div class=\"so-row\"><div><div class=\"so-rl\">Hybrid search</div><div class=\"so-rh\">ปิด = FTS5 อย่างเดียว · เปิด = FTS5 + LanceDB vector</div></div>'+sw+'</div>'",
+  "      + '<div class=\"so-row\"><div><div class=\"so-rl\">Hybrid search<span class=\"hint\" data-tip=\"ปิด = ค้นด้วย FTS5 อย่างเดียว · เปิด = FTS5 + LanceDB vector\">?</span></div></div>'+sw+'</div>'",
   "      + sub + note + statusRow;",
   "  }",
   "  document.addEventListener('click', function(e){",

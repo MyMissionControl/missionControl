@@ -90,6 +90,12 @@ describe("oracle memory client script", () => {
     expect(el.innerHTML).toContain('data-vault="bob-oracle" data-next="1"');
   });
 
+  test("the isolate explanation is a hover badge, not a wall of text", () => {
+    send(STATE);
+    expect(el.innerHTML).toContain('class="hint" data-tip="เปิด isolate =');
+    expect(el.innerHTML).toContain("2437 แชร์อยู่ (tenant default)"); // counts stay visible
+  });
+
   test("null state renders the not-installed notice, not an empty list", () => {
     send(null);
     expect(el.innerHTML).toContain("~/.claude");

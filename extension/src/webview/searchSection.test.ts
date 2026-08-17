@@ -23,6 +23,14 @@ describe("asset strings", () => {
     expect(s).toContain("searchState"); // listens for the host push
   });
 
+  test("row descriptions hide behind a hover badge, not printed under the row", () => {
+    // The page carries one tooltip engine (settings.ts) that listens on document
+    // for [data-tip] — sections only have to emit the badge.
+    const s = searchSectionScript();
+    expect(s).toContain('class="hint" data-tip=');
+    expect(s).not.toContain('"so-rh">ปิด'); // the old always-on help line
+  });
+
   test("renders controls unconditionally — no offline gating / dead-end", () => {
     // The section is a file-backed config editor: the toggle/mode/model always
     // render (server or not). There is no offline branch, banner, or retry —

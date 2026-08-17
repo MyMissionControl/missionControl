@@ -53,7 +53,8 @@ const _script = [
   '    var rows = v.vaults.map(row).join("");',
   '    if (!rows) rows = "<div class=" + q("so-off") + ">ไม่พบ vault ที่มีเอกสาร</div>";',
   '    el.innerHTML = "<h2>Oracle memory</h2>"',
-  '      + "<div class=" + q("om-tot") + ">" + v.documents + " docs · " + v.onDefault + " แชร์อยู่ (tenant default) · เปิด isolate = oracle นั้นค้นเจอแค่ความรู้ของตัวเอง (รวมถึงมองไม่เห็นคลังกลาง projects/ψ)</div>"',
+  // The explanation is behind a "?" badge (hover 2s) — engine in settings.ts.
+'      + "<div class=" + q("om-tot") + ">" + v.documents + " docs · " + v.onDefault + " แชร์อยู่ (tenant default)" + "<span class=" + q("hint") + " data-tip=" + q("เปิด isolate = oracle ตัวนั้นค้นเจอแค่ความรู้ของตัวเอง รวมถึงมองไม่เห็นคลังกลาง projects/ψ") + ">?</span></div>"',
   '      + rows;',
   '  }',
   '  document.addEventListener("click", function(e){',
