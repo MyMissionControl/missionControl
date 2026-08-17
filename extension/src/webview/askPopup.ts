@@ -36,6 +36,45 @@ function esc(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+/** The card ONLY — no <html>, no <style>, no <script>.
+ *
+ *  ⛔ Extracted so the sidebar (user's call 2026-08-17: "ย้ายเข้า sidebar MC" — the
+ *  asker must not open a new editor group) renders the SAME markup as the standalone
+ *  panel. Two copies of this shape is the trap this repo keeps re-learning: one gets
+ *  a fix, the other quietly goes on lying. Both surfaces call this. */
+export function renderAskCard(v: AskView): string {
+  const { ask } = v;
+  const multi = ask.multiSelect;
+  const rows = ask.options
+    .map((o) => {
+      const box = multi ? `<input type="checkbox" class="cb" data-key="${o.key}" id="o${o.key}">` : "";
+      const desc = o.description ? `<div class="desc">${esc(o.description)}</div>` : "";
+      return `<label class="opt" data-key="${o.key}" for="o${o.key}">
+  ${box}<span class="num">${o.key}.</span>
+  <span class="body"><span class="label">${esc(o.label)}</span>${desc}</span>
+</label>`;
+    })
+    .join("\n");
+  // ⛔ ปุ่ม Submit ต้องอยู่ใน HTML เสมอเมื่อกล่องเป็น multiSelect — disabled ได้ แต่ห้ามหาย
+  const footer = multi
+    ? `<div class="footer">
+  <div class="hint">เลือกได้หลายข้อ · ติ๊กแล้วกด Submit</div>
+  <button id="submit" disabled>✓ Submit</button>
+</div>`
+    : `<div class="footer"><div class="hint">คลิกข้อที่ต้องการ = ส่งคำตอบทันที (เหมือนกดเลขในเพน)</div></div>`;
+  return `<div class="card">
+  <div class="top">
+    <span class="chip">${multi ? "☑" : "☐"} ${esc(ask.header || "คำถาม")}</span>
+    <span class="who">${esc(v.session)} · ${esc(v.pane)}</span>
+  </div>
+  ${ask.question ? `<div class="q">${esc(ask.question)}</div>` : ""}
+  <div class="opts">
+${rows}
+  </div>
+  ${footer}
+</div>`;
+}
+
 export function renderAskPopup(v: AskView): string {
   const { ask } = v;
   const multi = ask.multiSelect;
@@ -90,17 +129,7 @@ export function renderAskPopup(v: AskView): string {
           background: var(--vscode-inputValidation-infoBackground, #0a42); }
 </style></head>
 <body>
-<div class="card">
-  <div class="top">
-    <span class="chip">${multi ? "☑" : "☐"} ${esc(ask.header || "คำถาม")}</span>
-    <span class="who">${esc(v.session)} · ${esc(v.pane)}</span>
-  </div>
-  ${ask.question ? `<div class="q">${esc(ask.question)}</div>` : ""}
-  <div class="opts">
-${rows}
-  </div>
-  ${footer}
-</div>
+${renderAskCard(v)}
 <div id="note"></div>
 <script>
   const vs = acquireVsCodeApi();

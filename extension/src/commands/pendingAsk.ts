@@ -395,6 +395,26 @@ export function parsePaneList(raw: string): PaneRow[] {
   return out;
 }
 
+/** Should MC open its OWN asker for a hit, given how many clients are attached
+ *  to that pane's tmux session?
+ *
+ *  ⛔ Every hit this feature produces is a NATIVE Claude Code box (FOOTER_RE is
+ *  that box's own footer), so when a human is attached the question is already
+ *  on their screen with its native keyboard handling — opening a second asker on
+ *  top is the duplicate the user asked us to stop ("ถ้าเป็น native ให้ใช้ถามตอบ
+ *  ของ native", 2026-08-16). MC's asker exists for the headless case: a run
+ *  nobody is attached to, where the box would otherwise block the sprint until
+ *  somebody happens to look.
+ *
+ *  ⛔ `clients` comes from `sessionClients()` (webview/sessions.ts), where -1
+ *  means the session is gone — there is nothing left to answer. Any value that
+ *  is not a clean non-negative integer is treated as "do not show": popping a
+ *  panel over someone's screen on a garbled count is the failure that annoys,
+ *  and the status bar + `pendingAskCommand` still offer a way in by hand. */
+export function shouldShowOwnAsker(clients: number): boolean {
+  return Number.isInteger(clients) && clients === 0;
+}
+
 /** A pane blocked on a choice box, plus where to answer it. */
 export interface PendingHit {
   pane: string;

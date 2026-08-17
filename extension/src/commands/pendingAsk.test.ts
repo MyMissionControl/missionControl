@@ -17,6 +17,7 @@ import {
   parseAskFromPane,
   parsePaneList,
   scanPending,
+  shouldShowOwnAsker,
 } from "./pendingAsk";
 
 // ── fixtures ───────────────────────────────────────────────────────────────
@@ -469,4 +470,24 @@ describe("copy-mode guard", () => {
     expect(isInMode(null)).toBe(false);       // tmux ล้ม = ส่งต่อไปเลย ดีกว่าหยุดตอบ
     expect(isInMode(undefined)).toBe(false);
   });
+});
+
+// ⛔⛔ USER INSTRUCTION 2026-08-16 (screenshot): "ถ้าเป็น native ให้ใช้ถามตอบของ native และให้เด้ง
+//   ถามแบบนี้และตัวถามโปรดทำเป็น popup ไม่ใช่เปิด pane ใหม่" — half 1 of that is a GATE: every hit
+//   this feature finds is native by construction (FOOTER_RE is the Claude Code box footer), so when a
+//   human is already attached to that tmux session the native box IS on their screen and MC must not
+//   stack a second asker on top of it. The signal is tmux's own attached-client count — the same one
+//   sessionClients() already exposes and attachTerminal.ts already trusts.
+//   ⛔ clients === -1 means the session is gone: nothing to answer, so nothing to show.
+test("shouldShowOwnAsker: only when NOBODY is attached to that tmux session", () => {
+  expect(shouldShowOwnAsker(0)).toBe(true); // headless run — MC's asker is the only way in
+  expect(shouldShowOwnAsker(1)).toBe(false); // a human is looking at the native box right now
+  expect(shouldShowOwnAsker(3)).toBe(false);
+  expect(shouldShowOwnAsker(-1)).toBe(false); // session vanished between sweep and show
+});
+
+test("shouldShowOwnAsker: a garbled count must not open a panel over someone's screen", () => {
+  expect(shouldShowOwnAsker(Number.NaN)).toBe(false);
+  expect(shouldShowOwnAsker(undefined as unknown as number)).toBe(false);
+  expect(shouldShowOwnAsker(1.5)).toBe(false);
 });

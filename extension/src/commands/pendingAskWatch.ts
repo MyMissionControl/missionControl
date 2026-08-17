@@ -30,7 +30,9 @@ import * as cp from "node:child_process";
 
 import * as vscode from "vscode";
 
-import { renderAskPopup } from "../webview/askPopup";
+import { renderAskCard, renderAskPopup } from "../webview/askPopup";
+import { getSidebarProvider } from "../webview/sidebar";
+import { parseTmuxSessions, sessionClients, TMUX_FMT } from "../webview/sessions";
 import { setTabIcon } from "../webview/tabIcon";
 import { tabLabel } from "../webview/tabModel";
 import {
@@ -48,6 +50,7 @@ import {
   reviewMatches,
   sameAsk,
   scanPending,
+  shouldShowOwnAsker,
   type PaneAsk,
   type PendingHit,
 } from "./pendingAsk";
@@ -68,7 +71,20 @@ const CLAUDE_CMD = /^(claude|node|bun)$/;
 const _seen = new Set<string>();
 /** The box on screen right now, so the poll can close it if the question gets
  *  answered in the pane instead. */
-let _open: { key: string; panel: vscode.WebviewPanel } | null = null;
+// ⛔ `panel: null` = the box is showing INSIDE the sidebar (no editor group was opened).
+//   Every dispose site must therefore go through `closeOpen()`, never `_open.panel.dispose()`
+//   directly — a null deref here would kill the watcher tick and the run parks silently.
+let _open: { key: string; panel: vscode.WebviewPanel | null } | null = null;
+
+/** Close whatever surface is showing the box (sidebar card or fallback panel). */
+function closeOpen(): void {
+  if (!_open) return;
+  if (_open.panel) _open.panel.dispose();
+  else {
+    getSidebarProvider()?.clearAsk();
+    _open = null;
+  }
+}
 let _timer: ReturnType<typeof setInterval> | undefined;
 let _status: vscode.StatusBarItem | undefined;
 let _lastHits: PendingHit[] = [];
@@ -242,7 +258,55 @@ async function answerSingle(hit: PendingHit, key: number): Promise<{ ok: boolean
  * button is the "ปุ่ม submit หาย" report. A webview renders the same shape the
  * human already knows from the pane, and its Submit is always on screen.
  */
+/** Answer a hit from whichever surface reported the click. Shared so the sidebar
+ *  and the fallback panel can never drift on what a click does. */
+async function applyAnswer(
+  hit: PendingHit,
+  m: { type?: string; key?: number; keys?: number[] },
+): Promise<{ ok: boolean; text: string } | null> {
+  if ((m?.type === "answer" || m?.type === "ask_answer") && isDigitAnswerable(hit.ask)) {
+    return answerSingle(hit, Number(m.key));
+  }
+  if ((m?.type === "submit" || m?.type === "ask_submit") && isMultiAnswerable(hit.ask)) {
+    return answerMulti(hit, (m.keys ?? []).map(Number));
+  }
+  return null;
+}
+
+/** Render the box INSIDE the Mission Control sidebar. Returns false when there is
+ *  no resolved sidebar view to render into, so the caller falls back to a panel.
+ *
+ *  ⛔⛔ USER 2026-08-17: the asker must not open a new editor group. `ViewColumn.Beside`
+ *  did exactly that. VS Code has no floating-overlay API for a webview, so "popup" lands
+ *  here — inside the panel MC already owns, revealed but never stealing the editor area. */
+function showInSidebar(hit: PendingHit): boolean {
+  const sb = getSidebarProvider();
+  if (!sb) return false;
+  sb.setAskHandler((m) => {
+    void (async () => {
+      const res = await applyAnswer(hit, m);
+      if (!res) return;
+      if (res.ok) {
+        vscode.window.setStatusBarMessage(res.text, 4000);
+        sb.clearAsk();
+        _open = null;
+        _seen.add(hit.key);
+        return;
+      }
+      // ⛔ ห้ามปิดกล่องตอนล้ม — agent ยังค้างรออยู่ คนต้องเห็นเหตุผลและมีทางไปต่อ
+      const go = await vscode.window.showWarningMessage(res.text, "เปิดเพนไปตอบเอง");
+      if (go) await openPane(hit);
+    })();
+  });
+  if (!sb.showAsk(renderAskCard({ session: hit.session, pane: hit.pane, ask: hit.ask }), hit.ask.multiSelect)) {
+    return false;
+  }
+  _open = { key: hit.key, panel: null };
+  return true;
+}
+
 function showBox(hit: PendingHit): void {
+  if (showInSidebar(hit)) return;
   const panel = vscode.window.createWebviewPanel(
     "mcPendingAsk",
     // WHO is asking goes in the tab (the question itself is right there in the
@@ -303,7 +367,7 @@ async function tick(): Promise<void> {
   if (!enabled()) {
     _lastHits = [];
     refreshStatus([]);
-    if (_open) _open.panel.dispose();
+    if (_open) closeOpen();
     return;
   }
   _ticking = true;
@@ -319,11 +383,19 @@ async function tick(): Promise<void> {
   if (_open) {
     // Answered in the pane while the box was up → close it rather than leave a
     // dead box whose click would send a keystroke nobody is waiting for.
-    if (!hits.some((h) => h.key === _open!.key)) _open.panel.dispose();
+    if (!hits.some((h) => h.key === _open!.key)) closeOpen();
     return; // one box at a time
   }
   const next = hits.find((h) => !_seen.has(h.key));
-  if (next) showBox(next);
+  if (!next) return;
+  // ⛔⛔ Every hit here is a NATIVE Claude Code box, so if a human is attached to that
+  //   tmux session the question is already on their screen with its own key handling —
+  //   opening ours on top is the duplicate the user asked us to drop (2026-08-16).
+  //   Auto-open is for the headless case only; the status bar and the
+  //   `missioncontrol.pendingAsk` command still reach every hit by hand.
+  const sess = await tmux(["list-sessions", "-F", TMUX_FMT]);
+  if (!shouldShowOwnAsker(sessionClients(parseTmuxSessions(sess ?? ""), next.session))) return;
+  showBox(next);
 }
 
 /** Command: re-open the box for whatever is waiting (after an Esc, or from the
@@ -338,7 +410,9 @@ export async function pendingAskCommand(): Promise<void> {
     return;
   }
   if (_open) {
-    _open.panel.reveal(vscode.ViewColumn.Beside, false);
+    // ⛔ กล่องที่อยู่ใน sidebar ไม่มี panel ให้ reveal — เปิดแผงขึ้นมาแทน (คำสั่ง "ไม่เปิด pane ใหม่")
+    if (_open.panel) _open.panel.reveal(vscode.ViewColumn.Beside, false);
+    else await vscode.commands.executeCommand("missioncontrol.panel.focus");
     return;
   }
   _seen.delete(hits[0].key);
@@ -354,7 +428,7 @@ export function initPendingAskWatch(context: vscode.ExtensionContext): void {
     dispose: () => {
       if (_timer) clearInterval(_timer);
       _timer = undefined;
-      if (_open) _open.panel.dispose();
+      if (_open) closeOpen();
       _open = null;
     },
   });

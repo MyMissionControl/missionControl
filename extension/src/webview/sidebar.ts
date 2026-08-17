@@ -45,6 +45,8 @@ let dashboardAutoOpened = false;
  * propagates through `projectState` to api.ts (X-Project-Id header) and ws.ts
  * (per-project WS subscription).
  */
+export type AskMsg = { type: "ask_answer"; key: number } | { type: "ask_submit"; keys: number[] };
+
 export class SidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private timer?: NodeJS.Timeout;
@@ -54,8 +56,34 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private projectsLoaded = false; // true once /projects fetched at least once
   private unsubProjectChange?: () => void;
   private unsubNav?: () => void; // active-nav (frontmost tab) subscription
+  // ⛔⛔ USER 2026-08-17: the agent's question must appear HERE, not by opening a new
+  //   editor group (`ViewColumn.Beside` = a whole new pane, which is what it did).
+  //   Kept as state, not just a postMessage, because the webview is torn down when the
+  //   view is hidden — on the next `ready` we re-post it, else the question disappears
+  //   while the run is still blocked on it.
+  private ask?: { card: string; multi: boolean };
+  private askHandler?: (m: AskMsg) => void;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
+
+  /** Show the agent's choice box inside this view. Returns false when there is no
+   *  view to show it in (webview not resolved yet) so the caller can fall back. */
+  showAsk(card: string, multi: boolean): boolean {
+    this.ask = { card, multi };
+    if (!this.view) return false;
+    this.view.show?.(true); // reveal the sidebar; does NOT steal the editor area
+    void this.view.webview.postMessage({ type: "ask", card, multi });
+    return true;
+  }
+
+  clearAsk(): void {
+    this.ask = undefined;
+    void this.view?.webview.postMessage({ type: "ask_clear" });
+  }
+
+  setAskHandler(fn: (m: AskMsg) => void): void {
+    this.askHandler = fn;
+  }
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -72,7 +100,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         await this.render();
         // The maw-ui toggle just flipped state → refresh the button label.
         await this.pushMaw();
+      } else if (msg?.type === "ask_answer" || msg?.type === "ask_submit") {
+        this.askHandler?.(msg as AskMsg);
       } else if (msg?.type === "ready") {
+        if (this.ask) void this.view?.webview.postMessage({ type: "ask", ...this.ask });
         await this.tick();
         await this.pushProjectList();
         await this.pushMaw();
@@ -296,6 +327,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   .hero h2 { margin: 0 0 10px; font-size: 18px; font-weight: 600; color: var(--txt); }
   .hero p { margin: 0 0 24px; font-size: 12.5px; color: var(--muted); line-height: 1.6; max-width: 260px; }
   .hero .pbtn { min-width: 200px; margin-bottom: 8px; }
+  /* กล่องคำถามของ agent — แคบกว่าใน panel เพราะ sidebar กว้างจำกัด แต่โครงเดียวกัน */
+  #askWrap:empty { display: none; }
+  #askWrap { margin: 0 0 12px; }
+  #askWrap .card { border: 1px solid var(--vscode-panel-border, #8884); border-radius: 10px; overflow: hidden; }
+  #askWrap .top { display: flex; gap: 6px; padding: 8px 10px; background: var(--vscode-editorWidget-background, #0002);
+                  border-bottom: 1px solid var(--vscode-panel-border, #8884); font-size: 12px; }
+  #askWrap .chip { font-weight: 600; }
+  #askWrap .who { opacity: .6; margin-left: auto; font-size: 11px; }
+  #askWrap .q { padding: 10px 10px 2px; font-size: 13px; font-weight: 600; }
+  #askWrap .opts { padding: 4px 6px 8px; }
+  #askWrap .opt { display: flex; gap: 6px; align-items: flex-start; padding: 7px 8px; border-radius: 8px; cursor: pointer; font-size: 12.5px; }
+  #askWrap .opt:hover { background: var(--vscode-list-hoverBackground, #8882); }
+  #askWrap .opt.on { background: var(--vscode-list-activeSelectionBackground, #0a48); }
+  #askWrap .num { opacity: .55; min-width: 1.3em; }
+  #askWrap .desc { opacity: .7; margin-top: 2px; font-size: 11.5px; }
+  #askWrap .footer { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+                     background: var(--vscode-editorWidget-background, #0002); border-top: 1px solid var(--vscode-panel-border, #8884); }
+  #askWrap .hint { opacity: .7; font-size: 11px; }
+  #askWrap button { margin-left: auto; padding: 5px 12px; border: 0; border-radius: 6px; cursor: pointer;
+                    background: var(--vscode-button-background); color: var(--vscode-button-foreground); font-size: 12px; }
+  #askWrap button:disabled { opacity: .45; cursor: not-allowed; }
 </style>`;
   }
 
@@ -336,6 +388,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const ICON_SERVER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>';
     const ICON_GEAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>';
     return `<!DOCTYPE html><html><head>${this.head()}</head><body>
+  <div id="askWrap"></div>
   <div class="eyebrow">Mission Control</div>
   <div class="search">${ICON_SEARCH}<input id="navSearch" type="text" placeholder="Search…" /></div>
   <div class="primaries">
@@ -393,15 +446,55 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   document.getElementById('settingsBtn').addEventListener('click', () =>
     vscode.postMessage({ type: 'run', command: 'missioncontrol.settings' }));
+
+  // ⛔⛔ กล่องคำถามของ agent อยู่ "ในแผงนี้" ไม่ใช่เปิดแท็บใหม่ (คำสั่ง user 2026-08-17)
+  //   การ์ดถูกสร้างด้วย renderAskCard ฝั่ง extension = มาร์กอัปชุดเดียวกับ panel เดิมเป๊ะ
+  const askWrap = document.getElementById('askWrap');
+  function wireAsk(multi) {
+    const picked = () => [].slice.call(askWrap.querySelectorAll('.cb')).filter((c) => c.checked).map((c) => +c.dataset.key);
+    const submit = askWrap.querySelector('#submit');
+    function sync() {
+      askWrap.querySelectorAll('.opt').forEach((o) => {
+        const cb = o.querySelector('.cb');
+        o.classList.toggle('on', !!(cb && cb.checked));
+      });
+      if (submit) submit.disabled = picked().length === 0;
+    }
+    if (multi) {
+      askWrap.querySelectorAll('.cb').forEach((cb) => cb.addEventListener('change', sync));
+      if (submit) submit.addEventListener('click', () => {
+        submit.disabled = true;
+        vscode.postMessage({ type: 'ask_submit', keys: picked() });
+      });
+    } else {
+      askWrap.querySelectorAll('.opt').forEach((o) =>
+        o.addEventListener('click', () => vscode.postMessage({ type: 'ask_answer', key: +o.dataset.key })));
+    }
+    sync();
+  }
+  window.addEventListener('message', (ev) => {
+    const m = ev.data || {};
+    if (m.type === 'ask') { askWrap.innerHTML = m.card || ''; wireAsk(!!m.multi); }
+    else if (m.type === 'ask_clear') { askWrap.innerHTML = ''; }
+  });
   vscode.postMessage({ type: 'ready' });
 </script>
 </body></html>`;
   }
 }
 
+let _provider: SidebarProvider | undefined;
+
+/** The live sidebar provider, for callers that render INTO the panel (pendingAskWatch).
+ *  undefined before registerSidebar runs. */
+export function getSidebarProvider(): SidebarProvider | undefined {
+  return _provider;
+}
+
 export function registerSidebar(context: vscode.ExtensionContext): void {
   initNavTracking(context); // watch the frontmost tab so the nav reflects the real page
   const provider = new SidebarProvider(context);
+  _provider = provider;
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(VIEW_ID, provider),
   );

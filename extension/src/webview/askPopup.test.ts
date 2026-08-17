@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { renderAskPopup } from "./askPopup";
+import { renderAskCard, renderAskPopup } from "./askPopup";
 
 const single = {
   session: "09-foreman",
@@ -87,4 +87,27 @@ test("A6 renders with no header/question (a box that set neither)", () => {
   });
   expect(h).toContain("ok");
   expect(h).toContain("<body");
+});
+
+// ⛔ ทั้งสองผิว (panel เดิม + sidebar ใหม่) ต้องมาจาก builder ตัวเดียวกัน — สองสำเนาคือกับดักที่รีโปนี้
+//   เจอซ้ำ ๆ (แก้ที่เดียว อีกที่โกหกต่อ) · การ์ดต้องเป็น "ชิ้นส่วน" ล้วน ๆ ฝังในหน้าอื่นได้
+test("renderAskCard: ชิ้นส่วนล้วน — ไม่มี doctype/style/script ติดมา", () => {
+  const html = renderAskCard(single);
+  expect(html).not.toContain("<!doctype");
+  expect(html).not.toContain("<script");
+  expect(html).not.toContain("<style");
+  expect(html.trimStart().startsWith('<div class="card">')).toBe(true);
+});
+
+test("renderAskCard: ตัวเลือก/หัวข้อ/ปุ่ม Submit ครบเหมือนเดิม", () => {
+  const one = renderAskCard(single);
+  expect(one).toContain('data-key="1"');
+  expect(one).toContain("คลิกข้อที่ต้องการ");
+  const many = renderAskCard(multi);
+  expect(many).toContain('type="checkbox"');
+  expect(many).toContain('id="submit"');
+});
+
+test("⭐ panel เดิมต้องใช้การ์ดใบเดียวกันจริง (ไม่ใช่สำเนา)", () => {
+  expect(renderAskPopup(single)).toContain(renderAskCard(single));
 });
