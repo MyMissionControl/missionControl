@@ -356,9 +356,10 @@ function renderShell(): string {
   h1 { font-size: 21px; font-weight: 700; margin: 0 0 5px; letter-spacing: .2px; }
   .lead { font-size: 12px; color: var(--pmuted); margin-bottom: 10px; }
   /* The config path is a click-to-copy chip, like the Project Detail header. */
+  .pathrow { display: flex; align-items: center; margin-bottom: 24px; }
   .path { display: inline-block; font-size: 10.5px; font-family: var(--pmono); color: var(--pmuted);
     background: var(--pfield); border: 1px solid var(--pborder); border-radius: 8px; padding: 5px 10px;
-    margin-bottom: 24px; cursor: pointer; }
+    cursor: pointer; }
   .path:hover { border-color: var(--accent); color: var(--ptxt); }
   .path.copied { color: var(--good); border-color: var(--good); }
 
@@ -409,11 +410,6 @@ function renderShell(): string {
   }
   select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentSoft); }
   .empty { color: var(--pfaint); font-size: 12.5px; padding: 12px 4px; }
-  .note {
-    margin-top: 18px; font-size: 11.5px; line-height: 1.7; color: var(--pmuted);
-    background: var(--pfield); border: 1px solid var(--pborder); border-radius: 12px; padding: 14px 16px;
-  }
-  .note b { color: var(--ptxt); font-weight: 600; }
   ${searchSectionStyle()}
   ${oracleMemorySectionStyle()}
 </style>
@@ -421,15 +417,16 @@ function renderShell(): string {
 <body>
 <div class="wrap">
   <h1>Settings</h1>
-  <div class="lead">ปรับค่าต่างๆ ของ Mission Control — บันทึกทันทีเมื่อเปลี่ยนค่า</div>
-  <div class="path" id="path" title="คลิกเพื่อคัดลอก path"></div>
+  <div class="lead">ปรับค่าต่างๆ ของ Mission Control — บันทึกทันทีเมื่อเปลี่ยนค่า มีผลกับงานที่เริ่มใหม่หลังจากนี้</div>
+  <!-- The path chip is the only place the file is named. The rest of what used to
+       be a footer note sits in its hover tip — same page, one line instead of five. -->
+  <div class="pathrow">
+    <div class="path" id="path" title="คลิกเพื่อคัดลอก path"></div>
+    <span class="hint" data-tip="ทุกค่าเขียนลงไฟล์นี้ตรงๆ — local เครื่องนี้เท่านั้น ไม่ push git · ทุกค่าในหน้านี้มีตัวอ่านจริง ค่าที่ไม่มีใครอ่านถูกถอดออกและลบคีย์ทิ้งไปแล้ว">?</span>
+  </div>
   <div id="groups"></div>
   ${searchSectionBody()}
   ${oracleMemorySectionBody()}
-  <div class="note">
-    <b>เก็บที่ไหน:</b> ทุกค่าเขียนลงไฟล์ <b id="path2"></b> ตรงๆ (local เครื่องนี้เท่านั้น ไม่ push git) · เปลี่ยนแล้วมีผลกับงานที่ <b>เริ่มใหม่</b> หลังจากนี้<br />
-    <b>ทุกค่าในหน้านี้มีตัวอ่านจริง:</b> ค่าที่ไม่มีใครอ่านถูกถอดออกและลบคีย์ทิ้งจากไฟล์แล้ว — ส่วนนั้นใช้ค่า default ในโค้ดตรงๆ
-  </div>
 
 <script>
   const vscode = acquireVsCodeApi();
@@ -540,7 +537,6 @@ function renderShell(): string {
 
   function render(v) {
     document.getElementById("path").textContent = v.path || "";
-    document.getElementById("path2").textContent = v.path || "";
     const root = document.getElementById("groups");
     const groups = v.groups || [];
     if (!groups.length) {
