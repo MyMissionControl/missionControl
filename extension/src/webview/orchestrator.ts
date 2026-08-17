@@ -1123,9 +1123,15 @@ function renderShell(): string {
   #editBtn.on { background:rgba(248,81,73,0.15); color:#f85149; border-color:#f85149; }
   #archBtn.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .archbadge { font-size: 11px; color: #e3a13a; align-self: center; margin-left: 4px; }
-  .modal-card .mbtn.danger { border-color:#f85149; color:#fff; background:#da3633; }
-  .modal-card .mbtn.danger:hover { background:#f85149; }
-  .modal-card .mbtn.danger:disabled { background:rgba(218,54,51,0.35); border-color:transparent; color:rgba(255,255,255,0.5); cursor:not-allowed; }
+  /* The one button that destroys something keeps red — but as the same tinted
+     shape the rest of the panel uses, not a solid block. */
+  .modal-card .mbtn.danger { border-color: rgba(248,81,73,.6); color: #ff7b72; background: rgba(248,81,73,.14); }
+  .modal-card .mbtn.danger:hover { border-color: #f85149; color: #fff; background: #da3633; }
+  /* Round 2 only — the press that actually deletes is the solid one. */
+  .modal-card .mbtn.danger.hot { border-color: #f85149; color: #fff; background: #da3633; }
+  .modal-card .mbtn.danger.hot:hover { background: #f85149; }
+  .modal-card .mbtn.danger:disabled, .modal-card .mbtn.danger.hot:disabled {
+    background: transparent; border-color: var(--pborder); color: var(--pfaint); cursor: not-allowed; }
   .modal-card .merr.ok { color:#3fb950; }
   .modal-card .merr.bad { color:#f85149; }
   .modal-card .merr.warn { color:#e3a13a; }
@@ -1238,23 +1244,45 @@ function renderShell(): string {
     animation: glspin 1.2s linear infinite; pointer-events: none; }
   @keyframes glspin { to { --gl: 360deg; } }
   /* "ทำหลาย sprint" — centered floating modal (host showInputBox can't center). */
-  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.55);
-    display: flex; align-items: center; justify-content: center; z-index: 100; }
-  .modal-card { background: var(--vscode-editor-background);
-    border: 1px solid var(--vscode-panel-border); border-radius: 8px;
-    padding: 18px 20px; width: 320px; max-width: 86vw;
-    box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
-  .modal-card .mt { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
-  .modal-card .mh { font-size: 11px; opacity: 0.65; margin-bottom: 12px; line-height: 1.4; }
-  .modal-card input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 7px 9px;
-    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
-    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; }
-  .modal-card .merr { font-size: 11px; color: #f85149; min-height: 14px; margin-top: 6px; }
-  .modal-card .mact { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-  .modal-card .mbtn { font-size: 12px; padding: 5px 14px; border-radius: 5px; cursor: pointer;
-    border: 1px solid var(--vscode-panel-border); background: transparent; color: var(--vscode-foreground); }
-  .modal-card .mbtn.primary { border-color: #3f7bd0; color: #fff; background: #1f6feb; }
-  .modal-card .mbtn.primary:hover { background: #388bfd; }
+  /* ── Modals (ลบโปรเจค / ทำ N sprint / ตั้งชื่อโปรเจค) ─────────────────────
+     They sit at the top of <body>, OUTSIDE .proj-track, so the Bento tokens are
+     not inherited — the card declares them itself. Same shapes as the cards
+     behind it: 14px corners on the card, 9px on fields and buttons, the panel
+     accent for the action, red kept for the one button that destroys something. */
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(6,11,16,.66);
+    backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 100;
+    --accent:#2f9dc4; --accent2:#40c8ea; --accentSoft:rgba(47,157,196,.15); --accentGlow:rgba(64,200,234,.28);
+    --pcard:#161f28; --pborder:rgba(255,255,255,.10); --ptxt:#e7eef5; --pmuted:#8a97a4; --pfaint:#5c6773;
+    --pfield:rgba(255,255,255,.04);
+    --pmono:'JetBrains Mono',var(--vscode-editor-font-family),ui-monospace,monospace; }
+  body.vscode-light .modal-backdrop, body.vscode-high-contrast-light .modal-backdrop {
+    background: rgba(15,30,45,.34);
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); --accentGlow:rgba(14,136,173,.18);
+    --pcard:#ffffff; --pborder:rgba(15,30,45,.12); --ptxt:#132029; --pmuted:#5a6b78; --pfaint:#94a1ad;
+    --pfield:rgba(15,30,45,.03); }
+  .modal-card { background: var(--pcard); color: var(--ptxt);
+    border: 1px solid var(--pborder); border-radius: 14px;
+    padding: 20px 22px; width: 380px; max-width: 86vw;
+    box-shadow: 0 24px 60px rgba(0,0,0,.5); }
+  .modal-card .mt { font-size: 15px; font-weight: 700; margin-bottom: 7px; letter-spacing: .2px; }
+  .modal-card .mh { font-size: 11.5px; color: var(--pmuted); margin-bottom: 13px; line-height: 1.6; }
+  .modal-card input { width: 100%; box-sizing: border-box; font-size: 12.5px; padding: 10px 12px;
+    font-family: var(--pmono); background: var(--pfield); color: var(--ptxt);
+    border: 1px solid var(--pborder); border-radius: 9px; outline: none;
+    transition: border-color .15s, box-shadow .15s; }
+  .modal-card input::placeholder { color: var(--pfaint); }
+  .modal-card input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentSoft); }
+  .modal-card .merr { font-size: 11px; color: #f85149; min-height: 14px; margin-top: 7px; }
+  .modal-card .mact { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  .modal-card .mbtn { height: 30px; padding: 0 14px; border-radius: 9px; font-size: 12px; font-weight: 600;
+    line-height: 1; white-space: nowrap; cursor: pointer; transition: .15s;
+    border: 1px solid var(--pborder); background: transparent; color: var(--pmuted); }
+  .modal-card .mbtn:hover { color: var(--ptxt); border-color: var(--accent); background: var(--accentSoft); }
+  .modal-card .mbtn:focus-visible { outline: 2px solid var(--accent2); outline-offset: 2px; }
+  .modal-card .mbtn.primary { border-color: transparent; color: #fff;
+    background: linear-gradient(180deg, var(--accent2), var(--accent)); box-shadow: 0 2px 8px var(--accentGlow); }
+  .modal-card .mbtn.primary:hover { filter: brightness(1.06); border-color: transparent;
+    background: linear-gradient(180deg, var(--accent2), var(--accent)); }
   /* ── Project Detail: markdown file-explorer (icon grid, OS file-manager style) ── */
   .fx { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
     gap: 4px; padding: 10px 2px 4px; }
@@ -1542,12 +1570,14 @@ function renderShell(): string {
       // รอบ 1: แค่ถาม "แน่ใจไหม" (ยังไม่พิมพ์ชื่อ)
       el('dm-hint').textContent='ลบถาวรจากเครื่อง (รวม git + worktrees ข้างใน) · ไม่แตะ GitHub · แน่ใจไหม?';
       inp.style.display='none'; inp.value='';
-      el('dm-ok').textContent='ใช่ ลบต่อ'; el('dm-ok').disabled=false; el('dm-ok').classList.remove('danger');
+      // รอบ 1 = แดงแบบจาง (พาไปสู่การลบ) · รอบ 2 ค่อยเป็นแดงเต็ม (ปุ่มที่ลบจริง)
+      el('dm-ok').textContent='ใช่ ลบต่อ'; el('dm-ok').disabled=false;
+      el('dm-ok').classList.add('danger'); el('dm-ok').classList.remove('hot');
     } else {
       // รอบ 2: พิมพ์ชื่อให้ตรงถึงจะกด "ลบถาวร" ได้
       el('dm-hint').textContent='พิมพ์ชื่อให้ตรงเพื่อยืนยัน: '+_delName;
       inp.style.display=''; inp.value=''; inp.dataset.expect=_delName;
-      el('dm-ok').textContent='ลบถาวร'; el('dm-ok').classList.add('danger');
+      el('dm-ok').textContent='ลบถาวร'; el('dm-ok').classList.add('danger'); el('dm-ok').classList.add('hot');
       dmSync(); inp.focus();
     }
   }
