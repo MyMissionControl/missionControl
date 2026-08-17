@@ -1162,14 +1162,67 @@ function renderShell(): string {
   .cont.multi.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
   .cont-rot { display: inline-block; animation: contspin 1.1s linear infinite; }
   @keyframes contspin { to { transform: rotate(360deg); } }
-  .git-editor { margin-top: 6px; }
-  .git-editor textarea, .git-editor input { background: var(--vscode-input-background);
-    color: var(--vscode-input-foreground); border: 1px solid var(--vscode-panel-border);
-    border-radius: 4px; padding: 5px 7px; font-size: 12px; box-sizing: border-box;
-    font-family: var(--vscode-font-family); cursor: auto; }
-  .barrow { display: flex; gap: 6px; margin-top: 4px; }
-  .git-pushx { background: #1f6feb; color: #fff; border: none; border-radius: 5px;
-    padding: 4px 12px; font-weight: 600; }
+  /* ── Commit form (inside a project card) ──────────────────────────────────
+     Dressed in the card's own Bento tokens instead of raw GitHub colours: the
+     box used to be a 4px-radius vscode input and the row was a green fill, a
+     blue fill and a bare default button — three unrelated shapes sitting inside
+     an 11px-radius card. Everything here is one family now: 9px corners, the
+     card's border, and the panel accent for anything that acts. */
+  .git-editor { margin-top: 8px; }
+  .git-editor textarea, .git-editor input {
+    background: var(--gfield, rgba(255,255,255,.04)); color: var(--ptxt, var(--vscode-input-foreground));
+    border: 1px solid var(--pborder, var(--vscode-panel-border)); border-radius: 9px;
+    padding: 8px 10px; font-size: 11.5px; line-height: 1.5; box-sizing: border-box;
+    font-family: var(--pmono, var(--vscode-editor-font-family), ui-monospace, monospace);
+    cursor: auto; outline: none; transition: border-color .15s, box-shadow .15s; }
+  .git-editor textarea { resize: vertical; min-height: 46px; }
+  .git-editor textarea::placeholder, .git-editor input::placeholder { color: var(--pfaint, #5c6773); }
+  .git-editor textarea:focus, .git-editor input:focus {
+    border-color: var(--accent, #2f9dc4); box-shadow: 0 0 0 3px var(--accentSoft, rgba(47,157,196,.15)); }
+  body.vscode-light .git-editor textarea, body.vscode-light .git-editor input,
+  body.vscode-high-contrast-light .git-editor textarea, body.vscode-high-contrast-light .git-editor input {
+    --gfield: rgba(15,30,45,.03); }
+
+  .barrow { display: flex; align-items: center; gap: 7px; margin-top: 7px; }
+  /* One button shape for the whole row; only the emphasis differs. */
+  .barrow button { height: 28px; padding: 0 12px; border-radius: 8px; font-size: 11.5px; font-weight: 600;
+    line-height: 1; white-space: nowrap; cursor: pointer;
+    background: transparent; color: var(--pmuted, var(--vscode-foreground));
+    border: 1px solid var(--pborder, var(--vscode-panel-border)); transition: .15s; }
+  .barrow button:hover { color: var(--ptxt, var(--vscode-foreground)); border-color: var(--accent, #2f9dc4);
+    background: var(--accentSoft, rgba(47,157,196,.15)); }
+  /* The yellow ring was the browser default — this one belongs to the panel. */
+  .barrow button:focus-visible { outline: 2px solid var(--accent2, #40c8ea); outline-offset: 2px; }
+  .git-editor .gpriv { display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
+    color: var(--pmuted, var(--vscode-foreground)); }
+  /* ⛔ These three stay scoped under .barrow: an unscoped .git-pushx loses to the
+     .barrow button rule on specificity and silently renders as a plain grey
+     button — measured, not guessed. */
+  /* Commit / Create & Push = the action each form exists for. */
+  .barrow .git-go, .barrow .git-go2 { color: #fff; border-color: transparent;
+    background: linear-gradient(180deg, var(--accent2, #40c8ea), var(--accent, #2f9dc4));
+    box-shadow: 0 2px 8px var(--accentGlow, rgba(64,200,234,.28)); }
+  .barrow .git-go:hover, .barrow .git-go2:hover { filter: brightness(1.06);
+    background: linear-gradient(180deg, var(--accent2, #40c8ea), var(--accent, #2f9dc4)); border-color: transparent; }
+  /* "Push ด้วย" = the same commit plus a push — outlined accent, one step below. */
+  .barrow .git-pushx { color: var(--accent2, #40c8ea); border-color: var(--accent, #2f9dc4); }
+  .barrow .git-pushx:hover { color: var(--accent2, #40c8ea); }
+  .barrow .git-x { color: var(--pfaint, #5c6773); border-color: transparent; }
+  .barrow .git-x:hover { color: var(--ptxt, var(--vscode-foreground)); background: transparent;
+    border-color: var(--pborder, var(--vscode-panel-border)); }
+
+  /* Git action chip on the card row (Commit ▾ / Push / Pull / Create & Push):
+     tinted, not a solid block of colour — it sits beside muted metadata text. */
+  .git-act { height: 26px; padding: 0 11px; border-radius: 8px; font-size: 11px; font-weight: 600;
+    line-height: 1; white-space: nowrap; cursor: pointer;
+    background: var(--gtint); color: var(--gink); border: 1px solid var(--gline); }
+  .git-act:hover { filter: brightness(1.15); }
+  .git-act.k-commit { --gtint: rgba(196,127,26,.16); --gink: #e0a33d; --gline: rgba(196,127,26,.55); }
+  .git-act.k-push { --gtint: rgba(31,111,235,.16); --gink: #6ca6ff; --gline: rgba(31,111,235,.55); }
+  .git-act.k-pull { --gtint: rgba(27,154,170,.16); --gink: #45c3d1; --gline: rgba(27,154,170,.55); }
+  .git-act.k-create-push { --gtint: rgba(35,134,54,.16); --gink: #56c46a; --gline: rgba(35,134,54,.55); }
+  body.vscode-light .git-act.k-commit { --gink: #9a6410; } body.vscode-light .git-act.k-push { --gink: #1f6feb; }
+  body.vscode-light .git-act.k-pull { --gink: #147c88; } body.vscode-light .git-act.k-create-push { --gink: #1a7f37; }
   /* แสงวิ่งรอบปุ่ม = arm แล้ว (auto คิดเสร็จจะยิงเองหลัง grace 3 วิ) — a light dot
      orbiting the button border via an animated conic ring on ::after */
   @property --gl { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
@@ -1366,7 +1419,10 @@ function renderShell(): string {
   .proj-track .rail .sg.todo { height: 10px; background: var(--pborder); }
   .proj-track .railcap { display: flex; justify-content: space-between; margin-top: 7px; font-family: var(--pmono); font-size: 9px; color: var(--pfaint); }
   .proj-track .lastcol { width: 88px; flex: none; text-align: right; font-family: var(--pmono); font-size: 10px; color: var(--pfaint); }
-  .proj-track .gitcol { width: 104px; flex: none; text-align: center; }
+  /* min-width, not width: "Create & Push ▾" needs ~130px and a fixed 104px box
+     wrapped it onto two lines. Short states (up to date / Commit ▾) still take
+     the same 104px, so the column stays lined up down the list. */
+  .proj-track .gitcol { min-width: 104px; flex: none; text-align: center; }
   .proj-track .rowacts { flex: none; display: inline-flex; align-items: center; }
 </style></head>
 <body>
@@ -1416,7 +1472,6 @@ function renderShell(): string {
   </div>
 <script>
   const vscode = acquireVsCodeApi();
-  var COLOR = { commit:'#c47f1a', push:'#1f6feb', pull:'#1b9aaa', 'create-push':'#238636' };
   function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;")
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
   function el(id){ return document.getElementById(id); }
@@ -1614,20 +1669,23 @@ function renderShell(): string {
     // commit / create-push open an inline form (message / repo name) — the caret
     // signals that, so the orange button doesn't read as "commit right now".
     var caret = (g.kind==='commit'||g.kind==='create-push') ? ' ▾' : '';
-    return '<button class="git-act" data-kind="'+g.kind+'" title="'+note+'" style="background:'+(COLOR[g.kind]||'#555')
-      +';color:#fff;border:none;border-radius:5px;padding:4px 10px;font-size:11px;">'+esc(g.label)+caret+'</button>';
+    // Styling lives in .git-act / .k-<kind> (see the stylesheet) — inline colours
+    // beat every rule, which is how this chip stayed a solid GitHub-green block
+    // inside a Bento card.
+    return '<button class="git-act k-'+esc(g.kind)+'" data-kind="'+g.kind+'" title="'+note+'">'
+      +esc(g.label)+caret+'</button>';
   }
   function gitEditor(g){
     if (g.kind==='commit') return '<div class="git-editor" style="display:none">'
       +'<textarea class="git-msg" rows="2" style="width:100%" placeholder="commit message…"></textarea>'
       +'<div class="barrow"><button class="git-auto">✨ auto</button>'
-      +'<button class="git-go" style="background:#238636;color:#fff;border:none;border-radius:5px;padding:4px 12px;font-weight:600;">✓ Commit</button>'
+      +'<button class="git-go">✓ Commit</button>'
       +'<button class="git-pushx" style="display:none" title="auto เสร็จแล้ว commit + push ให้เลย · กดตอนแสงคู่ = ยกเลิกแสงทั้งหมด">⇧ Push ด้วย</button>'
       +'<button class="git-x">ยกเลิก</button></div></div>';
     if (g.kind==='create-push'){ var _p=String(g.path||'').split('/').filter(Boolean); var def=_p[_p.length-1]||'';
       return '<div class="git-editor" style="display:none">'
       +'<input class="git-repo" value="'+esc(def)+'" style="width:55%"> '
-      +'<label style="font-size:11px"><input type="checkbox" class="git-priv" checked> private</label>'
+      +'<label class="gpriv"><input type="checkbox" class="git-priv" checked> private</label>'
       +'<div class="barrow"><button class="git-go2">Create & Push</button><button class="git-x">ยกเลิก</button></div></div>'; }
     return '';
   }

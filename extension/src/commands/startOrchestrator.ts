@@ -20,6 +20,7 @@ import {
   parseTeamRoster,
 } from "./teams";
 import { readTeamDetailSync } from "./teamsOps";
+import { listProjectDirsIn } from "./projectScan";
 import {
   decideCancelOutcome,
   decideAbortOutcome,
@@ -215,14 +216,7 @@ export function scanProjects(opts?: { resumableOnly?: boolean }): ResumableProje
   // soulbrew/projects still appears — matching where the Budget page attributes it.
   // owner-root's dir is scanned FIRST so it wins the realpath-dedup below.
   for (const projectsDir of projectScanDirs(root)) {
-    try {
-      for (const n of fs.readdirSync(projectsDir)) {
-        if (n === "ψ" || n.startsWith(".")) continue;
-        candidates.push(path.join(projectsDir, n));
-      }
-    } catch {
-      /* no such projects/ dir */
-    }
+    candidates.push(...listProjectDirsIn(projectsDir));
   }
   // Only projects/ (walked above) holds build targets — every other org-root
   // sibling (bob-oracle, missionControl, orches-skills, ...) is a tool/agent
