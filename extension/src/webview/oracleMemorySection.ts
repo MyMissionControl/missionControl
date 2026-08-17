@@ -17,9 +17,9 @@ export function buildOracleMemoryState(): OracleMemoryStatus | null {
 
 export function oracleMemorySectionStyle(): string {
   return [
-    ".om-tot{font-size:11.5px;opacity:.66;margin:-4px 0 10px}",
-    ".om-tag{font-size:9.5px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:8px;background:rgba(128,128,128,.18)}",
-    ".om-tag.iso{background:var(--vscode-charts-orange,#d18616);color:#1a1a1a}",
+    ".om-tot{font-size:11.5px;color:var(--pmuted);margin:-4px 0 10px}",
+    ".om-tag{font-family:var(--pmono);font-size:9px;font-weight:700;letter-spacing:.08em;padding:2px 7px;border-radius:6px;margin-left:8px;background:var(--pfield);color:var(--pmuted);border:1px solid var(--pborder)}",
+    ".om-tag.iso{background:rgba(196,127,26,.16);color:#e0a33d;border-color:rgba(196,127,26,.5)}",
   ].join("\n");
 }
 

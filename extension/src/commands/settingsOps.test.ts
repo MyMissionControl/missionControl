@@ -36,11 +36,14 @@ beforeEach(() => {
   //    suite would rewrite the developer's REAL ~/.config/mission-control/merge-mode.
   mergePath = path.join(tmp, "merge-mode");
   process.env.MC_MERGE_MODE_PATH = mergePath;
+  // Same reason: the number/boolean knobs write the orches sidecar, not config.json.
+  process.env.ORCHES_SETTINGS = path.join(tmp, "orches-settings.json");
 });
 
 afterEach(() => {
   delete process.env.MC_CONFIG_PATH;
   delete process.env.MC_MERGE_MODE_PATH;
+  delete process.env.ORCHES_SETTINGS;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -90,11 +93,11 @@ describe("listSettings", () => {
 
 describe("setSetting", () => {
   test("select persists and preserves other keys", () => {
-    writeCfg({ agents: 3 });
+    writeCfg({ default_member_model: "claude-opus-5" });
     setSetting("merge_mode", "local");
     const raw = readConfig();
     expect(raw.merge_mode).toBe("local");
-    expect(raw.agents).toBe(3); // untouched
+    expect(raw.default_member_model).toBe("claude-opus-5"); // untouched
   });
 
   test("rejects an invalid select option", () => {
@@ -130,16 +133,17 @@ describe("setSetting", () => {
   });
 
   test("boolean coerces from string 'true'/'false'", () => {
-    setSetting("auto_loop", "true");
-    expect(readConfig().auto_loop).toBe(true);
-    setSetting("auto_loop", "false");
-    expect(readConfig().auto_loop).toBe(false);
+    const val = () => listSettings().find((e) => e.key === "orches_test_cap_nolimit")?.value;
+    setSetting("orches_test_cap_nolimit", "true");
+    expect(val()).toBe(true);
+    setSetting("orches_test_cap_nolimit", "false");
+    expect(val()).toBe(false);
   });
 
   test("number rejects non-numeric input", () => {
-    expect(() => setSetting("agents", "lots")).toThrow();
-    setSetting("agents", "5");
-    expect(readConfig().agents).toBe(5);
+    expect(() => setSetting("orches_test_cap", "lots")).toThrow();
+    setSetting("orches_test_cap", "5");
+    expect(listSettings().find((e) => e.key === "orches_test_cap")?.value).toBe(5);
   });
 
   test("writes a fresh file (with dir) when none exists", () => {
@@ -286,10 +290,10 @@ describe("claude_view_mode (which face the Claude REPL gets)", () => {
   });
 
   test("setSetting persists the choice and leaves other keys alone", () => {
-    writeCfg({ agents: 3 });
+    writeCfg({ default_member_model: "claude-opus-5" });
     setSetting(CLAUDE_VIEW_MODE_KEY, "native");
     expect(readConfig()[CLAUDE_VIEW_MODE_KEY]).toBe("native");
-    expect(readConfig().agents).toBe(3);
+    expect(readConfig().default_member_model).toBe("claude-opus-5");
     expect(getClaudeViewMode()).toBe("native");
   });
 

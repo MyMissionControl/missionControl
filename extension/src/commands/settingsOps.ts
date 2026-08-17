@@ -44,15 +44,22 @@ export type FieldSchema = {
   /** Default applied when the key is absent from the file. */
   default: string | number | boolean;
   /** Saved but no longer drives anything (backend/orchestrator removed). */
-  legacy?: boolean;
 };
 
 // The known knobs, grouped for the page. Keys not listed here still show up
 // under an "Other" group (read from the raw file) so nothing is ever hidden.
 //
-// merge_mode + push_mode are NEW keys surfaced here per the standing request to
-// give the orchestrator's PR-vs-local merge behaviour a home in the Settings
-// page. They default in even when the file predates them.
+// merge_mode is surfaced here per the standing request to give the
+// orchestrator's PR-vs-local merge behaviour a home in the Settings page. It
+// defaults in even when the file predates it.
+//
+// ⛔ A knob only belongs here if something READS it. Audited 2026-08-17 across
+// the extension, the live /orches engine (orches-integrate.sh), the orches-skills
+// repo and maw: push_mode, agents, auto_loop, decentralized_review and
+// skills_hierarchical_threshold had no reader anywhere, so they are gone from the
+// page AND pruned out of config.json (see RETIRED_KEYS) — whatever used to read
+// them now just takes its own default. A setting you can turn is a promise that
+// turning it does something.
 export const SETTINGS_SCHEMA: FieldSchema[] = [
   {
     key: "merge_mode",
@@ -84,20 +91,6 @@ export const SETTINGS_SCHEMA: FieldSchema[] = [
     default: false,
     help:
       "เปิด = orchestrator ตีกลับให้ worker แก้ไปเรื่อยๆ จนเทสผ่าน (ไม่สนใจจำนวนรอบด้านบน). ปิด = หยุดถาม user เมื่อครบจำนวนรอบด้านบน. เปิด/ปิดได้โดยไม่ลบเลขจำนวนรอบที่ตั้งไว้.",
-  },
-  {
-    key: "push_mode",
-    label: "Push timing",
-    group: "Orchestration",
-    type: "select",
-    default: "per-sprint",
-    options: [
-      { value: "per-sprint", label: "Per sprint — push after each sprint" },
-      { value: "on-demand", label: "On demand — only when asked" },
-      { value: "at-end", label: "At end — one push when the build closes" },
-    ],
-    help:
-      "When the orchestrator pushes to the remote. Asked up-front at the start of a drive; this sets the default it offers.",
   },
   {
     key: "claude_view_mode",
@@ -133,42 +126,6 @@ export const SETTINGS_SCHEMA: FieldSchema[] = [
       "Model a newly added team member starts on in the Team Config page. You can still override per member; this only sets what a fresh row is pre-selected to (was hard-coded to sonnet-5).",
   },
   {
-    key: "agents",
-    label: "Worker count",
-    group: "Build",
-    type: "number",
-    default: 3,
-    legacy: true,
-    help: "Number of parallel worker agents.",
-  },
-  {
-    key: "skills_hierarchical_threshold",
-    label: "Skills hierarchical threshold",
-    group: "Build",
-    type: "number",
-    default: 50,
-    help:
-      "Above this many skills, the loader switches to a hierarchical (grouped) index instead of a flat list.",
-  },
-  {
-    key: "auto_loop",
-    label: "Auto loop",
-    group: "Orchestration",
-    type: "boolean",
-    default: false,
-    legacy: true,
-    help: "Keep driving sprints without pausing for review between them.",
-  },
-  {
-    key: "decentralized_review",
-    label: "Decentralized review",
-    group: "Orchestration",
-    type: "boolean",
-    default: false,
-    legacy: true,
-    help: "Let workers review each other instead of a central review pass.",
-  },
-  {
     key: "auto_skill_enabled",
     label: "Auto-create skills",
     group: "Skills",
@@ -188,16 +145,50 @@ export type SettingEntry = {
   type: FieldType;
   help: string;
   options?: { value: string; label: string }[];
-  legacy: boolean;
   value: string | number | boolean;
   known: boolean; // false = extra key found in the file but not in the schema
 };
 
-/** Read the raw config object. Missing/corrupt file → {}. */
+/** Knobs that were removed because nothing read them. They are deleted from the
+ *  file on the next read so they do not resurface as mystery rows in the "Other"
+ *  group — the code they used to feed takes its own default now. */
+export const RETIRED_KEYS = [
+  "push_mode",
+  "agents",
+  "auto_loop",
+  "decentralized_review",
+  "skills_hierarchical_threshold",
+];
+
+/** Drop retired keys from a raw config object. Returns the pruned object and
+ *  whether anything went. Pure — the file write is the caller's business. */
+export function pruneRetired(raw: Record<string, unknown>): {
+  config: Record<string, unknown>;
+  removed: string[];
+} {
+  const removed = RETIRED_KEYS.filter((k) => k in raw);
+  if (!removed.length) return { config: raw, removed };
+  const config = { ...raw };
+  for (const k of removed) delete config[k];
+  return { config, removed };
+}
+
+/** Read the raw config object. Missing/corrupt file → {}.
+ *  Retired keys are pruned here (and written back once) so the page never shows
+ *  a knob that does nothing. */
 export function readConfig(): Record<string, unknown> {
   try {
-    const raw = JSON.parse(fs.readFileSync(configPath(), "utf8"));
-    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    const parsed = JSON.parse(fs.readFileSync(configPath(), "utf8"));
+    const raw = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+    const { config, removed } = pruneRetired(raw);
+    if (removed.length) {
+      try {
+        fs.writeFileSync(configPath(), JSON.stringify(config, null, 2) + "\n");
+      } catch {
+        /* read-only file → still hide them from the page */
+      }
+    }
+    return config;
   } catch {
     return {};
   }
@@ -263,7 +254,6 @@ export function listSettings(modelIds?: readonly string[]): SettingEntry[] {
     type: f.type,
     help: f.help,
     options: f.key === LIVE_MODEL_KEY ? modelOptions(modelIds) : f.options,
-    legacy: !!f.legacy,
     value: f.key in raw ? (raw[f.key] as string | number | boolean) : f.default,
     known: true,
   }));
@@ -296,7 +286,6 @@ export function listSettings(modelIds?: readonly string[]): SettingEntry[] {
             ? "number"
             : "string",
       help: "Extra key found in config.json (not part of the known schema).",
-      legacy: false,
       value: v as string | number | boolean,
       known: false,
     });

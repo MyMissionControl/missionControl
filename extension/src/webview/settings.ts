@@ -35,6 +35,9 @@ import {
 let _panel: vscode.WebviewPanel | undefined;
 
 // Group render order — anything not listed falls to the end.
+// ⛔ There is deliberately no "legacy" bucket any more: a knob that nothing reads
+// is deleted from the schema and pruned out of config.json (settingsOps
+// RETIRED_KEYS), not parked in a greyed-out section.
 const GROUP_ORDER = ["Orchestration", "Build", "Teams", "Skills", "Other"];
 
 function grouped(entries: SettingEntry[]): { group: string; fields: SettingEntry[] }[] {
@@ -145,6 +148,12 @@ export function openSettingsPanel(): vscode.WebviewPanel {
     switch (msg.type) {
       case "graphifyRefresh": // [graphify-temp]
         await graphifyRefreshCommand();
+        return;
+
+      // The config path is a chip you can click — the host owns the clipboard.
+      case "copyPath":
+        await vscode.env.clipboard.writeText(configPath());
+        void panel.webview.postMessage({ type: "pathCopied" });
         return;
 
       case "ready":
@@ -332,51 +341,75 @@ function renderShell(): string {
     background: var(--vscode-editor-background);
     padding: 20px 22px; margin: 0;
   }
-  h1 { font-size: 19px; font-weight: 700; margin: 0 0 4px; }
-  .lead { font-size: 12px; opacity: 0.7; margin-bottom: 4px; }
-  .path { font-size: 11px; opacity: 0.5; margin-bottom: 22px; font-family: var(--vscode-editor-font-family, monospace); }
-  .grp { margin-bottom: 26px; max-width: 820px; }
-  .grp h2 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; opacity: 0.6; margin: 0 0 10px; }
-  .rows { display: flex; flex-direction: column; gap: 8px; }
+  /* Bento tokens — the same surface/accent language as the Projects and Skills
+     pages, so Settings stops looking like a different app. */
+  body {
+    --accent:#2f9dc4; --accent2:#40c8ea; --accentSoft:rgba(47,157,196,.15); --accentGlow:rgba(64,200,234,.28);
+    --pcard:#161f28; --pborder:rgba(255,255,255,.08); --ptxt:#e7eef5; --pmuted:#8a97a4; --pfaint:#5c6773;
+    --pfield:rgba(255,255,255,.04); --good:#3fd39a;
+    --pmono:'JetBrains Mono', var(--vscode-editor-font-family), ui-monospace, monospace;
+    color: var(--ptxt);
+  }
+  body.vscode-light, body.vscode-high-contrast-light {
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); --accentGlow:rgba(14,136,173,.18);
+    --pcard:#ffffff; --pborder:rgba(15,30,45,.12); --ptxt:#132029; --pmuted:#5a6b78; --pfaint:#94a1ad;
+    --pfield:rgba(15,30,45,.03); --good:#2fa96a;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  h1 { font-size: 21px; font-weight: 700; margin: 0 0 5px; letter-spacing: .2px; }
+  .lead { font-size: 12px; color: var(--pmuted); margin-bottom: 10px; }
+  /* The config path is a click-to-copy chip, like the Project Detail header. */
+  .path { display: inline-block; font-size: 10.5px; font-family: var(--pmono); color: var(--pmuted);
+    background: var(--pfield); border: 1px solid var(--pborder); border-radius: 8px; padding: 5px 10px;
+    margin-bottom: 24px; cursor: pointer; }
+  .path:hover { border-color: var(--accent); color: var(--ptxt); }
+  .path.copied { color: var(--good); border-color: var(--good); }
+
+  /* One card per group, rows divided by hairlines — fewer boxes than the old
+     row-per-box layout, which read as a stack of unrelated tiles. */
+  .grp { margin-bottom: 22px; }
+  .grp h2 { font-family: var(--pmono); font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .16em; color: var(--pfaint); margin: 0 0 9px 2px; }
+  .rows { display: flex; flex-direction: column;
+    background: var(--pcard); border: 1px solid var(--pborder); border-radius: 12px; overflow: hidden; }
   .row {
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 18px;
-    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); border-radius: 8px;
-    padding: 12px 14px; background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.06));
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 22px;
+    padding: 14px 16px; border-top: 1px solid var(--pborder); transition: background .15s;
   }
+  .row:first-child { border-top: none; }
+  .row:hover { background: var(--accentSoft); }
   .ri { min-width: 0; }
-  .rl { font-size: 14px; font-weight: 600; }
-  .rl .badge {
-    font-size: 9.5px; font-weight: 700; letter-spacing: 0.5px; padding: 1px 6px; border-radius: 4px; margin-left: 8px;
-    vertical-align: middle; background: var(--vscode-charts-orange, #d18616); color: #1a1a1a;
+  .rl { font-size: 13px; font-weight: 600; }
+  .rh { font-size: 11.5px; color: var(--pmuted); margin-top: 5px; line-height: 1.6; max-width: 560px; }
+  .ra { flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding-top: 1px; }
+  select, input[type=text], input[type=number] {
+    background: var(--pfield); color: var(--ptxt);
+    border: 1px solid var(--pborder); border-radius: 9px;
+    padding: 7px 10px; font-size: 12px; font-family: inherit; min-width: 160px;
+    outline: none; transition: border-color .15s, box-shadow .15s;
   }
-  .rh { font-size: 11.5px; opacity: 0.66; margin-top: 4px; line-height: 1.55; max-width: 560px; }
-  .ra { flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding-top: 2px; }
-  select, input[type=text] {
-    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
-    border: 1px solid var(--vscode-input-border, rgba(128,128,128,0.35)); border-radius: 5px;
-    padding: 5px 8px; font-size: 12.5px; font-family: inherit; min-width: 150px;
-  }
-  select:focus, input:focus { outline: none; border-color: var(--vscode-focusBorder); }
-  .empty { opacity: 0.55; font-size: 12.5px; padding: 12px 4px; }
+  select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentSoft); }
+  .empty { color: var(--pfaint); font-size: 12.5px; padding: 12px 4px; }
   .note {
-    margin-top: 10px; max-width: 820px; font-size: 12px; line-height: 1.6; opacity: 0.72;
-    border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); padding-top: 14px;
+    margin-top: 18px; font-size: 11.5px; line-height: 1.7; color: var(--pmuted);
+    background: var(--pfield); border: 1px solid var(--pborder); border-radius: 12px; padding: 14px 16px;
   }
-  .note b { opacity: 0.95; }
+  .note b { color: var(--ptxt); font-weight: 600; }
   ${searchSectionStyle()}
   ${oracleMemorySectionStyle()}
 </style>
 </head>
 <body>
+<div class="wrap">
   <h1>Settings</h1>
-  <div class="lead">ปรับ knob ของ Mission Control — บันทึกทันทีเมื่อเปลี่ยนค่า</div>
-  <div class="path" id="path"></div>
+  <div class="lead">ปรับค่าต่างๆ ของ Mission Control — บันทึกทันทีเมื่อเปลี่ยนค่า</div>
+  <div class="path" id="path" title="คลิกเพื่อคัดลอก path"></div>
   <div id="groups"></div>
   ${searchSectionBody()}
   ${oracleMemorySectionBody()}
   <div class="note">
     <b>เก็บที่ไหน:</b> ทุกค่าเขียนลงไฟล์ <b id="path2"></b> ตรงๆ (local เครื่องนี้เท่านั้น ไม่ push git) · เปลี่ยนแล้วมีผลกับงานที่ <b>เริ่มใหม่</b> หลังจากนี้<br />
-    <b>legacy:</b> คีย์ที่ติดป้าย legacy ยังบันทึกได้ แต่ไม่มีผลกับ runtime แล้ว (ของเดิมที่ backend/orchestrator ถูกถอดออก) — เก็บไว้เผื่อกลับมาใช้
+    <b>ทุกค่าในหน้านี้มีตัวอ่านจริง:</b> ค่าที่ไม่มีใครอ่านถูกถอดออกและลบคีย์ทิ้งจากไฟล์แล้ว — ส่วนนั้นใช้ค่า default ในโค้ดตรงๆ
   </div>
 
   <!-- [graphify-temp] isolated refresh button — remove this section + the other [graphify-temp] blocks to uninstall -->
@@ -387,7 +420,7 @@ function renderShell(): string {
         <div class="rh">Rebuild graph.json + force-directed graph.html for a repo (algorithmic clustering, no LLM). เลือก repo หลังกด; source repo ไม่ถูกแตะ, HTML ไป ~/graphify-view/.</div>
       </div>
       <div class="ra">
-        <button data-act="graphify-refresh" style="background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:none;border-radius:5px;padding:6px 14px;font-size:12.5px;cursor:pointer;">Refresh…</button>
+        <button class="so-btn" data-act="graphify-refresh">Refresh…</button>
       </div>
     </div></div>
   </section>
@@ -446,10 +479,9 @@ function renderShell(): string {
       const fields = g.fields || [];
       for (let j = 0; j < fields.length; j++) {
         const f = fields[j];
-        const badge = f.legacy ? ' <span class="badge">LEGACY</span>' : "";
         html +=
           '<div class="row"><div class="ri">' +
-            '<div class="rl">' + esc(f.label) + badge + "</div>" +
+            '<div class="rl">' + esc(f.label) + "</div>" +
             '<div class="rh">' + esc(f.help) + "</div>" +
           '</div><div class="ra">' + fieldControl(f) + "</div></div>";
       }
@@ -468,7 +500,8 @@ function renderShell(): string {
       return;
     }
     const gr = t.closest('[data-act="graphify-refresh"]'); // [graphify-temp]
-    if (gr) { post("graphifyRefresh"); }
+    if (gr) { post("graphifyRefresh"); return; }
+    if (t.closest("#path")) { post("copyPath"); }
   });
   document.addEventListener("change", function (e) {
     const t = e.target;
@@ -491,11 +524,17 @@ function renderShell(): string {
   window.addEventListener("message", function (ev) {
     const m = ev.data;
     if (m && m.type === "settings") { render(m); }
+    else if (m && m.type === "pathCopied") {
+      const p = document.getElementById("path");
+      p.classList.add("copied");
+      setTimeout(function () { p.classList.remove("copied"); }, 1200);
+    }
   });
 
   post("ready");
   window.__mcVscode = vscode;
 </script>
+</div>
 <script>
   ${searchSectionScript()}
 </script>

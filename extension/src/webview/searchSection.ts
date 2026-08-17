@@ -68,30 +68,35 @@ export async function buildSearchStateEnriched(): Promise<SearchViewModel | null
 
 export function searchSectionStyle(): string {
   return [
-    ".so-wrap{max-width:820px;margin-bottom:26px}",
-    ".so-wrap h2{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;opacity:.6;margin:0 0 10px}",
+    // Same Bento tokens the rest of the Settings page declares on <body> — this
+    // section used to carry its own vscode-var look, which is what made the page
+    // read as two different UIs stacked on top of each other.
+    ".so-wrap{margin-bottom:22px}",
+    ".so-wrap h2{font-family:var(--pmono);font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.16em;color:var(--pfaint);margin:0 0 9px 2px}",
     ".so-hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}",
-    ".so-dot{font-size:11.5px;opacity:.75}",
-    ".so-row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:12px 14px;border:1px solid var(--vscode-panel-border,rgba(128,128,128,.25));border-radius:8px;margin-bottom:8px;background:var(--vscode-list-hoverBackground,rgba(128,128,128,.06))}",
-    ".so-rl{font-size:14px;font-weight:600}",
-    ".so-rh{font-size:11.5px;opacity:.66;margin-top:3px}",
-    ".so-sub{margin-left:14px;padding-left:14px;border-left:2px solid var(--vscode-panel-border,rgba(128,128,128,.25))}",
+    ".so-dot{font-size:11.5px;color:var(--pmuted)}",
+    ".so-row{display:flex;justify-content:space-between;align-items:center;gap:22px;padding:14px 16px;border:1px solid var(--pborder);border-radius:12px;margin-bottom:8px;background:var(--pcard)}",
+    ".so-rl{font-size:13px;font-weight:600}",
+    ".so-rh{font-size:11.5px;color:var(--pmuted);margin-top:5px;line-height:1.6}",
+    ".so-sub{margin-left:14px;padding-left:14px;border-left:2px solid var(--pborder)}",
     ".so-disabled{opacity:.4;pointer-events:none}",
     // sliding on/off switch
-    ".so-switch{position:relative;width:64px;height:26px;border-radius:999px;border:1px solid var(--vscode-panel-border,rgba(128,128,128,.4));background:var(--vscode-input-background);cursor:pointer}",
-    ".so-switch .kn{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:var(--vscode-foreground);opacity:.7;transition:left .16s ease}",
-    ".so-switch.on{border-color:var(--vscode-charts-green,#3fb950);background:rgba(63,185,80,.18)}",
-    ".so-switch.on .kn{left:40px;background:var(--vscode-charts-green,#3fb950);opacity:1}",
+    ".so-switch{position:relative;flex:none;width:44px;height:24px;border-radius:999px;border:1px solid var(--pborder);background:var(--pfield);cursor:pointer;transition:.16s}",
+    ".so-switch .kn{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--pfaint);transition:left .16s ease,background .16s}",
+    ".so-switch.on{border-color:var(--good);background:rgba(63,211,154,.18)}",
+    ".so-switch.on .kn{left:22px;background:var(--good)}",
     ".so-model{display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:12.5px}",
-    ".so-badge{font-size:9.5px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:8px}",
-    ".so-badge.ok{background:rgba(63,185,80,.18);color:var(--vscode-charts-green,#3fb950)}",
-    ".so-badge.warn{background:var(--vscode-charts-orange,#d18616);color:#1a1a1a}",
-    ".so-btn{background:transparent;color:var(--vscode-foreground);border:1px solid var(--vscode-panel-border,rgba(128,128,128,.4));border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;font-family:inherit;margin-left:6px}",
-    ".so-btn:hover{border-color:var(--vscode-focusBorder)}",
-    ".so-status{font-size:13.5px;opacity:.85;margin-top:18px;display:flex;align-items:center;gap:12px}",
-    ".so-select{background:var(--vscode-dropdown-background,var(--vscode-input-background));color:var(--vscode-dropdown-foreground,var(--vscode-foreground));border:1px solid var(--vscode-dropdown-border,var(--vscode-panel-border,rgba(128,128,128,.4)));border-radius:6px;padding:6px 10px;font-size:13px;font-family:inherit;cursor:pointer}",
-    ".so-note{font-size:11.5px;opacity:.7;margin-top:8px;color:var(--vscode-charts-orange,#d18616)}",
-    ".so-off{font-size:12.5px;opacity:.7;padding:12px 0}",
+    ".so-badge{font-family:var(--pmono);font-size:9px;font-weight:700;letter-spacing:.08em;padding:2px 7px;border-radius:6px;margin-left:8px}",
+    ".so-badge.ok{background:rgba(63,211,154,.16);color:var(--good);border:1px solid rgba(63,211,154,.45)}",
+    ".so-badge.warn{background:rgba(196,127,26,.16);color:#e0a33d;border:1px solid rgba(196,127,26,.5)}",
+    ".so-btn{height:28px;padding:0 13px;border-radius:8px;font-size:11.5px;font-weight:600;line-height:1;cursor:pointer;font-family:inherit;margin-left:6px;background:transparent;color:var(--pmuted);border:1px solid var(--pborder);transition:.15s}",
+    ".so-btn:hover{color:var(--ptxt);border-color:var(--accent);background:var(--accentSoft)}",
+    ".so-btn:focus-visible{outline:2px solid var(--accent2);outline-offset:2px}",
+    ".so-status{font-size:12px;color:var(--pmuted);margin-top:14px;display:flex;align-items:center;gap:12px}",
+    ".so-select{background:var(--pfield);color:var(--ptxt);border:1px solid var(--pborder);border-radius:9px;padding:7px 10px;font-size:12px;font-family:inherit;cursor:pointer;outline:none;transition:border-color .15s,box-shadow .15s}",
+    ".so-select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accentSoft)}",
+    ".so-note{font-size:11.5px;margin-top:8px;color:#e0a33d}",
+    ".so-off{font-size:12.5px;color:var(--pfaint);padding:12px 0}",
   ].join("\n");
 }
 
