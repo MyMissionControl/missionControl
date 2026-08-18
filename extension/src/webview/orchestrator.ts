@@ -24,7 +24,7 @@ import {
   tmuxHasSession,
 } from "../commands/startOrchestrator";
 import { orderForProjectScreen, sortResumable, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
-import { removeProjectDir } from "../commands/deleteProject";
+import { removeProjectDir, summarizeUnsaved, unsavedWarning } from "../commands/deleteProject";
 import {
   listDetailDocs,
   resolveProjectFile,
@@ -376,6 +376,29 @@ function isProjectBusy(p: ResumableProject): boolean {
   if (isRunning(p)) return true;
   annotateLiveState([p]);
   return projectDrivenState(p).state !== "none";
+}
+
+/** ประโยคเตือน "งานที่จะหายถาวร" สำหรับ modal ยืนยันลบ — "" = ไม่มีอะไรเสี่ยง.
+ *  ⛔ ยิง git 3 ครั้งเฉพาะตอน user เปิด modal (ไม่ใช่ตอน scan รายการ): ถ้าไปคิดตอน scan
+ *  จะกลายเป็น 3 git ต่อโปรเจคต่อรอบ poll · async ล้วน — ห้าม execFileSync ใน extension host
+ *  ⛔ GIT_OPTIONAL_LOCKS=0 เหมือน gitOps: `git status` ที่ถูกฆ่าตอน timeout ทิ้ง index.lock ค้าง
+ *  แล้วบล็อก commit ของ repo นั้นตลอดไป (เคยเกิดจริงกับ 7 repo) */
+async function probeUnsaved(projectPath: string): Promise<string> {
+  const g = async (args: string[]): Promise<string | null> => {
+    const r = await gitOps.run("git", ["-C", projectPath, ...args], {
+      timeout: 8000,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    });
+    return r.ok ? r.stdout : null;
+  };
+  const wt = await g(["worktree", "list", "--porcelain"]);
+  const log = await g(["log", "--branches", "--not", "--remotes", "--oneline"]);
+  const st = await g(["status", "--porcelain"]);
+  return unsavedWarning(
+    summarizeUnsaved(projectPath, (args) =>
+      args.includes("worktree") ? wt : args.includes("log") ? log : st,
+    ),
+  );
 }
 
 /** ลบโปรเจค: กัน running → confirm modal → พิมพ์ชื่อยืนยัน → ลบโฟลเดอร์ local.
@@ -952,6 +975,14 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         if (!p) return;
         await cancelContinueRun(p);
         await pushProjectsScreen(panel);
+        return;
+      }
+      // ⛔ path มาจาก webview → ต้อง lookup ใน _st.projects เหมือน delete_project ห้ามยิง git ตาม path ดิบ
+      case "del_probe": {
+        const p = _st.projects.find((x) => x.path === msg.path);
+        if (!p) return;
+        const text = await probeUnsaved(p.path);
+        if (text) await panel.webview.postMessage({ type: "del_unsaved", path: p.path, text });
         return;
       }
       case "delete_project": {
@@ -1607,25 +1638,33 @@ function renderShell(): string {
     else if(e.key==='Escape'){ e.preventDefault(); closeMultiModal(); } });
 
   // ── ลบโปรเจค modal (กลางจอ) — 2 รอบในกล่องเดียว: (1) ถามยืนยัน → (2) พิมพ์ชื่อ ──
-  var _delPath=null, _delName='', _delPhase=1;
+  var _delPath=null, _delName='', _delPhase=1, _delUnsaved='';
   function openDelModal(path, name){
-    _delPath=path; _delName=name||''; _delPhase=1;
+    _delPath=path; _delName=name||''; _delPhase=1; _delUnsaved='';
+    post('del_probe',{path:path});   // ⭐ ถามงานที่จะหาย (worktree/commit ที่ยังไม่ push) — ตอบมาทีหลังได้
     el('dm-title').textContent='ลบโปรเจค '+(name||'')+'?';
     el('delmodal').style.display='flex';
     renderDelPhase();
+  }
+  // ข้อความ hint ของแต่ละรอบ + คำเตือน "งานที่จะหายถาวร" (ถ้ามี) ต่อท้ายทั้งสองรอบ
+  function delHint(){
+    var base = _delPhase===1
+      ? 'ลบถาวรจากเครื่อง (รวม git + worktrees ข้างใน) · ไม่แตะ GitHub · แน่ใจไหม?'
+      : 'พิมพ์ชื่อให้ตรงเพื่อยืนยัน: '+_delName;
+    return base + (_delUnsaved ? ' — ' + _delUnsaved : '');
   }
   function renderDelPhase(){
     var inp=el('dm-input'); el('dm-err').textContent='';
     if(_delPhase===1){
       // รอบ 1: แค่ถาม "แน่ใจไหม" (ยังไม่พิมพ์ชื่อ)
-      el('dm-hint').textContent='ลบถาวรจากเครื่อง (รวม git + worktrees ข้างใน) · ไม่แตะ GitHub · แน่ใจไหม?';
+      el('dm-hint').textContent=delHint();
       inp.style.display='none'; inp.value='';
       // รอบ 1 = แดงแบบจาง (พาไปสู่การลบ) · รอบ 2 ค่อยเป็นแดงเต็ม (ปุ่มที่ลบจริง)
       el('dm-ok').textContent='ใช่ ลบต่อ'; el('dm-ok').disabled=false;
       el('dm-ok').classList.add('danger'); el('dm-ok').classList.remove('hot');
     } else {
       // รอบ 2: พิมพ์ชื่อให้ตรงถึงจะกด "ลบถาวร" ได้
-      el('dm-hint').textContent='พิมพ์ชื่อให้ตรงเพื่อยืนยัน: '+_delName;
+      el('dm-hint').textContent=delHint();
       inp.style.display=''; inp.value=''; inp.dataset.expect=_delName;
       el('dm-ok').textContent='ลบถาวร'; el('dm-ok').classList.add('danger'); el('dm-ok').classList.add('hot');
       dmSync(); inp.focus();
@@ -2308,6 +2347,10 @@ function renderShell(): string {
     else if(m.type==="open_namemodal") openNameModal(m.default, m.url, m.nameFromUser);
     else if(m.type==="name_result") nmResult(m);
     else if(m.type==="path_copied") flashCopied();
+    // ⛔ อัปเดตแค่ข้อความ ห้าม renderDelPhase ตอนรอบ 2: มันล้าง input ที่ user กำลังพิมพ์อยู่
+    else if(m.type==="del_unsaved"){
+      if(_delPath===m.path){ _delUnsaved=m.text||''; el('dm-hint').textContent=delHint(); }
+    }
   });
   post("ready");
 </script></body></html>`;

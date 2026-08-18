@@ -411,6 +411,22 @@ export function parsePaneList(raw: string): PaneRow[] {
  *  is not a clean non-negative integer is treated as "do not show": popping a
  *  panel over someone's screen on a garbled count is the failure that annoys,
  *  and the status bar + `pendingAskCommand` still offer a way in by hand. */
+/** ทำไมกล่องไม่เด้งเอง — "" = มันจะเด้ง.
+ *
+ *  ⛔⛔ ทำไมต้องพิมพ์บอก: อาการ "popup ไม่เด้ง" ถูกบันทึกเป็น OPEN BUG ไว้ตั้งแต่ 2026-08-12
+ *  แล้วไล่หาสาเหตุซ้ำหลายรอบ ทั้งที่วันนี้มีสามเหตุผลที่ **ถูกต้องทั้งหมด**: กล่องเปิดอยู่แล้ว ·
+ *  เคยเด้งแล้วและถูกปิดไป (`_seen` ไม่เคยล้าง) · มีคน attach tmux session นั้นอยู่ ซึ่งเป็นกฎที่
+ *  user สั่งเอง 2026-08-16 ("ไม่ต้องเด้งซ้ำกับกล่องที่อยู่บน pane แล้ว")
+ *  ⇒ ถ้าไม่มีบรรทัดบอกเหตุผล ทุกครั้งที่มันเงียบจะถูกอ่านว่าบั๊ก แล้วเสียเวลาไล่ใหม่ทั้งรอบ
+ *  ⛔ ตัวนี้ไม่ตัดสินอะไร — คำตัดสินยังอยู่ที่ shouldShowOwnAsker เหมือนเดิม */
+export function autoOpenSkipReason(o: { openBox: boolean; unseenHits: number; clients: number }): string {
+  if (o.openBox) return "กล่องเปิดอยู่แล้ว";
+  if (o.unseenHits === 0) return "เคยเด้งแล้วและถูกปิดไป — กดที่แถบสถานะเพื่อเปิดใหม่";
+  if (!shouldShowOwnAsker(o.clients))
+    return `มีคน attach tmux session นี้อยู่ (${o.clients}) — ตั้งใจไม่เด้งซ้ำ (กฎ 2026-08-16) · กดที่แถบสถานะเพื่อเปิดเอง`;
+  return "";
+}
+
 export function shouldShowOwnAsker(clients: number): boolean {
   return Number.isInteger(clients) && clients === 0;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  autoOpenSkipReason,
   buildInModeArgs,
   buildKeyArgs,
   buildUncopyArgs,
@@ -490,4 +491,25 @@ test("shouldShowOwnAsker: a garbled count must not open a panel over someone's s
   expect(shouldShowOwnAsker(Number.NaN)).toBe(false);
   expect(shouldShowOwnAsker(undefined as unknown as number)).toBe(false);
   expect(shouldShowOwnAsker(1.5)).toBe(false);
+});
+
+// ── "ทำไมกล่องไม่เด้ง" ต้องตอบได้จากหน้าจอ (bug 2026-08-12 กลับมาเรื่อย ๆ เพราะไม่มีหลักฐาน) ──
+// ⛔ อาการ "ไม่เด้ง" วันนี้มีสามสาเหตุที่ถูกต้องทั้งหมด (กล่องเปิดอยู่ · เคยปิดไปแล้ว ·
+//   มีคน attach อยู่ซึ่งเป็นกฎที่ user สั่งเอง 2026-08-16) — ถ้าไม่พิมพ์บอก ทุกครั้งจะถูกอ่านว่าบั๊ก
+describe("autoOpenSkipReason", () => {
+  test("จะเด้งจริง = ไม่มีเหตุผลอะไรต้องบอก", () => {
+    expect(autoOpenSkipReason({ openBox: false, unseenHits: 1, clients: 0 })).toBe("");
+  });
+  test("กล่องเปิดอยู่แล้ว", () => {
+    expect(autoOpenSkipReason({ openBox: true, unseenHits: 1, clients: 0 })).toContain("เปิดอยู่");
+  });
+  test("เคยเด้งแล้วและถูกปิดไป → บอกทางเปิดใหม่", () => {
+    const r = autoOpenSkipReason({ openBox: false, unseenHits: 0, clients: 0 });
+    expect(r).toContain("แถบสถานะ");
+  });
+  test("มีคน attach อยู่ = ตั้งใจไม่เด้ง และต้องบอกจำนวน client", () => {
+    const r = autoOpenSkipReason({ openBox: false, unseenHits: 1, clients: 2 });
+    expect(r).toContain("attach");
+    expect(r).toContain("2");
+  });
 });

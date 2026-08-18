@@ -37,6 +37,7 @@ import { setTabIcon } from "../webview/tabIcon";
 import { tabLabel } from "../webview/tabModel";
 import {
   PANE_LIST_FMT,
+  autoOpenSkipReason,
   buildAnswerArgs,
   buildInModeArgs,
   buildKeyArgs,
@@ -50,7 +51,6 @@ import {
   reviewMatches,
   sameAsk,
   scanPending,
-  shouldShowOwnAsker,
   type PaneAsk,
   type PendingHit,
 } from "./pendingAsk";
@@ -349,15 +349,19 @@ function showBox(hit: PendingHit): void {
   _open = { key: hit.key, panel };
 }
 
-function refreshStatus(hits: PendingHit[]): void {
+function refreshStatus(hits: PendingHit[], skipReason = ""): void {
   if (!_status) return;
   if (!hits.length) {
     _status.hide();
     return;
   }
   _status.text = `$(question) ${hits.length} รอตอบ`;
+  // ⛔ เหตุผลที่ "ไม่เด้งเอง" ต้องอยู่ในที่ที่คนมองอยู่แล้ว ไม่ใช่ใน log ที่ต้องไปเปิด —
+  //   สาเหตุทั้งสามข้อถูกต้องตามดีไซน์ แต่ไม่มีทางรู้จากหน้าจอเลย (ดู autoOpenSkipReason)
   _status.tooltip = new vscode.MarkdownString(
-    hits.map((h) => `**${h.session}** — ${title(h.ask)}`).join("\n\n") + "\n\nคลิกเพื่อเปิดกล่องคำถาม",
+    hits.map((h) => `**${h.session}** — ${title(h.ask)}`).join("\n\n") +
+      (skipReason ? `\n\n_ไม่เด้งเอง: ${skipReason}_` : "") +
+      "\n\nคลิกเพื่อเปิดกล่องคำถาม",
   );
   _status.show();
 }
@@ -378,23 +382,29 @@ async function tick(): Promise<void> {
     _ticking = false;
   }
   _lastHits = hits;
-  refreshStatus(hits);
 
   if (_open) {
     // Answered in the pane while the box was up → close it rather than leave a
     // dead box whose click would send a keystroke nobody is waiting for.
     if (!hits.some((h) => h.key === _open!.key)) closeOpen();
+    refreshStatus(hits, autoOpenSkipReason({ openBox: true, unseenHits: 1, clients: 0 }));
     return; // one box at a time
   }
   const next = hits.find((h) => !_seen.has(h.key));
-  if (!next) return;
+  if (!next) {
+    refreshStatus(hits, autoOpenSkipReason({ openBox: false, unseenHits: 0, clients: 0 }));
+    return;
+  }
   // ⛔⛔ Every hit here is a NATIVE Claude Code box, so if a human is attached to that
   //   tmux session the question is already on their screen with its own key handling —
   //   opening ours on top is the duplicate the user asked us to drop (2026-08-16).
   //   Auto-open is for the headless case only; the status bar and the
   //   `missioncontrol.pendingAsk` command still reach every hit by hand.
   const sess = await tmux(["list-sessions", "-F", TMUX_FMT]);
-  if (!shouldShowOwnAsker(sessionClients(parseTmuxSessions(sess ?? ""), next.session))) return;
+  const clients = sessionClients(parseTmuxSessions(sess ?? ""), next.session);
+  const skip = autoOpenSkipReason({ openBox: false, unseenHits: 1, clients });
+  refreshStatus(hits, skip);
+  if (skip) return;
   showBox(next);
 }
 
