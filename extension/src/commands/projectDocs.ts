@@ -35,7 +35,8 @@ const TREE_MAX_DEPTH = 12; // guard against pathological / symlink-looped trees
 // ⛔ Images are viewable ONLY from inside this folder (see resolveProjectFile): the rule
 //    "other files stay hidden" has to keep being true, or the explorer becomes a file browser.
 export const SHOTS_DIR = ".orches-shots";
-const IMG_RX = /\.(?:png|jpe?g|gif|webp)$/i;
+/** What counts as a viewable image — only ever honoured inside `.orches-shots/`. */
+export const IMG_RX = /\.(?:png|jpe?g|gif|webp)$/i;
 
 // Wiki pages in this priority first (by index), then everything else alphabetically.
 const WIKI_PRIORITY = ["README", "overview", "architecture", "setup"];

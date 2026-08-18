@@ -7,8 +7,16 @@
 // Why per-file symlinks instead of one symlink per project: a project folder drags
 // its node_modules along (up to ~1,200 extra .md per project, ~7,755 total) and
 // Obsidian has no ignore mechanism — the explorer would be unusable. Per-file also
-// lets us rename sprint docs to sort numerically (Obsidian sorts alphabetically, so
-// raw "<proj>-sprint-10.md" lands before "-sprint-2.md").
+// keeps us out of an Obsidian trap: it silently drops a symlink whose target
+// overlaps an already-watched directory, so one dir link plus any file link under
+// it loses one of the two with no error.
+//
+// The vault MIRRORS the Project Detail explorer — listProjectTree(p,{shots:true}) —
+// so a path in Obsidian is the path in the repo. Nothing is renamed, flattened or
+// pulled to the top. The ONE deviation is the leading dot: Obsidian excludes any
+// path with a dot-prefixed segment from its INDEX (not just the display), so a
+// faithful ".orches-shots" link would be invisible in the explorer, search and
+// graph — it is linked as "orches-shots". Do not "fix" that back.
 //
 // NO vscode import — pure fs/path so it unit-tests standalone with `bun test`.
 import * as crypto from "node:crypto";
@@ -18,6 +26,7 @@ import * as path from "node:path";
 
 import type { ProjectRow } from "./dataView";
 import { dedupeByRealpath, projectScanDirs } from "./orchestratorResume";
+import { listProjectTree, type TreeNode } from "./projectDocs";
 
 /** The single top-level folder inside the vault. Everything lives under it. */
 export const VAULT_TOP = "Mission Control";
@@ -26,12 +35,10 @@ export const VAULT_TOP = "Mission Control";
  *  files carrying it — a hand-written note in the vault is never touched. */
 export const MC_MARKER = "mc-vault: 1";
 
-/** docs/ subfolders that are NOT project documentation: skipped when linking.
- *  `superpowers` is where the brainstorming/writing-plans skills drop their own
- *  specs and plans — scratch output, not something to browse per project. */
-const SKIP_DOC_DIRS = new Set(["superpowers"]);
+/** A sprint doc, by filename. ANCHORED and numeric so "sprint-1" never matches
+ *  "sprint-10", and a wiki page called sprint-2-retro.md is not mistaken for one. */
+const SPRINT_FILE_RX = /^(?:.+-)?sprint-(\d+).*\.md$/i;
 
-const SPRINT_RX = /sprint-(\d+)/i;
 
 /** Vault root. Lives beside MC's other state in ~/.mission-control (NOT ~/.cache,
  *  which is fair game for cleaners). Overridable for tests. */
@@ -112,23 +119,23 @@ export function planVault(
     const used = new Set<string>([`${note}.md`.toLowerCase()]);
     const mine = projectLinks(row.path, prefix, used);
     links.push(...mine);
-    if (mine.some((l) => l.rel.startsWith(`${prefix}/sprint/`))) dirs.push(`${prefix}/sprint`);
+    // Every ancestor of every link, shallowest first — writeVault creates dirs from
+    // this list, and a mirrored tree is arbitrarily deep.
+    const seenDir = new Set<string>([VAULT_TOP, prefix]);
+    for (const l of mine) {
+      const parts = l.rel.split("/");
+      for (let i = 1; i < parts.length; i++) {
+        const d = parts.slice(0, i).join("/");
+        if (!seenDir.has(d)) {
+          seenDir.add(d);
+          dirs.push(d);
+        }
+      }
+    }
     // rendered LAST so the note can link the docs that actually got linked
     notes.push({ rel: `${prefix}/${note}.md`, body: renderProjectNote(row, prefix, mine) });
   }
   return { dirs, links, notes, projects: planned.length };
-}
-
-/** Filename (no extension) for a sprint note: zero-padded so Obsidian's
- *  alphabetical sort reads as numeric, suffixed if a number repeats. Shared by the
- *  planner and the note renderer so the timeline's links always name the files that
- *  actually get created. `seen` accumulates across one project's sprints. */
-export function sprintNoteName(n: number, seen: Set<string>): string {
-  const stem = `sprint-${String(n).padStart(2, "0")}`;
-  let candidate = stem;
-  for (let i = 2; seen.has(candidate.toLowerCase()); i++) candidate = `${stem}_${i}`;
-  seen.add(candidate.toLowerCase());
-  return candidate;
 }
 
 /** A wikilink carrying the FULL vault path. Basenames repeat heavily here —
@@ -140,65 +147,51 @@ export function wikilink(vaultPath: string, alias: string, inTable = false): str
   return `[[${vaultPath}${inTable ? "\\|" : "|"}${mdCell(alias)}]]`;
 }
 
-/** The symlinks for one project: README, loose docs/*.md, docs/wiki/, and every
- *  sprint doc renamed into a sprint/ subfolder so it sorts numerically. */
+/** Obsidian excludes any path containing a dot-prefixed segment from its index, so
+ *  ".orches-shots/x.png" would exist on disk and be invisible in the app. Strip the
+ *  leading dots — the only place the vault path differs from the repo path. */
+export function vaultRel(rel: string): string {
+  return rel
+    .split("/")
+    .map((seg) => seg.replace(/^\.+/, "") || "_")
+    .join("/");
+}
+
+/** The symlinks for one project: a straight mirror of what the Project Detail
+ *  explorer shows — every .md in its real place plus the .orches-shots screenshots,
+ *  nothing else. FILES ONLY, never a directory (see the header note on Obsidian's
+ *  watcher-overlap drop); listProjectTree already prunes node_modules, agents/ and
+ *  every other dot-dir, which is what keeps per-file linking cheap (measured: 1,246
+ *  .md in the biggest live project, 14 after those rules). */
 function projectLinks(projectPath: string, base: string, used: Set<string>): VaultLink[] {
   const out: VaultLink[] = [];
-  const claim = (name: string): string => {
+  // Collisions are near-impossible now that rels keep their folders, but the folder
+  // note claimed its name first and a root file could still match it.
+  const claim = (rel: string): string => {
+    const dir = path.posix.dirname(rel);
+    const name = path.posix.basename(rel);
     const ext = path.extname(name);
     const stem = name.slice(0, name.length - ext.length);
-    let candidate = name;
-    for (let i = 2; used.has(candidate.toLowerCase()); i++) candidate = `${stem}_${i}${ext}`;
+    let candidate = rel;
+    for (let i = 2; used.has(candidate.toLowerCase()); i++)
+      candidate = dir === "." ? `${stem}_${i}${ext}` : `${dir}/${stem}_${i}${ext}`;
     used.add(candidate.toLowerCase());
     return candidate;
   };
 
-  for (const rel of ["README.md", "readme.md"]) {
-    const abs = path.join(projectPath, rel);
-    if (isFile(abs)) {
-      out.push({ rel: `${base}/${claim("README.md")}`, target: abs });
-      break; // one README is enough
+  const walk = (nodes: TreeNode[]): void => {
+    for (const n of nodes) {
+      if (n.kind === "dir") {
+        walk(n.children ?? []);
+        continue;
+      }
+      out.push({
+        rel: `${base}/${claim(vaultRel(n.rel))}`,
+        target: path.join(projectPath, ...n.rel.split("/")),
+      });
     }
-  }
-
-  const docsDir = path.join(projectPath, "docs");
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(docsDir, { withFileTypes: true });
-  } catch {
-    return out; // no docs/ — README-only project
-  }
-
-  const sprints: { n: number; file: string }[] = [];
-  const loose: string[] = [];
-  const subdirs: string[] = [];
-  for (const e of entries) {
-    if (e.name.startsWith(".")) continue;
-    if (e.isDirectory()) {
-      if (!SKIP_DOC_DIRS.has(e.name.toLowerCase())) subdirs.push(e.name);
-      continue;
-    }
-    if (!e.isFile() || !e.name.toLowerCase().endsWith(".md")) continue;
-    const m = SPRINT_RX.exec(e.name);
-    if (m) sprints.push({ n: Number(m[1]), file: e.name });
-    else loose.push(e.name);
-  }
-
-  subdirs.sort(byName);
-  for (const d of subdirs)
-    out.push({ rel: `${base}/${claim(d)}`, target: path.join(docsDir, d) });
-
-  loose.sort(byName);
-  for (const f of loose) out.push({ rel: `${base}/${claim(f)}`, target: path.join(docsDir, f) });
-
-  // sprint/sprint-NN.md — zero-padded so Obsidian's alphabetical sort is numeric
-  sprints.sort((a, b) => a.n - b.n || byName(a.file, b.file));
-  const usedSprint = new Set<string>();
-  for (const s of sprints)
-    out.push({
-      rel: `${base}/sprint/${sprintNoteName(s.n, usedSprint)}.md`,
-      target: path.join(docsDir, s.file),
-    });
+  };
+  walk(listProjectTree(projectPath, { shots: true }));
   return out;
 }
 
@@ -322,7 +315,15 @@ export function renderProjectNote(
   ];
 
   const dir = prefix; // the project's ONE prefix — never re-derived here
-  const seen = new Set<string>();
+  // Sprint N -> the vault path of its real doc, taken from the links actually planned.
+  // A sprint with no file on disk renders as plain text: never wikilink a file the
+  // plan does not create.
+  const sprintRel = new Map<number, string>();
+  for (const l of links) {
+    const rel = l.rel.slice(dir.length + 1);
+    const m = SPRINT_FILE_RX.exec(path.posix.basename(rel));
+    if (m && !sprintRel.has(Number(m[1]))) sprintRel.set(Number(m[1]), rel);
+  }
   const timeline = row.sprints.length
     ? [
         "## Sprint",
@@ -330,18 +331,27 @@ export function renderProjectNote(
         "| # | หัวข้อ | วันที่ |",
         "| --- | --- | --- |",
         ...row.sprints.map(
-          (s) =>
-            `| ${s.n} | ${wikilink(`${dir}/sprint/${sprintNoteName(s.n, seen)}`, s.name, true)} | ${s.date ?? "-"} |`,
+          (s) => {
+            const rel = sprintRel.get(s.n);
+            const cell = rel
+              ? wikilink(`${dir}/${rel.replace(/\.md$/i, "")}`, s.name, true)
+              : mdCell(s.name);
+            return `| ${s.n} | ${cell} | ${s.date ?? "-"} |`;
+          },
         ),
         "",
       ]
     : [];
 
-  // Everything linked into this project's folder except the sprints (already in the
-  // table above). Directory links are left out — Obsidian can't wikilink a folder.
+  // Everything linked into this project's folder except the sprint docs already in
+  // the table above. The .md filter also drops the .orches-shots images — a bare
+  // wikilink cannot render one, and they are browsable in the explorer.
   // wikilink targets carry NO extension — "<dir>/README", not "<dir>/README.md"
+  const inTable = new Set(sprintRel.values());
   const docs = links
-    .filter((l) => !l.rel.startsWith(`${dir}/sprint/`) && l.rel.toLowerCase().endsWith(".md"))
+    .filter(
+      (l) => !inTable.has(l.rel.slice(dir.length + 1)) && l.rel.toLowerCase().endsWith(".md"),
+    )
     .map((l) => l.rel.slice(dir.length + 1).replace(/\.md$/i, ""));
   const docsSection = docs.length
     ? ["## เอกสาร", "", ...docs.map((d) => `- ${wikilink(`${dir}/${d}`, d)}`), ""]

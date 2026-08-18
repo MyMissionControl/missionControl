@@ -1,15 +1,14 @@
-import * as fs from "node:fs";
-
 import * as vscode from "vscode";
 import { setTabIcon } from "./tabIcon";
 
 import {
   loadDataIndex,
-  loadProjectDocList,
+  loadProjectDocTree,
   loadProjectPlan,
   loadProjectTasks,
   type ProjectRow,
 } from "../commands/dataView";
+import { IMG_RX, resolveProjectFile } from "../commands/projectDocs";
 
 /** Singleton panel — a second open reveals the existing one instead of spawning a twin. */
 let current: vscode.WebviewPanel | undefined;
@@ -54,16 +53,29 @@ export async function openDataViewPanel(projectPath?: string): Promise<vscode.We
           type: "tasks",
           path: p,
           sprints: p ? loadProjectTasks(p) : [],
-          docs: p ? loadProjectDocList(p) : [],
+          tree: p ? loadProjectDocTree(p) : [],
           plan: p ? loadProjectPlan(p) : null,
         });
         return;
       }
-      case "open_doc":
-        if (typeof msg.file === "string" && msg.file && fs.existsSync(msg.file)) {
-          void vscode.window.showTextDocument(vscode.Uri.file(msg.file), { preview: true });
+      case "open_doc": {
+        // The webview sends {project, rel} straight off a tree row, so it is resolved the
+        // same way the Project Detail explorer resolves a click: resolveProjectFile guards
+        // traversal and enforces ".md anywhere, images ONLY under .orches-shots/".
+        const proj = typeof msg.project === "string" ? msg.project : "";
+        const rel = typeof msg.rel === "string" ? msg.rel : "";
+        const abs = proj && rel ? resolveProjectFile(proj, rel) : null;
+        if (!abs) return;
+        // ⛔ showTextDocument กับ .png = เปิดไบต์ดิบเป็นข้อความ · `vscode.open` ใช้ image preview
+        if (IMG_RX.test(abs)) {
+          void vscode.commands.executeCommand("vscode.open", vscode.Uri.file(abs), {
+            preview: true,
+          });
+          return;
         }
+        void vscode.window.showTextDocument(vscode.Uri.file(abs), { preview: true });
         return;
+      }
       case "open_github":
         if (typeof msg.url === "string" && msg.url) {
           void vscode.env.openExternal(vscode.Uri.parse(msg.url));
@@ -182,11 +194,16 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
   .card .pbar > i { display: block; height: 100%; }
   .swim { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--muted); margin: 12px 0 6px; }
 
-  /* project mode — sprints broken into tasks (drill-in; refined in a later pass) */
-  tr.sprow, tr.docrow, tr.planrow { cursor: pointer; }
-  tr.sprow:hover td, tr.docrow:hover td, tr.planrow:hover td { background: var(--accentSoft); }
-  tr.sprow .caret, tr.docrow .caret, tr.planrow .caret { display: inline-block; width: 12px; opacity: .6; }
-  tr.docrow td, tr.planrow td { font-weight: 600; }
+  /* project mode — ONE table: the project's real file tree. tr.frow is a folder or a
+     file; tr.tasks is the drill-in a sprint doc / plan.md expands into. */
+  tr.frow { cursor: pointer; }
+  tr.frow:hover td { background: var(--accentSoft); }
+  tr.frow.dir td { font-weight: 600; }
+  tr.frow .fwrap { display: inline-flex; align-items: baseline; gap: 4px; }
+  tr.frow .caret { display: inline-block; width: 12px; opacity: .6; flex: none; }
+  tr.frow .caret.hide { visibility: hidden; }
+  tr.frow .fname { font-family: var(--mono); font-size: 11.5px; }
+  tr.frow .cnt { font-size: 10px; color: var(--faint); }
   tr.tasks > td { white-space: normal; padding: 0 15px 10px 30px; }
   .task { font-size: 12px; padding: 2px 0; display: flex; gap: 6px; align-items: baseline; }
   .task .box { color: var(--faint); font-family: var(--mono); flex: none; }
@@ -266,11 +283,9 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
     mode: "all",   // "all" = every project · "project" = one project broken into tasks
     proj: null,    // { name, path } while mode === "project"
     tasks: null,   // SprintTasks[] for S.proj — null means "not answered yet"
-    docs: [],      // every other .md of S.proj (wiki, ADRs, design/req, README)
-    plan: null,    // plan.md as {file, done[], pending[]} — its own row above the sprints
-    planOpen: false, // the plan.md row expanded
-    open: {},      // sprint n → row expanded in the project table
-    docsOpen: false, // the "เอกสารอื่นๆ" group
+    tree: [],      // S.proj's REAL file tree (.md anywhere + .orches-shots/), as on disk
+    plan: null,    // plan.md as {rel, file, done[], pending[]} — drill-in for its tree row
+    expanded: {},  // rel → row expanded; absent means "folders open, files closed"
     statusFilter: "all", // overview KPI-card filter: all | done | in-progress
     view: "table", q: "", sortKey: "updated", sortDir: -1,
   };
@@ -323,11 +338,9 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
     S.mode = "project";
     S.proj = { path: p, name: name || baseName(p) };
     S.tasks = null;
-    S.docs = [];
+    S.tree = [];
     S.plan = null;
-    S.planOpen = false;
-    S.open = {};
-    S.docsOpen = false;
+    S.expanded = {};
     S.q = "";
     document.getElementById("q").value = "";
     vscode.postMessage({ type: "get_tasks", path: p });
@@ -469,22 +482,51 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
     const list = (S.tasks || []).map(s => ({ ...s, done: s.done.filter(hit), pending: s.pending.filter(hit) }));
     return q ? list.filter(s => s.done.length || s.pending.length) : list;
   }
-  /* Other .md of the project, narrowed by the same search box as the tasks.
-   * plan.md is dropped here — it gets its own row above the sprints. */
-  function docsFiltered() {
-    const q = S.q.trim().toLowerCase();
-    const planFile = S.plan ? S.plan.file : null;
-    return (S.docs || []).filter(d => d.file !== planFile && (!q || d.rel.toLowerCase().includes(q)));
+  /* rel -> the task lists that file drills into. Sprint docs and plan.md are the only
+   * files that have any; every other row is just a file. */
+  function taskIndex() {
+    const m = {};
+    for (const s of S.tasks || []) if (s.rel) m[s.rel] = { date: s.date, done: s.done || [], pending: s.pending || [] };
+    if (S.plan && S.plan.rel) m[S.plan.rel] = { date: null, done: S.plan.done || [], pending: S.plan.pending || [] };
+    return m;
   }
-  /* plan.md as a sprint-shaped {done,pending}, narrowed by the search like sprints
-   * (dropped entirely while searching if nothing matches). null = no plan.md. */
-  function planFiltered() {
-    if (!S.plan) return null;
-    const q = S.q.trim().toLowerCase();
-    const hit = (t) => !q || t.toLowerCase().includes(q);
-    const done = (S.plan.done || []).filter(hit), pending = (S.plan.pending || []).filter(hit);
-    if (q && !done.length && !pending.length) return null;
-    return { file: S.plan.file, done, pending };
+  /* ONE filter for the whole table: a file survives if its path matches OR one of its
+   * tasks does (then only the matching tasks show); a folder survives if anything under
+   * it did. Returns a pruned copy — S.tree itself is always the untouched real tree. */
+  function prune(nodes, q, idx) {
+    const out = [];
+    for (const n of nodes) {
+      if (n.kind === "dir") {
+        const kids = prune(n.children || [], q, idx);
+        if (kids.length) out.push({ name: n.name, rel: n.rel, kind: "dir", children: kids });
+        continue;
+      }
+      const t = idx[n.rel] || null;
+      if (!q || n.rel.toLowerCase().includes(q)) { out.push({ name: n.name, rel: n.rel, kind: "file", t }); continue; }
+      if (!t) continue;
+      const hit = (x) => x.toLowerCase().includes(q);
+      const done = t.done.filter(hit), pending = t.pending.filter(hit);
+      if (done.length || pending.length) out.push({ name: n.name, rel: n.rel, kind: "file", t: { date: t.date, done, pending } });
+    }
+    return out;
+  }
+  function countFiles(nodes) {
+    let n = 0;
+    for (const x of nodes || []) n += x.kind === "dir" ? countFiles(x.children) : 1;
+    return n;
+  }
+  /* Folders start OPEN — this table replaced a flat doc list, so hiding everything
+   * behind carets would show LESS than before. Task drill-downs start closed, and a
+   * search forces the lot open so a match is never buried.
+   * ⛔ One exception: a dot-folder at the top level (in practice only .orches-shots)
+   *    starts CLOSED — one project's screenshots ran to 54 rows, which would bury every
+   *    doc below them. Folders INSIDE it still open, so one click reveals the lot. */
+  function isOpen(rel, isDir, searching) {
+    if (searching) return true;
+    const v = S.expanded[rel];
+    if (v !== undefined) return !!v;
+    if (!isDir) return false;
+    return !(rel.charAt(0) === "." && rel.indexOf("/") === -1);
   }
   /** Said above the rows, never instead of them — the doc list stays useful even when
    *  the sprint docs use a format we can't read tasks out of. */
@@ -494,56 +536,53 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
     if (d || p) return "";
     return '<div class="empty">อ่าน task ไม่ได้ — sprint doc ของโปรเจกต์นี้ไม่ได้ใช้หัวข้อ "ทำอะไรเสร็จบ้าง" / "ยังค้าง" (เปิดไฟล์อ่านเองได้ด้านล่าง)</div>';
   }
-  function docLink(d) {
-    return '<div class="task"><a href="#" class="doc" data-f="' + esc(d.file) + '">' + esc(d.rel) + '</a></div>';
-  }
   function taskLine(text, isDone) {
     return '<div class="task ' + (isDone ? 'done' : 'todo') + '"><span class="box">' + (isDone ? '[x]' : '[ ]') + '</span><span>' + esc(text) + '</span></div>';
   }
+  /* The rows themselves: name column indented by depth, then date / done / pending —
+   * empty for a file that is not a sprint doc, because it has no tasks to count. */
+  function fileRows(nodes, depth, searching) {
+    let out = "";
+    for (const n of nodes) {
+      const pad = 'style="padding-left:' + (depth * 15) + 'px"';
+      const isDir = n.kind === "dir";
+      const open = isOpen(n.rel, isDir, searching);
+      const drill = isDir || !!n.t; // has something to expand into
+      const caret = '<span class="caret' + (drill ? '' : ' hide') + '">' + (open ? '▾' : '▸') + '</span>';
+      if (isDir) {
+        out += '<tr class="frow dir" data-rel="' + esc(n.rel) + '" data-x="1"><td><span class="fwrap" ' + pad + '>'
+          + caret + '<span class="fname">' + esc(n.name) + '/</span>'
+          + '<span class="cnt">' + countFiles(n.children) + '</span></span></td>'
+          + '<td class="tag"></td><td></td><td></td></tr>';
+        if (open) out += fileRows(n.children || [], depth + 1, searching);
+        continue;
+      }
+      const t = n.t;
+      out += '<tr class="frow" data-rel="' + esc(n.rel) + '"' + (t ? ' data-x="1"' : '') + '><td><span class="fwrap" ' + pad + '>'
+        + caret + '<a href="#" class="doc" data-rel="' + esc(n.rel) + '">' + esc(n.name) + '</a></span></td>'
+        + '<td class="tag">' + esc(t && t.date ? t.date : '') + '</td>'
+        + '<td>' + (t ? t.done.length : '') + '</td>'
+        + '<td>' + (t ? t.pending.length : '') + '</td></tr>';
+      if (!t || !open) continue;
+      const lines = t.done.map(x => taskLine(x, true)).join('') + t.pending.map(x => taskLine(x, false)).join('');
+      out += '<tr class="tasks"><td colspan="4">' + (lines || '<div class="empty">ไฟล์นี้ไม่มีเช็คลิสต์ — กดชื่อไฟล์เพื่อเปิดอ่าน</div>') + '</td></tr>';
+    }
+    return out;
+  }
+  /* ONE table, nothing else. It shows the project's real structure — the same files the
+   * Projects page shows — instead of the old plan / sprints / "เอกสารอื่นๆ" trio, which
+   * split one folder of docs across three groups and renamed them on the way. */
   function renderProjectTable() {
     if (S.tasks === null) return '<div class="empty">กำลังอ่านเอกสาร…</div>';
-    const list = sprintsFiltered();
-    const docs = docsFiltered();
-    const plan = planFiltered();
-    if (!list.length && !docs.length && !plan) {
-      return '<div class="empty">' + (S.q.trim() ? "ไม่มีอะไรตรงกับตัวกรอง" : "โปรเจกต์นี้ไม่มีไฟล์ .md") + '</div>';
+    const q = S.q.trim().toLowerCase();
+    const rows = prune(S.tree || [], q, taskIndex());
+    if (!rows.length) {
+      return '<div class="empty">' + (q ? "ไม่มีอะไรตรงกับตัวกรอง" : "โปรเจกต์นี้ไม่มีไฟล์ .md") + '</div>';
     }
-    const head = '<tr><th>Sprint</th><th>วันที่</th><th>เสร็จ</th><th>ค้าง</th><th></th></tr>';
-    let body = "";
-    if (plan) {
-      const open = S.planOpen || !!S.q.trim();
-      body += '<tr class="planrow" data-plan="1">'
-        + '<td><span class="caret">' + (open ? '▾' : '▸') + '</span>plan.md</td>'
-        + '<td class="tag">—</td>'
-        + '<td>' + plan.done.length + '</td>'
-        + '<td>' + plan.pending.length + '</td>'
-        + '<td><a href="#" class="doc" data-f="' + esc(plan.file) + '">.md</a></td>'
-        + '</tr>';
-      if (open) {
-        const lines = plan.done.map(t => taskLine(t, true)).join('') + plan.pending.map(t => taskLine(t, false)).join('');
-        body += '<tr class="tasks"><td colspan="5">' + (lines || '<div class="empty">plan.md ไม่มีเช็คลิสต์ — กด .md เพื่อเปิดอ่าน</div>') + '</td></tr>';
-      }
-    }
-    for (const s of list) {
-      const open = !!S.open[s.n] || !!S.q.trim(); // a search auto-opens what it matched
-      body += '<tr class="sprow" data-n="' + s.n + '">'
-        + '<td><span class="caret">' + (open ? '▾' : '▸') + '</span>' + esc('Sprint ' + s.n + ' — ' + s.name) + '</td>'
-        + '<td class="tag">' + esc(s.date || '—') + '</td>'
-        + '<td>' + s.done.length + '</td>'
-        + '<td>' + s.pending.length + '</td>'
-        + '<td><a href="#" class="doc" data-f="' + esc(s.file) + '">.md</a></td>'
-        + '</tr>';
-      if (!open) continue;
-      const lines = s.done.map(t => taskLine(t, true)).join('') + s.pending.map(t => taskLine(t, false)).join('');
-      body += '<tr class="tasks"><td colspan="5">' + (lines || '<div class="empty">ไม่มี task ในสปรินต์นี้</div>') + '</td></tr>';
-    }
-    if (docs.length) {
-      const open = S.docsOpen || !!S.q.trim();
-      body += '<tr class="docrow"><td colspan="5"><span class="caret">' + (open ? '▾' : '▸') + '</span>เอกสารอื่นๆ (' + docs.length + ')</td></tr>';
-      if (open) body += '<tr class="tasks"><td colspan="5">' + docs.map(docLink).join('') + '</td></tr>';
-    }
-    return taskNote() + '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+    const head = '<tr><th>ไฟล์</th><th>วันที่</th><th>เสร็จ</th><th>ค้าง</th></tr>';
+    return taskNote() + '<table><thead>' + head + '</thead><tbody>' + fileRows(rows, 0, !!q) + '</tbody></table>';
   }
+
   // Kanban is the pure sprint board: only tasks parsed out of the sprint docs —
   // no plan.md, no other docs (those live on the Table tab).
   function renderProjectKanban() {
@@ -616,7 +655,7 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
       document.getElementById("sub").textContent = S.tasks === null
         ? "กำลังอ่านเอกสาร…"
         : d + " เสร็จ · " + p + " ค้าง · " + S.tasks.length + " sprint · "
-          + (S.tasks.length + S.docs.length) + " ไฟล์ .md";
+          + countFiles(S.tree) + " ไฟล์";
       el.innerHTML = S.view === "timeline" ? renderProjectTimeline()
         : S.view === "kanban" ? renderProjectKanban() : renderProjectTable();
       return;
@@ -643,13 +682,16 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
   document.getElementById("view").addEventListener("click", (e) => {
     const gh = e.target.closest(".gh");
     if (gh) { e.preventDefault(); e.stopPropagation(); vscode.postMessage({ type: "open_github", url: gh.dataset.url }); return; }
+    // The extension resolves {project, rel} itself (traversal guard + .md/shots-image only).
     const doc = e.target.closest(".doc");
-    if (doc) { e.preventDefault(); e.stopPropagation(); vscode.postMessage({ type: "open_doc", file: doc.dataset.f }); return; }
+    if (doc && S.proj) { e.preventDefault(); e.stopPropagation(); vscode.postMessage({ type: "open_doc", project: S.proj.path, rel: doc.dataset.rel }); return; }
     if (S.mode === "project") {
-      if (e.target.closest(".planrow")) { S.planOpen = !S.planOpen; render(); return; }
-      const sp = e.target.closest(".sprow");
-      if (sp) { const n = sp.dataset.n; S.open[n] = !S.open[n]; render(); return; }
-      if (e.target.closest(".docrow")) { S.docsOpen = !S.docsOpen; render(); }
+      const row = e.target.closest(".frow");
+      if (!row) return;
+      const rel = row.dataset.rel, isDir = row.classList.contains("dir");
+      // a row that can expand toggles; a plain file row opens (same as clicking its name)
+      if (row.dataset.x) { S.expanded[rel] = !isOpen(rel, isDir, false); render(); return; }
+      vscode.postMessage({ type: "open_doc", project: S.proj.path, rel });
       return;
     }
     const th = e.target.closest("th");
@@ -661,7 +703,7 @@ function renderHtml(rows: ProjectRow[], initialProject?: string): string {
     const m = ev.data || {};
     if (m.type === "index") { ROWS = m.rows || []; render(); return; }
     // ignore a late answer for a project we already navigated away from
-    if (m.type === "tasks") { if (S.proj && m.path === S.proj.path) { S.tasks = m.sprints || []; S.docs = m.docs || []; S.plan = m.plan || null; render(); } return; }
+    if (m.type === "tasks") { if (S.proj && m.path === S.proj.path) { S.tasks = m.sprints || []; S.tree = m.tree || []; S.plan = m.plan || null; render(); } return; }
     if (m.type === "enter_project" && m.path) { enterProject(m.path, baseName(m.path)); }
   });
   if (INITIAL_PROJECT) enterProject(INITIAL_PROJECT, baseName(INITIAL_PROJECT));

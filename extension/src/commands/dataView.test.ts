@@ -5,7 +5,7 @@ import * as path from "node:path";
 
 import {
   buildProjectRow,
-  loadProjectDocList,
+  loadProjectDocTree,
   loadProjectPlan,
   loadProjectTasks,
   parseSprintDoc,
@@ -138,6 +138,9 @@ test("loadProjectTasks: one entry per sprint doc, ascending, with counts", () =>
   expect(sprints[0]).toMatchObject({ name: "Foundation", date: "2026-07-31", done: ["จ"], pending: [] });
   expect(sprints[1]).toMatchObject({ name: "Marketplace", done: ["ก", "ข"], pending: ["ค"] });
   expect(sprints[1].file).toBe(path.join(p, "docs", "tasky-sprint-2.md"));
+  // rel is what keys the sprint to its row in the file tree — without it the Data View
+  // table shows the sprint doc as a plain file with no task drill-down.
+  expect(sprints.map((x) => x.rel)).toEqual(["docs/tasky-sprint-1.md", "docs/tasky-sprint-2.md"]);
 });
 
 test("loadProjectTasks: project with no docs/ → empty list", () => {
@@ -169,45 +172,69 @@ test("loadProjectPlan: plan.md without checkboxes → empty lists (row still ope
   expect(plan?.pending).toEqual([]);
 });
 
-// ---- loadProjectDocList ----
+// ---- loadProjectDocTree ----
 
-test("loadProjectDocList: every .md except sprint docs, plain alphabetical by path", () => {
+/** Depth-first list of every file rel in the tree, in render order. */
+function flatten(nodes: ReturnType<typeof loadProjectDocTree>): string[] {
+  const out: string[] = [];
+  for (const n of nodes) {
+    if (n.kind === "dir") out.push(...flatten(n.children ?? []));
+    else out.push(n.rel);
+  }
+  return out;
+}
+
+test("loadProjectDocTree: the project's real structure — folders kept, nothing renamed", () => {
   const p = tmpProject("docsy");
   writeDoc(p, "plan.md", "# แผน");
   writeDoc(p, "design.md", "# design");
   writeDoc(p, "wiki/api.md", "# api");
   writeDoc(p, "wiki/decisions/0001-storage.md", "# adr");
-  writeDoc(p, "docsy-sprint-1.md", "# Sprint 1 — Core"); // a sprint row already, not "other"
-  fs.writeFileSync(path.join(p, "README.md"), "# readme"); // project root, outside docs/
+  writeDoc(p, "docsy-sprint-1.md", "# Sprint 1 — Core");
+  fs.writeFileSync(path.join(p, "README.md"), "# readme");
 
-  expect(loadProjectDocList(p).map((d) => d.rel)).toEqual([
-    "docs/design.md",
-    "docs/plan.md",
-    "docs/wiki/api.md",
+  const tree = loadProjectDocTree(p);
+  // dirs before files at each level (alpha within each) — same order as the Projects page
+  expect(tree.map((n) => n.name)).toEqual(["docs", "README.md"]);
+  expect(flatten(tree)).toEqual([
     "docs/wiki/decisions/0001-storage.md",
-    "README.md", // root file sorts by its own name, no special case
+    "docs/wiki/api.md",
+    "docs/design.md",
+    "docs/docsy-sprint-1.md", // sprint docs are ordinary files here, not a separate group
+    "docs/plan.md", // so is plan.md
+    "README.md",
   ]);
 });
 
-test("loadProjectDocList: entries carry an absolute path to open", () => {
-  const p = tmpProject("docsy2");
+test("loadProjectDocTree: .orches-shots screenshots are in, images elsewhere are not", () => {
+  const p = tmpProject("shotsy");
   writeDoc(p, "plan.md", "# แผน");
-  expect(loadProjectDocList(p)[0].file).toBe(path.join(p, "docs", "plan.md"));
+  const shot = path.join(p, ".orches-shots", "sprint-1", "web-shell");
+  fs.mkdirSync(shot, { recursive: true });
+  fs.writeFileSync(path.join(shot, "login.png"), "x");
+  fs.writeFileSync(path.join(shot, "render.log"), "x"); // not an image → out
+  fs.mkdirSync(path.join(p, "web", "public"), { recursive: true });
+  fs.writeFileSync(path.join(p, "web", "public", "logo.png"), "x"); // outside shots → out
+
+  expect(flatten(loadProjectDocTree(p))).toEqual([
+    ".orches-shots/sprint-1/web-shell/login.png",
+    "docs/plan.md",
+  ]);
 });
 
-test("loadProjectDocList: skips generated dirs and non-markdown", () => {
+test("loadProjectDocTree: skips generated dirs and non-markdown", () => {
   const p = tmpProject("docsy3");
   writeDoc(p, "plan.md", "# แผน");
   fs.mkdirSync(path.join(p, "node_modules", "pkg"), { recursive: true });
   fs.writeFileSync(path.join(p, "node_modules", "pkg", "README.md"), "# dep");
   fs.writeFileSync(path.join(p, "notes.txt"), "not markdown");
 
-  expect(loadProjectDocList(p).map((d) => d.rel)).toEqual(["docs/plan.md"]);
+  expect(flatten(loadProjectDocTree(p))).toEqual(["docs/plan.md"]);
 });
 
-test("loadProjectDocList: project with no markdown → empty", () => {
+test("loadProjectDocTree: project with no markdown → empty", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "mc-dv-nodocs-"));
-  expect(loadProjectDocList(base)).toEqual([]);
+  expect(loadProjectDocTree(base)).toEqual([]);
 });
 
 // ---- buildProjectRow ----

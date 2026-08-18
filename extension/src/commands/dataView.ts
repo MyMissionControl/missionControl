@@ -67,6 +67,7 @@ export interface SprintTasks {
   name: string;
   date: string | null;
   file: string; // absolute path of the sprint doc, so the view can open it
+  rel: string; // project-relative POSIX path ("docs/x-sprint-1.md") — keys the row in the file tree
   done: string[];
   pending: string[];
 }
@@ -123,34 +124,28 @@ export function loadProjectTasks(projectPath: string): SprintTasks[] {
     const meta = parseSprintDoc(fn, raw);
     if (!meta) continue;
     const { done, pending } = parseSprintTasks(raw);
-    out.push({ n: meta.n, name: meta.name, date: meta.date, file: abs, done, pending });
+    out.push({
+      n: meta.n,
+      name: meta.name,
+      date: meta.date,
+      file: abs,
+      rel: "docs/" + fn,
+      done,
+      pending,
+    });
   }
   return out.sort((a, b) => a.n - b.n);
 }
 
-/** One markdown file of a project that is not a sprint doc — the wiki pages, ADRs,
- *  plan/design/req, README. Sprint docs are left out: they are already rows of their
- *  own, each with its own link. */
-export interface DocEntry {
-  rel: string; // project-relative POSIX path, e.g. "docs/wiki/api.md"
-  file: string; // absolute path, so the view can open it
-}
-
-/** Every other `.md` in the project, alphabetically. Reuses the doc tree the Project
- *  Detail explorer is built on (it already prunes node_modules / dist / dot-dirs and
- *  the `agents/` worktrees, which are full duplicate checkouts), then flattens it —
- *  this view wants one plain list, not a tree. */
-export function loadProjectDocList(projectPath: string): DocEntry[] {
-  const out: DocEntry[] = [];
-  const walk = (nodes: TreeNode[]) => {
-    for (const n of nodes) {
-      if (n.kind === "dir") walk(n.children ?? []);
-      else if (!SPRINT_FILE_RX.test(path.basename(n.rel)))
-        out.push({ rel: n.rel, file: path.join(projectPath, n.rel) });
-    }
-  };
-  walk(listProjectTree(projectPath));
-  return out.sort((a, b) => a.rel.localeCompare(b.rel, undefined, { sensitivity: "base" }));
+/** The project's real file tree — the SAME call the Project Detail explorer makes, so
+ *  the Data View lists exactly what that page lists: every `.md` wherever it sits, plus
+ *  the `.orches-shots/` screenshots, with the folder structure the repo actually has.
+ *  ⛔ It used to be `loadProjectDocList`: a flat, alphabetised list of non-sprint docs.
+ *     User's call 2026-08-18 — one table showing the real structure, nothing invented,
+ *     nothing hidden. Sprint docs and plan.md are ordinary files IN this tree now; the
+ *     view keys their task drill-down off `rel` (see SprintTasks.rel / PlanDoc.rel). */
+export function loadProjectDocTree(projectPath: string): TreeNode[] {
+  return listProjectTree(projectPath, { shots: true });
 }
 
 /** plan.md surfaced as a {done,pending} pair — its checklist items — so the Data
