@@ -103,31 +103,68 @@ test("listProjectTree: missing project dir yields empty array, no throw", () => 
   expect(listProjectTree(path.join(os.tmpdir(), "mc-no-such-" + process.pid))).toEqual([]);
 });
 
-test("listDetailDocs: docs top level = wiki/ + virtual sprint/ + plan.md; README → dropdown, not tree", () => {
+test("listDetailDocs: tree mirrors the REAL project structure — no virtual folders, no renames", () => {
   const p = tmpProject(); // makes docs/wiki/decisions
   fs.writeFileSync(path.join(p, "README.md"), "# root readme");
   fs.writeFileSync(path.join(p, "docs", "plan.md"), "# plan");
-  fs.writeFileSync(path.join(p, "docs", "README.md"), "# docs readme"); // excluded from tree
   fs.writeFileSync(path.join(p, "docs", "wiki", "overview.md"), "# o");
   const proj = path.basename(p);
   fs.writeFileSync(path.join(p, "docs", proj + "-sprint-2.md"), "s2");
   fs.writeFileSync(path.join(p, "docs", proj + "-sprint-10.md"), "s10");
-  fs.writeFileSync(path.join(p, "docs", "sprint-1.md"), "s1"); // legacy flat name
 
   const d = listDetailDocs(p);
-  expect(d.readme?.rel).toBe("README.md"); // root README wins, for the dropdown
-  // top level: wiki/ (dir) → sprint/ (virtual dir) → plan.md (file); README.md absent
-  expect(names(d.tree)).toEqual(["wiki/", "sprint/", "plan.md"]);
-  const sprint = d.tree.find((n) => n.name === "sprint")!;
-  // grouped + shortened + numeric order; each keeps its real docs/ rel for opening
-  expect(names(sprint.children!)).toEqual(["sprint-1.md", "sprint-2.md", "sprint-10.md"]);
-  expect(sprint.children!.map((c) => c.rel)).toEqual([
-    "docs/sprint-1.md",
-    "docs/" + proj + "-sprint-2.md",
-    "docs/" + proj + "-sprint-10.md",
+  expect(d.readme?.rel).toBe("README.md"); // still offered for the default selection
+  // ⛔ rooted at the PROJECT, not at docs/: dirs first, then files — exactly the real layout
+  expect(names(d.tree)).toEqual(["docs/", "README.md"]);
+  const docs = d.tree.find((n) => n.name === "docs")!;
+  // ⛔ no virtual "sprint" folder and no shortened names: the file names are the real ones
+  expect(names(docs.children!)).toEqual([
+    "wiki/",
+    proj + "-sprint-10.md",
+    proj + "-sprint-2.md",
+    "plan.md",
   ]);
-  const wiki = d.tree.find((n) => n.name === "wiki")!;
+  expect(docs.children!.find((c) => c.name === "plan.md")!.rel).toBe("docs/plan.md");
+  const wiki = docs.children!.find((n) => n.name === "wiki")!;
   expect(names(wiki.children!)).toEqual(["overview.md"]);
+});
+
+test("listDetailDocs: .orches-shots is shown (images only), nested viewport folders kept", () => {
+  const p = tmpProject();
+  fs.writeFileSync(path.join(p, "docs", "plan.md"), "# plan");
+  const shots = path.join(p, ".orches-shots", "sprint-1", "web-shell");
+  fs.mkdirSync(path.join(shots, "pc"), { recursive: true });
+  fs.writeFileSync(path.join(shots, "login.png"), "png");
+  fs.writeFileSync(path.join(shots, "pc", "root.png"), "png");
+  fs.writeFileSync(path.join(shots, "render.log"), "log"); // ⛔ ไม่ใช่รูป = ไม่แสดง
+  fs.writeFileSync(path.join(shots, "notes.md"), "# md inside shots is fine");
+
+  const d = listDetailDocs(p);
+  expect(names(d.tree)).toEqual([".orches-shots/", "docs/"]);
+  const s1 = d.tree[0].children![0];
+  expect(s1.name).toBe("sprint-1");
+  const role = s1.children![0];
+  expect(role.name).toBe("web-shell");
+  expect(names(role.children!)).toEqual(["pc/", "login.png", "notes.md"]);
+  expect(role.children!.find((c) => c.name === "login.png")!.rel).toBe(
+    ".orches-shots/sprint-1/web-shell/login.png",
+  );
+  expect(names(role.children!.find((c) => c.name === "pc")!.children!)).toEqual(["root.png"]);
+});
+
+test("listDetailDocs: other dot-dirs, worktrees and node_modules stay hidden", () => {
+  const p = tmpProject();
+  fs.writeFileSync(path.join(p, "docs", "plan.md"), "# plan");
+  for (const d of [".git", ".claude", "agents/web-shell/docs", "node_modules/pkg", "web/src"])
+    fs.mkdirSync(path.join(p, d), { recursive: true });
+  fs.writeFileSync(path.join(p, ".git", "notes.md"), "# nope");
+  fs.writeFileSync(path.join(p, ".claude", "x.md"), "# nope");
+  fs.writeFileSync(path.join(p, "agents", "web-shell", "docs", "a.md"), "# dup checkout");
+  fs.writeFileSync(path.join(p, "node_modules", "pkg", "readme.md"), "# dep");
+  fs.writeFileSync(path.join(p, "web", "src", "App.tsx"), "code"); // ⛔ ไฟล์อื่นไม่แสดงเหมือนเดิม
+
+  const d = listDetailDocs(p);
+  expect(names(d.tree)).toEqual(["docs/"]);
 });
 
 test("listDetailDocs: no README, no docs dir → null readme + empty tree, no throw", () => {
@@ -135,6 +172,22 @@ test("listDetailDocs: no README, no docs dir → null readme + empty tree, no th
   const d = listDetailDocs(base);
   expect(d.readme).toBeNull();
   expect(d.tree).toEqual([]);
+});
+
+test("resolveProjectFile: images open ONLY under .orches-shots, never elsewhere", () => {
+  const p = tmpProject();
+  const shots = path.join(p, ".orches-shots", "sprint-1");
+  fs.mkdirSync(shots, { recursive: true });
+  fs.writeFileSync(path.join(shots, "root.png"), "png");
+  fs.mkdirSync(path.join(p, "web", "public"), { recursive: true });
+  fs.writeFileSync(path.join(p, "web", "public", "logo.png"), "png");
+
+  expect(resolveProjectFile(p, ".orches-shots/sprint-1/root.png")).toBe(
+    path.join(shots, "root.png"),
+  );
+  // ⛔ รูปที่อื่นในโปรเจกต์ยังเปิดไม่ได้ — ไม่งั้น "ไฟล์อื่นไม่แสดง" กลายเป็นคำพูดลอย ๆ
+  expect(resolveProjectFile(p, "web/public/logo.png")).toBeNull();
+  expect(resolveProjectFile(p, "../outside.png")).toBeNull();
 });
 
 test("resolveProjectFile: accepts any .md under project, rejects traversal, non-md, missing", () => {

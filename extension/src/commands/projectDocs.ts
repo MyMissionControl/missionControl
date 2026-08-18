@@ -29,6 +29,14 @@ const TREE_IGNORE_DIRS = new Set([
 ]);
 const TREE_MAX_DEPTH = 12; // guard against pathological / symlink-looped trees
 
+// The one dot-directory the docs explorer DOES show: orches writes its gate screenshots
+// there (<shots>/sprint-N/<role>/[<viewport>/]<route>.png). Everyone reviewing a delivery
+// wants to look at them, and until now the only way was a file manager outside the editor.
+// ⛔ Images are viewable ONLY from inside this folder (see resolveProjectFile): the rule
+//    "other files stay hidden" has to keep being true, or the explorer becomes a file browser.
+export const SHOTS_DIR = ".orches-shots";
+const IMG_RX = /\.(?:png|jpe?g|gif|webp)$/i;
+
 // Wiki pages in this priority first (by index), then everything else alphabetically.
 const WIKI_PRIORITY = ["README", "overview", "architecture", "setup"];
 
@@ -101,10 +109,18 @@ function listSprints(docsDir: string): DocRef[] {
 /** Build the project's markdown file tree: only .md files and the folders that
  *  contain them (folders with no .md descendant are pruned). Rooted at the project
  *  dir so README.md, docs/, etc. all appear. Dirs first then files, alpha within each. */
-export function listProjectTree(projectPath: string): TreeNode[] {
-  return buildTree(projectPath, projectPath, 0);
+export function listProjectTree(projectPath: string, opts?: { shots?: boolean }): TreeNode[] {
+  return buildTree(projectPath, projectPath, 0, opts?.shots === true, false);
 }
-function buildTree(dir: string, root: string, depth: number): TreeNode[] {
+/** `shots` = also walk <project>/.orches-shots and keep image files inside it.
+ *  ⛔ Off by default: Data View walks this same builder and must stay markdown-only. */
+function buildTree(
+  dir: string,
+  root: string,
+  depth: number,
+  shots = false,
+  inShots = false,
+): TreeNode[] {
   if (depth > TREE_MAX_DEPTH) return [];
   let entries: fs.Dirent[];
   try {
@@ -115,14 +131,19 @@ function buildTree(dir: string, root: string, depth: number): TreeNode[] {
   const dirs: TreeNode[] = [];
   const files: TreeNode[] = [];
   for (const e of entries) {
-    if (e.name.startsWith(".")) continue; // hide dot-files/dirs (.git, .claude, …)
+    // hide dot-files/dirs (.git, .claude, …) — except the screenshots folder when asked
+    const isShotsRoot = shots && e.isDirectory() && e.name === SHOTS_DIR;
+    if (e.name.startsWith(".") && !isShotsRoot) continue;
     const full = path.join(dir, e.name);
     const rel = path.relative(root, full).split(path.sep).join("/");
     if (e.isDirectory()) {
       if (TREE_IGNORE_DIRS.has(e.name)) continue;
-      const children = buildTree(full, root, depth + 1);
+      const children = buildTree(full, root, depth + 1, shots, inShots || isShotsRoot);
       if (children.length) dirs.push({ name: e.name, rel, kind: "dir", children }); // prune empties
-    } else if (e.isFile() && e.name.toLowerCase().endsWith(".md")) {
+    } else if (
+      e.isFile() &&
+      (e.name.toLowerCase().endsWith(".md") || (inShots && IMG_RX.test(e.name)))
+    ) {
       files.push({ name: e.name, rel, kind: "file" });
     }
   }
@@ -133,18 +154,21 @@ function buildTree(dir: string, root: string, depth: number): TreeNode[] {
   return [...dirs, ...files];
 }
 
-/** Curated docs view for the Project Detail page: a README (shown as an inline dropdown)
- *  plus a docs-rooted file tree. README is left out of the tree (it has its own dropdown),
- *  and the flat sprint docs (docs/<proj>-sprint-N.md) are collapsed into one virtual
- *  "sprint" folder so the top level stays clean: wiki/, sprint/, plan.md. */
+/** Docs view for the Project Detail page: a README pointer (used for the default
+ *  selection) plus the project's own file tree — **the real structure, unmodified**.
+ *  ⛔⛔ It used to be curated: rooted at docs/ (so `docs/` itself never appeared), README
+ *     removed, and the flat sprint docs collapsed into a virtual `sprint/` folder with
+ *     shortened names. User's call 2026-08-18: show the structure the project actually has,
+ *     because a tree that does not match the repo makes every path in it a guess — and the
+ *     rename meant the name in the explorer was not the name on disk (or in a git log).
+ *  Shows `.md` anywhere + the `.orches-shots/` screenshot tree; every other file stays hidden. */
 export interface DetailDocs {
-  readme: DocRef | null; // for the dropdown; null → no README anywhere obvious
-  tree: TreeNode[]; // the docs explorer (docs/-rooted, sprint docs grouped)
+  readme: DocRef | null; // null → no README anywhere obvious
+  tree: TreeNode[]; // the real project tree (.md + .orches-shots/), project-rooted
 }
-const SPRINT_RX = /^(?:.+-)?sprint-(\d+).*\.md$/i;
 
 export function listDetailDocs(projectPath: string): DetailDocs {
-  return { readme: findReadme(projectPath), tree: buildDocsTree(projectPath) };
+  return { readme: findReadme(projectPath), tree: listProjectTree(projectPath, { shots: true }) };
 }
 function findReadme(projectPath: string): DocRef | null {
   for (const rel of ["README.md", "docs/README.md"]) {
@@ -156,41 +180,6 @@ function findReadme(projectPath: string): DocRef | null {
   }
   return null;
 }
-function buildDocsTree(projectPath: string): TreeNode[] {
-  const top = buildTree(path.join(projectPath, "docs"), projectPath, 0); // rels are "docs/…"
-  const dirs: TreeNode[] = [];
-  const files: TreeNode[] = [];
-  const sprints: TreeNode[] = [];
-  for (const n of top) {
-    if (n.kind === "dir") {
-      dirs.push(n);
-    } else if (/^readme\.md$/i.test(n.name)) {
-      continue; // README → dropdown, never the tree
-    } else if (SPRINT_RX.test(n.name)) {
-      sprints.push({ ...n, name: shortSprint(n.name) }); // "<proj>-sprint-1.md" → "sprint-1.md"
-    } else {
-      files.push(n);
-    }
-  }
-  const byName = (a: TreeNode, b: TreeNode) =>
-    a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-  dirs.sort(byName);
-  files.sort(byName);
-  sprints.sort((a, b) => sprintNum(a.name) - sprintNum(b.name) || byName(a, b));
-  // dirs first, then the virtual "sprint" folder, then plain files (e.g. plan.md)
-  const virtual: TreeNode[] = sprints.length
-    ? [{ name: "sprint", rel: "docs/sprint", kind: "dir", children: sprints }]
-    : [];
-  return [...dirs, ...virtual, ...files];
-}
-function shortSprint(base: string): string {
-  const i = base.toLowerCase().indexOf("sprint-");
-  return i >= 0 ? base.slice(i) : base;
-}
-function sprintNum(name: string): number {
-  const m = /sprint-(\d+)/i.exec(name);
-  return m ? Number(m[1]) : 0;
-}
 
 /** Resolve a project-relative .md path, guarding against traversal outside the project.
  *  Returns the absolute path only if it is a real .md file under <project>/. */
@@ -199,7 +188,10 @@ export function resolveProjectFile(projectPath: string, rel: string): string | n
   const abs = path.resolve(projectPath, rel);
   const within = abs === root || abs.startsWith(root + path.sep);
   if (!within) return null;
-  if (!abs.toLowerCase().endsWith(".md")) return null; // only markdown is viewable
+  // markdown anywhere, images ONLY under .orches-shots/ — anything else is not viewable
+  const relPosix = path.relative(root, abs).split(path.sep).join("/");
+  const inShots = relPosix === SHOTS_DIR || relPosix.startsWith(SHOTS_DIR + "/");
+  if (!abs.toLowerCase().endsWith(".md") && !(inShots && IMG_RX.test(abs))) return null;
   try {
     if (!fs.statSync(abs).isFile()) return null;
   } catch {

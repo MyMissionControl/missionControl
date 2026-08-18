@@ -465,6 +465,10 @@ async function pushTeamsScreen(panel: vscode.WebviewPanel) {
  *  drill in, click a file to open it as a full page over the grid) + nav (.. / close /
  *  localhost / ▶ ทำต่อ / GitHub). Reached by picking any project card; ▶ ทำต่อ carries
  *  the attach-or-team-picker logic. */
+const IMG_EXT_RX = /\.(?:png|jpe?g|gif|webp)$/i;
+// ภาพจาก gate จริงอยู่ราว 28-160KB · เพดานนี้กันไฟล์ที่คนวางไว้เองในโฟลเดอร์เดียวกัน
+const IMG_MAX_BYTES = 8 * 1024 * 1024;
+
 async function pushDetailScreen(panel: vscode.WebviewPanel) {
   const p = _st?.project;
   if (!p) return;
@@ -728,6 +732,40 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
           panel.webview.postMessage({ type: "doc_html", rel, error: "ไม่พบไฟล์" });
           return;
         }
+        // รูปจาก .orches-shots: ส่งเป็น data: URI ไม่ใช่ asWebviewUri
+        // ⛔ ทำไมไม่ใช้ webview uri: มันต้องมี localResourceRoots ครอบ path ของ "โปรเจกต์"
+        //    ซึ่งอยู่นอก workspace ได้ (MC เปิดที่ไหนก็จัดการโปรเจกต์ที่อื่นได้) ⇒ ต้องไปแก้ options
+        //    ของ panel ทุกครั้งที่เลือกโปรเจกต์ใหม่ · data URI ทำงานเหมือนกันทุกที่ และ webview นี้
+        //    ไม่มี CSP meta จึงโหลดได้ · ส่งทีละไฟล์ที่ถูกเลือกเท่านั้น (ภาพ gate จริง ~30-160KB)
+        if (IMG_EXT_RX.test(abs)) {
+          try {
+            const st = fs.statSync(abs);
+            if (st.size > IMG_MAX_BYTES) {
+              panel.webview.postMessage({
+                type: "doc_html",
+                rel,
+                error: `ไฟล์รูปใหญ่เกิน ${Math.round(IMG_MAX_BYTES / 1024 / 1024)}MB — เปิดใน editor แทน`,
+              });
+              return;
+            }
+            const b64 = fs.readFileSync(abs).toString("base64");
+            const mime = abs.toLowerCase().endsWith(".png")
+              ? "image/png"
+              : /\.jpe?g$/i.test(abs)
+                ? "image/jpeg"
+                : abs.toLowerCase().endsWith(".gif")
+                  ? "image/gif"
+                  : "image/webp";
+            panel.webview.postMessage({
+              type: "doc_html",
+              rel,
+              imgSrc: `data:${mime};base64,${b64}`,
+            });
+          } catch {
+            panel.webview.postMessage({ type: "doc_html", rel, error: "อ่านไฟล์รูปไม่ได้" });
+          }
+          return;
+        }
         try {
           const html = renderMarkdown(fs.readFileSync(abs, "utf8"));
           // mermaid bundle ส่งเป็น webview uri "เฉพาะเอกสารที่มีบล็อกจริง" — ไฟล์ 3.4MB ไม่ควรถูกโหลด
@@ -750,8 +788,16 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         const p = _st.project;
         const rel = typeof msg.rel === "string" ? msg.rel : "";
         if (!p || !rel) return;
-        const abs = resolveProjectFile(p.path, rel); // guards traversal + .md-only
+        const abs = resolveProjectFile(p.path, rel); // guards traversal + .md / shots-image only
         if (!abs) return;
+        // ⛔ showTextDocument กับ .png = เปิดไบต์ดิบเป็นข้อความ · `vscode.open` ใช้ image preview ของ VS Code
+        if (IMG_EXT_RX.test(abs)) {
+          void vscode.commands.executeCommand("vscode.open", vscode.Uri.file(abs), {
+            viewColumn: vscode.ViewColumn.Beside,
+            preview: true,
+          });
+          return;
+        }
         void vscode.window.showTextDocument(vscode.Uri.file(abs), {
           viewColumn: vscode.ViewColumn.Beside,
           preview: true,
@@ -1310,6 +1356,10 @@ function renderShell(): string {
   /* ── Project Detail: a single doc opened as a full page ── */
   .doc-page { padding: 4px 2px 24px; }
   .doc-body { font-size: 13px; line-height: 1.55; }
+  /* ภาพจาก .orches-shots: กว้างเต็มพื้นที่แต่ไม่ล้น · พื้นตารางหมากรุกอ่อน ๆ ให้เห็นขอบภาพที่โปร่งใส */
+  .shot { padding: 4px 0; }
+  .shot img { max-width: 100%; height: auto; display: block; border: 1px solid var(--vscode-panel-border);
+    border-radius: 4px; background: rgba(127,127,127,0.08); }
   .doc-empty { opacity: 0.55; font-size: 12px; padding: 8px 2px; }
   .doc-body h1, .doc-body h2, .doc-body h3 { margin: 12px 0 6px; line-height: 1.3; }
   .doc-body h1 { font-size: 18px; } .doc-body h2 { font-size: 16px; } .doc-body h3 { font-size: 14px; }
@@ -1767,9 +1817,12 @@ function renderShell(): string {
     _docCache = {};
     _readme = m.readme || null;
     var base = m.tree || [];
-    // README lives outside the docs tree — surface it as a selectable root file so
-    // the default-selection fallback can reach it.
-    _tree = _readme ? [{ name: (_readme.rel.split('/').pop()||'README.md'), rel:_readme.rel, kind:'file' }].concat(base) : base;
+    // ทรีเป็นโครงจริงของโปรเจกต์แล้ว ⇒ README.md อยู่ในนั้นตามที่มันอยู่จริง
+    // ⛔ เติมหัวให้เฉพาะกรณีที่หามันในทรีไม่เจอ (เช่น README อยู่ใน docs/ ที่ถูกเลือกเป็น readme
+    //    แต่ทรีถูก prune) ไม่งั้นจะโผล่สองแถว — แถวปลอมหนึ่งแถวที่ path ไม่ตรงกับของจริง
+    _tree = (_readme && !relExists(base, _readme.rel))
+      ? [{ name: (_readme.rel.split('/').pop()||'README.md'), rel:_readme.rel, kind:'file' }].concat(base)
+      : base;
     _expanded = {};
     if(hasDir(_tree, 'docs/wiki')) _expanded['docs/wiki'] = true;  // wiki open by default
     _selected = defaultSel();
@@ -1814,7 +1867,7 @@ function renderShell(): string {
         if(open) out += treeRowsHtml(n.children||[], depth+1);
       } else {
         out += '<div class="trow file'+(_selected===n.rel?' sel':'')+'" data-file="'+esc(n.rel)+'" style="padding-left:'+pad+'px">'
-          + '<span class="tri hide">▶</span>'+_icoDoc
+          + '<span class="tri hide">▶</span>'+(isImg(n.name)?_icoImg:_icoDoc)
           + '<span class="tname">'+esc(n.name)+'</span></div>';
       }
     }
@@ -1835,7 +1888,7 @@ function renderShell(): string {
       ? (_docCache[_selected]!==undefined ? _docCache[_selected] : '<div class="doc-empty">กำลังโหลด…</div>')
       : '<div class="doc-empty">เลือกไฟล์จากด้านซ้าย</div>';
     var bar = _selected
-      ? '<div class="pbar">'+_icoDoc+'<span class="pfname">'+esc(selName())+'</span><span class="pfill"></span><button class="opened" title="เปิดไฟล์นี้เป็นแท็บ editor">เปิดใน editor</button></div>'
+      ? '<div class="pbar">'+(isImg(selName())?_icoImg:_icoDoc)+'<span class="pfname">'+esc(selName())+'</span><span class="pfill"></span><button class="opened" title="เปิดไฟล์นี้เป็นแท็บ editor">เปิดใน editor</button></div>'
       : '';
     el("content").innerHTML = '<div class="psplit">'
       + '<div class="tree"><div class="feye">FILES</div>'+treeHtml+'</div>'
@@ -1911,15 +1964,19 @@ function renderShell(): string {
         for(var i=0;i<nodes.length;i++) nodes[i].insertAdjacentHTML('beforebegin','<div class="doc-empty">'+msg+'</div>');
       });
   }
+  var _icoImg = '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="#6bbf6b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-6 6"/></svg>';
+  function isImg(name){ return /\.(png|jpe?g|gif|webp)$/i.test(name||''); }
   function paintDocBody(html){
     var body=el("content").querySelector('.pbody');
     if(!body) return;
     body.innerHTML=html;
     renderMermaidIn(body);
   }
-  function handleDocHtml(rel, html, error, mermaidUri){
+  function handleDocHtml(rel, html, error, mermaidUri, imgSrc){
     if(mermaidUri) _mmUri=mermaidUri;
-    var out = error ? '<div class="doc-empty">'+esc(error)+'</div>' : (html||'');
+    var out = error ? '<div class="doc-empty">'+esc(error)+'</div>'
+      : imgSrc ? '<div class="shot"><img src="'+imgSrc+'" alt="'+esc(rel)+'"/></div>'
+      : (html||'');
     _docCache[rel]=out;
     if(_selected===rel) paintDocBody(out);
   }
@@ -2244,7 +2301,7 @@ function renderShell(): string {
     else if(m.type==="screen_teams") renderTeams(m);
     else if(m.type==="screen_orch") renderOrch(m);
     else if(m.type==="screen_detail") renderDetail(m);
-    else if(m.type==="doc_html") handleDocHtml(m.rel, m.html, m.error, m.mermaidUri);
+    else if(m.type==="doc_html") handleDocHtml(m.rel, m.html, m.error, m.mermaidUri, m.imgSrc);
     else if(m.type==="preview_state") handlePreviewState(m.running);
     else if(m.type==="disarm_all") disarmAll();  // panel ถูกซ่อน/สลับ tab (backend แจ้งมา) → เลิก arm ค้าง
     else if(m.type==="git_auto_result") handleAutoResult(m.path,m.message,m.gen);
