@@ -116,7 +116,9 @@ export function planVault(
     // The summary note is a folder note and claims its filename first, so a doc
     // that happens to share the name gets suffixed instead of colliding.
     const note = projectNoteName(prefix);
-    const used = new Set<string>([`${note}.md`.toLowerCase()]);
+    // ⛔ โน้ตแกลเลอรีต้องจองชื่อไว้ด้วย ไม่งั้นไฟล์จริงชื่อ `<project>-shots.md` ใน repo จะถูก symlink
+    //   ทับตำแหน่งเดียวกัน แล้ว writeVault จะปฏิเสธเงียบ ๆ (skipped) = แกลเลอรีหายไปโดยไม่มีใครรู้
+    const used = new Set<string>([`${note}.md`.toLowerCase(), `${note}-shots.md`.toLowerCase()]);
     const mine = projectLinks(row.path, prefix, used);
     links.push(...mine);
     // Every ancestor of every link, shallowest first — writeVault creates dirs from
@@ -134,6 +136,9 @@ export function planVault(
     }
     // rendered LAST so the note can link the docs that actually got linked
     notes.push({ rel: `${prefix}/${note}.md`, body: renderProjectNote(row, prefix, mine) });
+    // ...และโน้ตแกลเลอรีเฉพาะเมื่อมีรูปจริง (ไม่มีรูป = ไม่สร้างไฟล์ว่างทิ้งไว้ให้ prune ตามเก็บ)
+    if (mine.some((l) => l.rel.startsWith(`${prefix}/${SHOTS_DIR}/`) && IMG_EXT.has(path.extname(l.rel).toLowerCase())))
+      notes.push({ rel: `${prefix}/${note}-shots.md`, body: renderShotsNote(row, prefix, mine) });
   }
   return { dirs, links, notes, projects: planned.length };
 }
@@ -147,9 +152,27 @@ export function wikilink(vaultPath: string, alias: string, inTable = false): str
   return `[[${vaultPath}${inTable ? "\\|" : "|"}${mdCell(alias)}]]`;
 }
 
+/** ⛔ ฝังรูป = `!` นำหน้า + **เก็บนามสกุลไว้** + ห้ามมี alias pipe (ต่างจาก wikilink() สามข้อ)
+ *  เอา `.md` ออกไม่ได้เหมือนลิงก์เอกสาร: ตัวฝังรูปหาไฟล์จากชื่อที่มีนามสกุลจริง แล้วเช็คกับ IMG_EXT */
+export function imageEmbed(vaultPath: string): string {
+  return `![[${vaultPath}]]`;
+}
+
 /** Obsidian excludes any path containing a dot-prefixed segment from its index, so
  *  ".orches-shots/x.png" would exist on disk and be invisible in the app. Strip the
  *  leading dots — the only place the vault path differs from the repo path. */
+/** ⛔⛔ นามสกุลที่ Obsidian วาดเป็นรูปได้ — คัดจากลิสต์ในไบนารีจริง (obsidian-1.13.7.asar @1838285:
+ *  `["bmp","png","jpg","jpeg","gif","svg","webp","avif"]`) ไม่ใช่เดาเอง · ตัวฝัง `![[x.png]]` เช็คลิสต์นี้
+ *  ก่อนเรียก vault.getResourcePath (asar @2911193) ⇒ นามสกุลนอกลิสต์จะกลายเป็นลิงก์เปล่า ไม่ใช่รูป */
+const IMG_EXT = new Set([".bmp", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif"]);
+/** โฟลเดอร์รูปของ orches หลังถอดจุดแล้ว (ดู vaultRel) */
+const SHOTS_DIR = "orches-shots";
+
+/** เรียงแบบมองเลขเป็นเลข: `sprint-2` ต้องมาก่อน `sprint-10` (เรียงสตริงจะสลับกัน) */
+function natCmp(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+}
+
 export function vaultRel(rel: string): string {
   return rel
     .split("/")
@@ -291,6 +314,7 @@ export function renderProjectNote(
     `percent_done: ${row.percentDone}`,
     `updated: ${row.updated ?? "null"}`,
     `has_preview: ${row.hasPreview}`,
+    `shots: ${shotLinks(prefix, links).length}`,
     `deleted: ${row.deleted === true}`,
     `project_path: ${yamlStr(row.path)}`,
     "tags:",
@@ -357,7 +381,76 @@ export function renderProjectNote(
     ? ["## เอกสาร", "", ...docs.map((d) => `- ${wikilink(`${dir}/${d}`, d)}`), ""]
     : [];
 
-  return [...fm, ...head, ...timeline, ...docsSection].join("\n");
+  // ⛔⛔ รูปอยู่ใน "โน้ตแยก" ไม่ใช่ที่นี่ — โน้ตนี้คือหน้าที่ถูกเปิดบ่อยสุด และของจริงมีโปรเจกต์ที่รูป
+  //   54 ใบ (newflow9/newflow10) ⇒ ฝังตรงนี้เท่ากับบังคับโหลดรูป 54 ใบทุกครั้งที่เปิดสรุปโปรเจกต์
+  //   = ทำหน้าที่ดีอยู่แล้วให้แย่ลง · ที่นี่ให้แค่ "ทางไป" หนึ่งบรรทัด
+  const nShots = shotLinks(dir, links).length;
+  const shotsSection = nShots
+    ? [
+        "## รูปหน้าจอ",
+        "",
+        `- ${wikilink(`${dir}/${projectNoteName(dir)}-shots`, `รูปหน้าจอ ${nShots} ใบ`)}`,
+        "",
+      ]
+    : [];
+
+  return [...fm, ...head, ...timeline, ...docsSection, ...shotsSection].join("\n");
+}
+
+/** ลิงก์รูปทั้งหมดของโปรเจกต์นี้ (เรียงแบบเห็นเลขเป็นเลข) — สูตรเดียวที่ทั้งโน้ตหลัก, โน้ตแกลเลอรี
+ *  และ frontmatter `shots:` ใช้ร่วมกัน · สองสูตรคือทางที่ทำให้เลขในตารางไม่ตรงกับรูปที่โชว์ */
+function shotLinks(dir: string, links: VaultLink[]): string[] {
+  const head = `${dir}/${SHOTS_DIR}/`;
+  return links
+    .map((l) => l.rel)
+    .filter((rel) => rel.startsWith(head) && IMG_EXT.has(path.extname(rel).toLowerCase()))
+    .sort(natCmp);
+}
+
+/** โน้ตแกลเลอรีของโปรเจกต์เดียว: หัวข้อย่อยตามที่รูปถูกเก็บไว้จริง + รูปฝังใต้หัวข้อนั้น
+ *  ⛔ ต้องมี MC_MARKER: prune ลบได้เฉพาะไฟล์ .md ที่มี marker ⇒ ไม่มี marker = โน้ตของโปรเจกต์ที่ถูกลบ
+ *    ไปแล้วจะค้างใน vault ตลอดกาล และยังกันโฟลเดอร์แม่ไม่ให้ถูกลบด้วย (prune ลบ dir เฉพาะที่ว่างเปล่า)
+ *  ⛔ จัดกลุ่มด้วย "ทุก segment ระหว่าง orches-shots/ กับชื่อไฟล์" ไม่ใช่ hardcode `sprint-N/role`:
+ *    ของจริงมีสี่รูปทรงพร้อมกัน (sprint/role/route · sprint/role/viewport/route · viewport/route · แบน) */
+export function renderShotsNote(row: ProjectRow, prefix: string, links: VaultLink[]): string {
+  const shots = shotLinks(prefix, links);
+  const head = `${prefix}/${SHOTS_DIR}/`;
+  const groups = new Map<string, string[]>();
+  for (const rel of shots) {
+    const parts = rel.slice(head.length).split("/");
+    const key = parts.slice(0, -1).join(" · ");
+    (groups.get(key) ?? groups.set(key, []).get(key)!).push(rel);
+  }
+  // กลุ่มที่ไม่มีโฟลเดอร์ (รูปแบนที่รากของ shots) ไปท้ายสุดใต้หัวข้อของตัวเอง — ถ้าปล่อยลอย
+  // มันจะไปอยู่ในพับของหัวข้อก่อนหน้า ซึ่งอ่านว่าเป็นรูปของ sprint นั้นทั้งที่ไม่ใช่
+  const keys = [...groups.keys()].filter((k) => k).sort(natCmp);
+  if (groups.has("")) keys.push("");
+
+  const body: string[] = [];
+  for (const k of keys) {
+    body.push(`### ${k || "อื่น ๆ"}`, "");
+    for (const rel of groups.get(k)!) body.push(imageEmbed(rel), "");
+  }
+
+  return [
+    "---",
+    MC_MARKER,
+    "mc: shots",
+    `project: ${yamlStr(row.name)}`,
+    `shots: ${shots.length}`,
+    `project_path: ${yamlStr(row.path)}`,
+    "tags:",
+    `  - mc/shots`,
+    "---",
+    "",
+    `# ${row.name} — รูปหน้าจอ`,
+    "",
+    `รูปทั้งหมด ${shots.length} ใบที่ /orches ถ่ายไว้ (ไฟล์จริงอยู่ใน repo — ในนี้เป็น symlink ไม่ได้ก๊อป)`,
+    "",
+    `- ${wikilink(`${prefix}/${projectNoteName(prefix)}`, row.name)}`,
+    "",
+    ...body,
+  ].join("\n");
 }
 
 /** The vault's front page: a Dataview table over every project note. Takes the
@@ -384,7 +477,7 @@ export function renderIndexNote(planned: PlannedProject[]): string {
     "",
     "```dataview",
     'TABLE WITHOUT ID file.link AS "โปรเจค", status, percent_done AS "%",',
-    '  (sprints_done + "/" + sprints_total) AS "sprint", updated AS "อัปเดต"',
+    '  (sprints_done + "/" + sprints_total) AS "sprint", shots AS "รูป", updated AS "อัปเดต"',
     "FROM #mc/project",
     "SORT updated DESC",
     "```",

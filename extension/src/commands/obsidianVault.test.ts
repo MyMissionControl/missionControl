@@ -86,9 +86,10 @@ test("planVault: one folder per project, folder note, and the project's real tre
   expect(plan.dirs).toContain(`${VAULT_TOP}/alpha`);
   expect(plan.dirs).toContain(`${VAULT_TOP}/alpha/docs`);
   expect(plan.dirs).toContain(`${VAULT_TOP}/alpha/docs/wiki`);
-  // folder note + vault index note
+  // folder note + vault index note + โน้ตแกลเลอรี (fixture มีรูป 1 ใบ — ดูหมวด screenshot gallery)
   expect(plan.notes.map((n) => n.rel).sort()).toEqual([
     `${VAULT_TOP}/${VAULT_TOP}.md`,
+    `${VAULT_TOP}/alpha/alpha-shots.md`,
     `${VAULT_TOP}/alpha/alpha.md`,
   ]);
 
@@ -603,4 +604,111 @@ test("renderProjectNote: a sprint doc is in the table, not repeated in the docs 
   const docs = (note?.body ?? "").split("## เอกสาร")[1] ?? "";
   expect(docs).not.toContain("alpha-sprint-10");
   expect(docs).toContain("docs/wiki/overview");
+});
+
+// ------------------------------------------------------- screenshot gallery ----
+// ⛔⛔ ทำไมต้องมีอันนี้ (user เคาะ 2026-08-19 หลังไล่ของจริง): รูป orches-shots 187 ใบถูก
+//   symlink เข้า vault มานานแล้ว แต่ **ไม่มีโน้ตไหนอ้างถึงมันเลย** (`![[` = 0 ใน 366 ไฟล์)
+//   ⇒ ทางเดียวที่จะดูคือกางโฟลเดอร์ 6 ชั้นแล้วกดทีละไฟล์ ซึ่งของจริงคือสิ่งที่ user ทำเมื่อ 08:11 วันนี้
+//   (workspace.json มี leaf type=image ที่ .../sprint-3/web-admin/pc/admin.png)
+//   ⛔ ที่แก้คือ "ข้อความในโน้ต" เท่านั้น — ไม่ก๊อปรูป ไม่สร้างรูป symlink เดิมยังเป็นสำเนาเดียว
+//   ⛔ แกลเลอรีต้องอยู่ **โน้ตแยก** ไม่ใช่ในโน้ตโปรเจกต์: newflow9/newflow10 มีรูป 54 ใบต่อโปรเจกต์
+//     ⇒ ฝังในโน้ตหลักเท่ากับทำให้หน้าที่เปิดบ่อยสุดโหลดรูป 54 ใบทุกครั้ง = ทำให้ของที่ดีอยู่แล้วแย่ลง
+function addShots(p: string): void {
+  const s = path.join(p, ".orches-shots");
+  const mk = (rel: string) => {
+    fs.mkdirSync(path.dirname(path.join(s, rel)), { recursive: true });
+    fs.writeFileSync(path.join(s, rel), "png");
+  };
+  // ⛔ สี่รูปทรงนี้มีอยู่จริงทั้งหมดในเครื่อง (นับได้ 127 / 36 / 6 / 18 ใบ) — ห้ามรองรับแค่แบบเดียว
+  mk("sprint-2/web-admin/pc/admin.png"); // sprint/role/viewport/route
+  mk("sprint-10/web-admin/late.png"); // sprint/role/route (เลขสองหลัก = ต้องเรียงแบบตัวเลข)
+  mk("pc/root.png"); // ไม่มี sprint
+  mk("flat.png"); // แบนที่รากของ shots
+}
+
+test("planVault: โปรเจกต์ที่มีรูปได้โน้ตแกลเลอรีเพิ่มหนึ่งใบ (โน้ตหลักไม่บวม)", () => {
+  const base = tmp("mc-ov-shots-plan-");
+  const p = makeProject(base, "alpha");
+  addShots(p);
+  const plan = planVault([row({ name: "alpha", path: p })]);
+
+  expect(plan.notes.map((n) => n.rel).sort()).toEqual([
+    `${VAULT_TOP}/${VAULT_TOP}.md`,
+    `${VAULT_TOP}/alpha/alpha-shots.md`,
+    `${VAULT_TOP}/alpha/alpha.md`,
+  ]);
+  // ⛔ โน้ตหลักต้องไม่ฝังรูปแม้ใบเดียว — นี่คือด่านกัน regression ของหน้าที่เปิดบ่อยสุด
+  const main = plan.notes.find((n) => n.rel.endsWith("alpha/alpha.md"))!;
+  expect(main.body).not.toContain("![[");
+  // ...แต่ต้องมีทางไป
+  expect(main.body).toContain(`[[${VAULT_TOP}/alpha/alpha-shots|`);
+});
+
+test("โน้ตแกลเลอรี: ฝังด้วย ![[ ]] เต็ม path, จัดกลุ่มตาม sprint/role, เรียงเลขแบบตัวเลข", () => {
+  const base = tmp("mc-ov-shots-body-");
+  const p = makeProject(base, "alpha");
+  addShots(p);
+  const plan = planVault([row({ name: "alpha", path: p })]);
+  const g = plan.notes.find((n) => n.rel.endsWith("alpha-shots.md"))!.body;
+
+  // marker ต้องมี ไม่งั้น prune ลบโน้ตที่ค้างไม่ได้เลย (isGeneratedNote อ่านจาก frontmatter)
+  expect(g.startsWith("---\n" + MC_MARKER)).toBe(true);
+  expect(g).toContain("mc: shots");
+  // ⛔ ต้องเป็น embed (`!` นำ) และ **เก็บนามสกุล** ไว้ ไม่งั้น Obsidian ไม่วาดรูป
+  expect(g).toContain(`![[${VAULT_TOP}/alpha/orches-shots/sprint-1/web-shell/login.png]]`);
+  expect(g).toContain(`![[${VAULT_TOP}/alpha/orches-shots/sprint-2/web-admin/pc/admin.png]]`);
+  expect(g).toContain(`![[${VAULT_TOP}/alpha/orches-shots/flat.png]]`);
+  // หัวข้อย่อย = พับได้ในตัว Obsidian (นี่คือวิธีคุมโน้ต 54 รูปโดยไม่ต้องเขียนโค้ดคุมเอง)
+  expect(g).toContain("### sprint-1 · web-shell");
+  expect(g).toContain("### sprint-2 · web-admin · pc");
+  expect(g).toContain("### pc");
+  // ⛔ dot-dir ต้องถูกถอดจุดเหมือน symlink ที่วางไว้ ไม่งั้นลิงก์ชี้ไปที่ไม่มีในดัชนี Obsidian
+  expect(g).not.toContain(".orches-shots");
+  // ⛔ ไฟล์ที่ไม่ใช่รูปห้ามหลุดเข้ามา (ในทรีเดียวกันมี render.log)
+  expect(g).not.toContain("render.log");
+  // sprint-10 ต้องอยู่หลัง sprint-2 (เรียงแบบสตริงจะได้ 10 ก่อน 2)
+  expect(g.indexOf("### sprint-2")).toBeLessThan(g.indexOf("### sprint-10"));
+});
+
+test("ไม่มีรูป = ไม่มีโน้ตแกลเลอรี และโน้ตหลักไม่มีลิงก์ค้าง", () => {
+  // ⛔ ชื่อ temp dir ห้ามมีคำที่กำลังจะ assert ว่า "ไม่มี": `project_path` ในโน้ตคือ path จริงของโปรเจกต์
+  //   ⇒ prefix ชื่อ mc-ov-shots-none- ทำให้ not.toContain("-shots") แดงทั้งที่โค้ดถูก (เจอสดตอนเขียนเทสนี้)
+  const base = tmp("mc-ov-nopic-");
+  const p = makeProject(base, "alpha");
+  fs.rmSync(path.join(p, ".orches-shots"), { recursive: true, force: true });
+  const plan = planVault([row({ name: "alpha", path: p })]);
+
+  expect(plan.notes.some((n) => n.rel.endsWith("-shots.md"))).toBe(false);
+  const main = plan.notes.find((n) => n.rel.endsWith("alpha/alpha.md"))!;
+  expect(main.body).not.toContain("alpha-shots");
+  expect(main.body).not.toContain("## รูปหน้าจอ");
+  expect(main.body).toContain("shots: 0"); // ฟิลด์ยังอยู่เสมอ เพื่อให้ query ตอบ "0" ได้ ไม่ใช่ว่าง
+});
+
+test("จำนวนรูปเป็นฟิลด์ที่ query ได้ + ตารางหน้าแรกมีคอลัมน์รูป", () => {
+  const base = tmp("mc-ov-shots-count-");
+  const p = makeProject(base, "alpha");
+  addShots(p);
+  const plan = planVault([row({ name: "alpha", path: p })]);
+  const main = plan.notes.find((n) => n.rel.endsWith("alpha/alpha.md"))!.body;
+  expect(main).toContain("shots: 5"); // 1 จาก makeProject + 4 จาก addShots
+  const index = plan.notes.find((n) => n.rel === `${VAULT_TOP}/${VAULT_TOP}.md`)!.body;
+  expect(index).toContain("shots");
+});
+
+test("โน้ตแกลเลอรีลงดิสก์จริงและ prune จับได้ (มี marker)", () => {
+  const base = tmp("mc-ov-shots-disk-");
+  const p = makeProject(base, "alpha");
+  addShots(p);
+  const vault = tmp("mc-ov-shots-vault-");
+  const plan = planVault([row({ name: "alpha", path: p })]);
+  writeVault(plan, vault);
+  const abs = path.join(vault, VAULT_TOP, "alpha", "alpha-shots.md");
+  expect(fs.existsSync(abs)).toBe(true);
+  expect(isGeneratedNote(abs)).toBe(true);
+  // รูปที่ถูกฝังต้องเปิดได้จริงผ่าน symlink ที่ plan วางไว้
+  const shot = path.join(vault, VAULT_TOP, "alpha", "orches-shots", "flat.png");
+  expect(fs.existsSync(shot)).toBe(true); // existsSync ตาม symlink = ปลายทางมีจริง
+  expect(fs.lstatSync(shot).isSymbolicLink()).toBe(true);
 });
