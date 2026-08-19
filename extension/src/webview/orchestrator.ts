@@ -37,6 +37,7 @@ import { openClaudeViewDeferred } from "./claudeView";
 import {
   isPreviewAvailable,
   isPreviewRunning,
+  readPreviewBootError,
   togglePreview,
   waitForPreviewUrl,
 } from "../commands/previewOps";
@@ -842,6 +843,17 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         const { started } = togglePreview(p.path);
         if (started) {
           const url = await waitForPreviewUrl(p.path);
+          if (!url) {
+            // ⛔ no URL = the server never came up. Opening a browser anyway (the old
+            //   :3000 fallback) showed a dead tab and reported "running" — the user saw
+            //   "localhost ไม่ติด" with nothing anywhere saying why.
+            const why = readPreviewBootError(p.path);
+            void vscode.window.showErrorMessage(
+              `เปิด localhost '${p.name}' ไม่สำเร็จ — dev server ไม่ขึ้น${why ? `: ${why}` : " (ไม่มีข้อความจาก .orches-preview.sh)"}`,
+            );
+            panel.webview.postMessage({ type: "preview_state", running: false });
+            return;
+          }
           void vscode.env.openExternal(vscode.Uri.parse(url));
           panel.webview.postMessage({ type: "preview_state", running: true, url });
           vscode.window.setStatusBarMessage(`Orchestrator: localhost '${p.name}' → ${url}`, 5000);

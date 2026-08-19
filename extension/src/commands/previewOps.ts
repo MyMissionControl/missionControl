@@ -5,6 +5,8 @@ import * as path from "node:path";
 const SCRIPT = ".orches-preview.sh";
 const PIDF = ".orches-preview.pid";
 const LOGF = ".orches-preview.log";
+/** The toggle script's OWN stdout/stderr (why it refused to boot), not the server log. */
+const BOOTLOG = ".orches-preview.boot.log";
 
 /** The dev-server URL printed in the preview log (Next :3000 / Vite :5173 / py :8000).
  *  0.0.0.0 and 127.0.0.1 are normalized to localhost so the browser opens cleanly. */
@@ -45,22 +47,67 @@ export function isPreviewRunning(projectPath: string): boolean {
  *  Callers MUST gate on isPreviewAvailable() first. */
 export function togglePreview(projectPath: string): { started: boolean } {
   const wasRunning = isPreviewRunning(projectPath);
+  // The script's own output is the only place that says WHY it refused to boot
+  // ("unknown stack", "npm install failed"). It used to go to stdio:"ignore", so a
+  // failed start was indistinguishable from a slow one. Truncate per start: the
+  // boot log describes THIS attempt only.
+  let out: number | "ignore" = "ignore";
+  try {
+    out = fs.openSync(path.join(projectPath, BOOTLOG), "w");
+  } catch {
+    /* unwritable project dir — fall back to a silent start rather than not starting */
+  }
   const child = cp.spawn("bash", [path.join(projectPath, SCRIPT)], {
     cwd: projectPath,
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", out, out],
   });
   child.unref();
+  if (typeof out === "number") {
+    try {
+      fs.closeSync(out);
+    } catch {
+      /* already closed */
+    }
+  }
   return { started: !wasRunning };
 }
 
-/** Poll the preview log for the served URL; fall back to :3000 after timeout. */
+/** Last non-empty line the toggle script printed on this attempt — the message to show
+ *  the user when no URL ever appeared. null = it left nothing behind. */
+export function readPreviewBootError(projectPath: string): string | null {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(projectPath, BOOTLOG), "utf8");
+  } catch {
+    return null;
+  }
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  return lines.length ? lines[lines.length - 1] : null;
+}
+
+/** Poll the preview log for the served URL.
+ *  Returns null when the server never came up — callers must NOT open a browser then.
+ *  ⛔ This used to return "http://localhost:3000" on timeout: a project whose toggle
+ *  script exited 1 still opened a dead tab and reported "running" (noDB, 2026-08-19).
+ *  A fabricated URL turns "it failed" into "it works but the page is broken".
+ *
+ *  `timeoutMs` is the wait for a quiet boot; while the script is still WRITING (a cold
+ *  `npm install` can take minutes) the wait extends up to `hardCapMs`.
+ */
 export async function waitForPreviewUrl(
   projectPath: string,
   timeoutMs = 15000,
-): Promise<string> {
+  hardCapMs = 300000,
+): Promise<string | null> {
   const logPath = path.join(projectPath, LOGF);
-  const deadline = Date.now() + timeoutMs;
+  const bootPath = path.join(projectPath, BOOTLOG);
+  const startedAt = Date.now();
+  let lastSize = -1;
+  let lastGrowth = startedAt;
   for (;;) {
     let text = "";
     try {
@@ -70,7 +117,19 @@ export async function waitForPreviewUrl(
     }
     const url = parsePreviewUrl(text);
     if (url) return url;
-    if (Date.now() >= deadline) return "http://localhost:3000";
-    await new Promise((r) => setTimeout(r, 500));
+    // progress = either file still growing (install/compile in flight)
+    let size = text.length;
+    try {
+      size += fs.statSync(bootPath).size;
+    } catch {
+      /* no boot log (older projects) */
+    }
+    const now = Date.now();
+    if (size !== lastSize) {
+      lastSize = size;
+      lastGrowth = now;
+    }
+    if (now - lastGrowth >= timeoutMs || now - startedAt >= hardCapMs) return null;
+    await new Promise((r) => setTimeout(r, 250));
   }
 }
