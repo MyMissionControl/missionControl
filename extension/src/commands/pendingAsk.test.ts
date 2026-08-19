@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   autoOpenSkipReason,
+  nagDue,
   buildInModeArgs,
   buildKeyArgs,
   buildUncopyArgs,
@@ -511,5 +512,24 @@ describe("autoOpenSkipReason", () => {
     const r = autoOpenSkipReason({ openBox: false, unseenHits: 1, clients: 2 });
     expect(r).toContain("attach");
     expect(r).toContain("2");
+  });
+});
+
+// ── เตือนซ้ำเมื่อไม่มีใครตอบนานเกินไป (ปิดช่อง "attach ค้างไว้แล้วลืม" + "ปิดไปแล้วไม่เด้งอีก") ──
+describe("nagDue", () => {
+  const MS = 10 * 60 * 1000;
+  test("ยังไม่ถึงเวลา = ไม่เตือน", () => {
+    expect(nagDue({ waitedMs: 60_000, nagMs: MS, alreadyNagged: false })).toBe(false);
+  });
+  test("ถึงเวลาแล้ว = เตือน", () => {
+    expect(nagDue({ waitedMs: MS, nagMs: MS, alreadyNagged: false })).toBe(true);
+    expect(nagDue({ waitedMs: MS + 1, nagMs: MS, alreadyNagged: false })).toBe(true);
+  });
+  test("⛔ เตือนแล้วห้ามเตือนซ้ำ (ไม่งั้นกวนทุก 4 วิ = บั๊กเดิมที่กฎ attach มีไว้กัน)", () => {
+    expect(nagDue({ waitedMs: MS * 5, nagMs: MS, alreadyNagged: true })).toBe(false);
+  });
+  test("ตั้ง 0 หรือค่าพิการ = ปิดฟีเจอร์", () => {
+    expect(nagDue({ waitedMs: MS * 9, nagMs: 0, alreadyNagged: false })).toBe(false);
+    expect(nagDue({ waitedMs: MS * 9, nagMs: Number.NaN, alreadyNagged: false })).toBe(false);
   });
 });

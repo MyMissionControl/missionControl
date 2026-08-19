@@ -140,6 +140,11 @@
     "configuration": {
       "title": "Mission Control",
       "properties": {
+        "missioncontrol.pendingAsk.nagMinutes": {
+          "type": "number",
+          "default": 10,
+          "description": "ถ้าคำถามเดิมยังไม่มีใครตอบเกินกี่นาที ให้เด้งกล่องซ้ำหนึ่งครั้ง (ไม่แย่งโฟกัส) แม้จะเคยปิดไปแล้วหรือมีคนเปิดเพนนั้นค้างอยู่ · 0 = ปิด"
+        },
         "missioncontrol.pendingAsk.enabled": {
           "type": "boolean",
           "default": true,

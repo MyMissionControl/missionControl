@@ -411,6 +411,20 @@ export function parsePaneList(raw: string): PaneRow[] {
  *  is not a clean non-negative integer is treated as "do not show": popping a
  *  panel over someone's screen on a garbled count is the failure that annoys,
  *  and the status bar + `pendingAskCommand` still offer a way in by hand. */
+/** ถึงเวลา "เตือนซ้ำ" หรือยัง — กล่องเดิมที่ยังไม่มีใครตอบนานเกิน nagMs.
+ *
+ *  ⛔⛔ ทำไมต้องมี: กฎสองข้อที่ถูกต้องทั้งคู่รวมกันแล้วทำให้ run ค้างเงียบได้จริง —
+ *  (1) มีคน attach = ไม่เด้ง (กฎ 2026-08-16) แต่ "เปิดแท็บค้างไว้" ไม่เท่ากับ "กำลังมองอยู่"
+ *  (2) กล่องที่เคยเด้งแล้วถูกปิด จะไม่เด้งอีกเลย (`_seen` ไม่เคยล้าง)
+ *  ⇒ ทางแก้ที่ครอบทั้งสองข้อด้วยกฎเดียว: เงียบได้ แต่ถ้ายังไม่มีใครตอบเกิน N นาที ให้พูดหนึ่งครั้ง
+ *  ⛔ ครั้งเดียวต่อคำถาม (alreadyNagged) — เตือนทุก tick คือเหตุผลที่กฎเดิมมีอยู่แต่แรก
+ *  ⛔ nagMs <= 0 = ปิดฟีเจอร์ (คนที่นั่งเฝ้าจออยู่ตลอดไม่ต้องถูกกวน) */
+export function nagDue(o: { waitedMs: number; nagMs: number; alreadyNagged: boolean }): boolean {
+  if (o.alreadyNagged) return false;
+  if (!Number.isFinite(o.nagMs) || o.nagMs <= 0) return false;
+  return o.waitedMs >= o.nagMs;
+}
+
 /** ทำไมกล่องไม่เด้งเอง — "" = มันจะเด้ง.
  *
  *  ⛔⛔ ทำไมต้องพิมพ์บอก: อาการ "popup ไม่เด้ง" ถูกบันทึกเป็น OPEN BUG ไว้ตั้งแต่ 2026-08-12

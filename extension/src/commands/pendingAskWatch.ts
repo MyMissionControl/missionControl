@@ -45,6 +45,7 @@ import {
   isDigitAnswerable,
   isInMode,
   isMultiAnswerable,
+  nagDue,
   parseAskFromPane,
   parsePaneList,
   parseReviewFromPane,
@@ -69,6 +70,10 @@ const CLAUDE_CMD = /^(claude|node|bun)$/;
 
 /** Boxes already put in front of the user — never nag on every 4s tick. */
 const _seen = new Set<string>();
+/** เห็นคำถามนี้ครั้งแรกเมื่อไร (epoch ms) — ฐานของการ "เตือนซ้ำเมื่อไม่มีใครตอบนานเกินไป" */
+const _firstSeen = new Map<string, number>();
+/** เตือนซ้ำไปแล้ว — ครั้งเดียวต่อคำถามต่ออายุ window (ดู nagDue) */
+const _nagged = new Set<string>();
 /** The box on screen right now, so the poll can close it if the question gets
  *  answered in the pane instead. */
 // ⛔ `panel: null` = the box is showing INSIDE the sidebar (no editor group was opened).
@@ -92,6 +97,12 @@ let _ticking = false;
 
 function enabled(): boolean {
   return vscode.workspace.getConfiguration("missioncontrol").get<boolean>("pendingAsk.enabled", true);
+}
+
+/** นานเท่าไรถึงถือว่า "ไม่มีใครตอบ" แล้วต้องพูดขึ้นมาหนึ่งครั้ง · 0 = ปิด */
+function nagMs(): number {
+  const m = vscode.workspace.getConfiguration("missioncontrol").get<number>("pendingAsk.nagMinutes", 10);
+  return Number.isFinite(m) && m > 0 ? m * 60_000 : 0;
 }
 
 /** Run a tmux command off the extension-host thread. Resolves to null on any
@@ -305,7 +316,7 @@ function showInSidebar(hit: PendingHit): boolean {
   return true;
 }
 
-function showBox(hit: PendingHit): void {
+function showBox(hit: PendingHit, opts: { preserveFocus?: boolean } = {}): void {
   if (showInSidebar(hit)) return;
   const panel = vscode.window.createWebviewPanel(
     "mcPendingAsk",
@@ -313,7 +324,9 @@ function showBox(hit: PendingHit): void {
     // popup) — a tab carrying both ran ~60 characters and pushed every other tab
     // off the bar.
     tabLabel("รอคำตอบ", hit.session, 16),
-    { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
+    // ⛔ การเตือนซ้ำต้องไม่แย่งโฟกัส: มันเด้งตอนคนกำลังพิมพ์อยู่ที่อื่น (นั่นคือเหตุผลที่ต้องเตือน)
+    //   กล่องแรกยังแย่งโฟกัสเหมือนเดิม — ตอนนั้นคนเพิ่งถูกถามและควรได้ตอบทันที
+    { viewColumn: vscode.ViewColumn.Beside, preserveFocus: opts.preserveFocus === true },
     { enableScripts: true, retainContextWhenHidden: true },
   );
   setTabIcon(panel);
@@ -383,6 +396,22 @@ async function tick(): Promise<void> {
   }
   _lastHits = hits;
 
+  // ⭐ จับเวลา "รอมานานแค่ไหน" ต่อคำถาม แล้วลืมของที่หายไปแล้ว (กันแมพโตไม่จำกัด)
+  const now = Date.now();
+  const live = new Set(hits.map((h) => h.key));
+  for (const h of hits) if (!_firstSeen.has(h.key)) _firstSeen.set(h.key, now);
+  for (const k of [..._firstSeen.keys()]) if (!live.has(k)) _firstSeen.delete(k);
+  for (const k of [..._nagged]) if (!live.has(k)) _nagged.delete(k);
+  const overdue = hits.find((h) =>
+    nagDue({ waitedMs: now - (_firstSeen.get(h.key) ?? now), nagMs: nagMs(), alreadyNagged: _nagged.has(h.key) }),
+  );
+  /** เตือนซ้ำหนึ่งครั้ง — ใช้เมื่อเส้นปกติเลือกที่จะเงียบ (กล่องเคยปิดไปแล้ว / มีคน attach อยู่) */
+  const nag = (): void => {
+    if (!overdue) return;
+    _nagged.add(overdue.key);
+    showBox(overdue, { preserveFocus: true });
+  };
+
   if (_open) {
     // Answered in the pane while the box was up → close it rather than leave a
     // dead box whose click would send a keystroke nobody is waiting for.
@@ -393,6 +422,7 @@ async function tick(): Promise<void> {
   const next = hits.find((h) => !_seen.has(h.key));
   if (!next) {
     refreshStatus(hits, autoOpenSkipReason({ openBox: false, unseenHits: 0, clients: 0 }));
+    nag();
     return;
   }
   // ⛔⛔ Every hit here is a NATIVE Claude Code box, so if a human is attached to that
@@ -404,7 +434,10 @@ async function tick(): Promise<void> {
   const clients = sessionClients(parseTmuxSessions(sess ?? ""), next.session);
   const skip = autoOpenSkipReason({ openBox: false, unseenHits: 1, clients });
   refreshStatus(hits, skip);
-  if (skip) return;
+  if (skip) {
+    nag();
+    return;
+  }
   showBox(next);
 }
 
