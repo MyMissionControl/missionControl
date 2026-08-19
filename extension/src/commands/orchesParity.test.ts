@@ -20,13 +20,25 @@
  *  still runs green — but it must never pass silently while the engine is present.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 
 import { parseStateValue } from "./orchestratorResume";
 import { isSafeModelId } from "./teamsModel";
+
+// ⛔ mkdtempSync ทิ้งโฟลเดอร์ไว้ตลอดกาล: สวีตนี้เปิด 5 ที่ ⇒ ทุกครั้งที่รัน `bun test src` /tmp โตขึ้น 5 dir
+//   (เจอจริง 2026-08-19: /tmp มี orches-parity-* ค้าง 16 dir จากการรันวันเดียว)
+const TMPDIRS: string[] = [];
+function tmpProj(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  TMPDIRS.push(d);
+  return d;
+}
+afterAll(() => {
+  for (const d of TMPDIRS) rmSync(d, { recursive: true, force: true });
+});
 
 const INTG = process.env.ORCHES_INTG || join(homedir(), ".claude/skills/orches-drive/orches-integrate.sh");
 const HAVE = existsSync(INTG);
@@ -55,7 +67,7 @@ const STATE_CASES: Array<[name: string, key: string, value: string]> = [
 ];
 
 test.if(HAVE)("state: bash writer -> both parsers read the same value", () => {
-  const proj = mkdtempSync(join(tmpdir(), "orches-parity-"));
+  const proj = tmpProj("orches-parity-");
   for (const [name, key, value] of STATE_CASES) {
     engine(["state-set", proj, key, value]);
     const raw = readFileSync(join(proj, ".orches-state"), "utf8");
@@ -66,7 +78,7 @@ test.if(HAVE)("state: bash writer -> both parsers read the same value", () => {
 });
 
 test.if(HAVE)("state: a key the engine never wrote is absent on both sides", () => {
-  const proj = mkdtempSync(join(tmpdir(), "orches-parity-"));
+  const proj = tmpProj("orches-parity-");
   engine(["state-set", proj, "team", "brew"]);
   const raw = readFileSync(join(proj, ".orches-state"), "utf8");
   expect(parseStateValue(raw, "nope")).toBeNull();
@@ -74,7 +86,7 @@ test.if(HAVE)("state: a key the engine never wrote is absent on both sides", () 
 });
 
 test.if(HAVE)("state: last write wins on both sides (RMW keeps one row per key)", () => {
-  const proj = mkdtempSync(join(tmpdir(), "orches-parity-"));
+  const proj = tmpProj("orches-parity-");
   engine(["state-set", proj, "sprint", "1/3"]);
   engine(["state-set", proj, "sprint", "2/3"]);
   const raw = readFileSync(join(proj, ".orches-state"), "utf8");
@@ -101,7 +113,7 @@ const MODEL_CASES = [
 ];
 
 test.if(HAVE)("model id: bash guard and TS guard accept exactly the same ids", () => {
-  const teams = mkdtempSync(join(tmpdir(), "orches-parity-teams-"));
+  const teams = tmpProj("orches-parity-teams-");
   for (const model of MODEL_CASES) {
     mkdirSync(join(teams, "t"), { recursive: true });
     writeFileSync(join(teams, "t", "models.json"), JSON.stringify({ w: model }));
