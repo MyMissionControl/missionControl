@@ -90,7 +90,8 @@ export function readPreviewBootError(projectPath: string): string | null {
 }
 
 /** Poll the preview log for the served URL.
- *  Returns null when the server never came up — callers must NOT open a browser then.
+ *  Returns null when the server never came up OR died right after printing its URL —
+ *  callers must NOT open a browser then.
  *  ⛔ This used to return "http://localhost:3000" on timeout: a project whose toggle
  *  script exited 1 still opened a dead tab and reported "running" (noDB, 2026-08-19).
  *  A fabricated URL turns "it failed" into "it works but the page is broken".
@@ -115,8 +116,13 @@ export async function waitForPreviewUrl(
     } catch {
       /* log not written yet */
     }
+    // ⛔ A URL in the log only proves the server PRINTED one. Real case (noDB,
+    //   2026-08-19): port 3000 was taken, Next bounced to 3001, printed
+    //   "Local: http://localhost:3001", then exited ("Another next dev server is
+    //   already running") — the old code opened that dead 3001 tab. The pidfile is
+    //   the liveness truth: the toggle script removes it when the server dies.
     const url = parsePreviewUrl(text);
-    if (url) return url;
+    if (url && isPreviewRunning(projectPath)) return url;
     // progress = either file still growing (install/compile in flight)
     let size = text.length;
     try {

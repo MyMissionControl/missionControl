@@ -51,7 +51,24 @@ test("isPreviewRunning: alive pid true, missing/bogus pid false", () => {
 test("waitForPreviewUrl: returns URL already present in the log", async () => {
   const p = tmp();
   fs.writeFileSync(path.join(p, ".orches-preview.log"), "ready - http://localhost:4321");
+  fs.writeFileSync(path.join(p, ".orches-preview.pid"), String(process.pid)); // server alive
   expect(await waitForPreviewUrl(p, 2000)).toBe("http://localhost:4321");
+});
+
+// A URL in the log only proves the server PRINTED one, not that it survived. Real case
+// (noDB, 2026-08-19): port 3000 was taken, Next bounced to 3001, printed
+// "Local: http://localhost:3001" and died — MC opened a dead 3001 tab.
+test("waitForPreviewUrl: a printed URL is not enough — the process must be alive", async () => {
+  const p = tmp();
+  fs.writeFileSync(path.join(p, ".orches-preview.log"), "- Local: http://localhost:3001");
+  // toggle script cleaned up its pidfile when the server died
+  expect(await waitForPreviewUrl(p, 300)).toBeNull();
+  // an older script leaves a stale pidfile behind — same verdict
+  fs.writeFileSync(path.join(p, ".orches-preview.pid"), "2147480000");
+  expect(await waitForPreviewUrl(p, 300)).toBeNull();
+  // alive → the URL is real
+  fs.writeFileSync(path.join(p, ".orches-preview.pid"), String(process.pid));
+  expect(await waitForPreviewUrl(p, 300)).toBe("http://localhost:3001");
 });
 
 // The dev server never came up. Returning a made-up :3000 opened a dead tab and
@@ -72,6 +89,7 @@ test("waitForPreviewUrl: keeps waiting past the base timeout while the boot log 
   }, 100);
   setTimeout(() => {
     clearInterval(t);
+    fs.writeFileSync(path.join(p, ".orches-preview.pid"), String(process.pid));
     fs.writeFileSync(path.join(p, ".orches-preview.log"), "- Local: http://localhost:5173");
   }, 700);
   const url = await waitForPreviewUrl(p, 300, 5000);
