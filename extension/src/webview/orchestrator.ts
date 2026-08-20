@@ -1299,7 +1299,7 @@ function renderShell(): string {
     box-shadow: 0 2px 8px var(--accentGlow, rgba(64,200,234,.28)); }
   .barrow .git-go:hover, .barrow .git-go2:hover { filter: brightness(1.06);
     background: linear-gradient(180deg, var(--accent2, #40c8ea), var(--accent, #2f9dc4)); border-color: transparent; }
-  /* "Push ด้วย" = the same commit plus a push — outlined accent, one step below. */
+  /* "Push" = the same commit plus a push — outlined accent, one step below. */
   .barrow .git-pushx { color: var(--accent2, #40c8ea); border-color: var(--accent, #2f9dc4); }
   .barrow .git-pushx:hover { color: var(--accent2, #40c8ea); }
   .barrow .git-x { color: var(--pfaint, #5c6773); border-color: transparent; }
@@ -1811,7 +1811,7 @@ function renderShell(): string {
       +'<textarea class="git-msg" rows="2" style="width:100%" placeholder="commit message…"></textarea>'
       +'<div class="barrow"><button class="git-auto">✨ auto</button>'
       +'<button class="git-go">✓ Commit</button>'
-      +'<button class="git-pushx" style="display:none" title="auto เสร็จแล้ว commit + push ให้เลย · กดตอนแสงคู่ = ยกเลิกแสงทั้งหมด">⇧ Push ด้วย</button>'
+      +'<button class="git-pushx" style="display:none" title="auto เสร็จแล้ว commit + push ให้เลย · กดตอนแสงคู่ = ยกเลิกแสงทั้งหมด">⇧ Push</button>'
       +'<button class="git-x">ยกเลิก</button></div></div>';
     if (g.kind==='create-push'){ var _p=String(g.path||'').split('/').filter(Boolean); var def=_p[_p.length-1]||'';
       return '<div class="git-editor" style="display:none">'
