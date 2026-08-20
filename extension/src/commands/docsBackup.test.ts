@@ -70,3 +70,39 @@ test("snapshotProjectDocs: project with no docs/ and no README → empty backup,
 test("listBackedUpProjects: no manifest → empty array", () => {
   expect(listBackedUpProjects()).toEqual([]);
 });
+
+// ⛔ The old backup is often the ONLY copy: the project it came from was deleted.
+// snapshotProjectDocs used to rmSync(dest) as its FIRST statement and copy after,
+// so any failure mid-copy (disk full, EACCES, a source that changed shape) left the
+// previous backup destroyed and a half-written one in its place — with the manifest
+// still pointing at it, so "restore" would silently restore nothing.
+test("snapshotProjectDocs: การคัดลอกล้มเหลว → แบ็กอัปเก่าต้องไม่หาย", () => {
+  const p = makeProject("bar");
+  snapshotProjectDocs(p, "2026-07-20T00:00:00.000Z");
+  const dest = path.join(backupRoot, "bar");
+  expect(fs.readFileSync(path.join(dest, "README.md"), "utf8")).toBe("# bar");
+
+  // make the copy fail deterministically without touching permissions:
+  // README.md becomes a DIRECTORY, so existsSync() still says yes and
+  // copyFileSync throws EISDIR partway through the snapshot.
+  fs.rmSync(path.join(p, "README.md"));
+  fs.mkdirSync(path.join(p, "README.md"));
+  expect(() => snapshotProjectDocs(p, "2026-08-20T00:00:00.000Z")).toThrow();
+
+  // the first backup survived, whole
+  expect(fs.readFileSync(path.join(dest, "README.md"), "utf8")).toBe("# bar");
+  expect(fs.readFileSync(path.join(dest, "docs", "wiki", "overview.md"), "utf8")).toBe("overview");
+  const list = listBackedUpProjects();
+  expect(list).toHaveLength(1);
+  expect(list[0]).toMatchObject({ name: "bar", deletedAt: "2026-07-20T00:00:00.000Z" });
+});
+
+test("snapshotProjectDocs: ล้มเหลวแล้วไม่ทิ้งขยะ staging ไว้ในที่เก็บแบ็กอัป", () => {
+  const p = makeProject("baz");
+  fs.rmSync(path.join(p, "README.md"));
+  fs.mkdirSync(path.join(p, "README.md"));
+  expect(() => snapshotProjectDocs(p)).toThrow();
+  // nothing half-written may sit in the backup area — a stray folder there is
+  // indistinguishable from a real backup to anyone reading the directory.
+  expect(fs.readdirSync(backupRoot).filter((e) => e !== "manifest.json")).toEqual([]);
+});

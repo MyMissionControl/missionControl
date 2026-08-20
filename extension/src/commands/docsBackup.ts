@@ -51,13 +51,29 @@ export function snapshotProjectDocs(
   deletedAt: string = new Date().toISOString(),
 ): void {
   const name = path.basename(projectPath);
-  const dest = path.join(backupRoot(), name);
-  fs.rmSync(dest, { recursive: true, force: true }); // clean overwrite of any older same-name backup
-  fs.mkdirSync(dest, { recursive: true });
-  const readme = path.join(projectPath, "README.md");
-  if (fs.existsSync(readme)) fs.copyFileSync(readme, path.join(dest, "README.md"));
-  const docs = path.join(projectPath, "docs");
-  if (fs.existsSync(docs)) fs.cpSync(docs, path.join(dest, "docs"), { recursive: true });
+  const root = backupRoot();
+  const dest = path.join(root, name);
+  // ⛔ Copy into staging, THEN swap. The older backup is usually the only copy left
+  // (its project was deleted), so it must survive until the new one is complete on
+  // disk: rmSync-first meant one failed copy (disk full, EACCES, a source that
+  // changed shape) destroyed the old backup and left a half-written folder that the
+  // manifest still pointed at — a "restore" that silently restores nothing.
+  // Dot-prefixed so a half-written copy can never be mistaken for a real backup.
+  const staging = path.join(root, `.staging-${name}`);
+  fs.mkdirSync(root, { recursive: true });
+  fs.rmSync(staging, { recursive: true, force: true });
+  fs.mkdirSync(staging, { recursive: true });
+  try {
+    const readme = path.join(projectPath, "README.md");
+    if (fs.existsSync(readme)) fs.copyFileSync(readme, path.join(staging, "README.md"));
+    const docs = path.join(projectPath, "docs");
+    if (fs.existsSync(docs)) fs.cpSync(docs, path.join(staging, "docs"), { recursive: true });
+  } catch (e) {
+    fs.rmSync(staging, { recursive: true, force: true }); // leave no debris behind
+    throw e;
+  }
+  fs.rmSync(dest, { recursive: true, force: true }); // the swap: old out...
+  fs.renameSync(staging, dest); //                     ...new in, same filesystem
   const entries = readManifest();
   entries[name] = { name, backupDir: dest, deletedAt };
   writeManifest(entries);
