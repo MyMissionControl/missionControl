@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+
 import * as vscode from "vscode";
 
 import {
@@ -12,6 +14,17 @@ import {
   switchTo,
   type Provider,
 } from "../commands/accountsOps";
+import {
+  PROVIDER_PRESETS,
+  activateApiAccount,
+  apiAccountSecret,
+  clearApiRoute,
+  deleteApiAccount,
+  isSafeBaseUrl,
+  isSafeId,
+  listApiProviders,
+  saveApiAccount,
+} from "../commands/apiProvidersOps";
 import { listAzurePats } from "../commands/azurePats";
 import { fetchClaudeUsage } from "../commands/usage";
 import { setTabIcon } from "./tabIcon";
@@ -80,6 +93,87 @@ function buildView(): Record<string, unknown> {
 
 function pushList(panel: vscode.WebviewPanel): void {
   panel.webview.postMessage(buildView());
+}
+
+/** โซน API providers — provider ที่เข้าด้วย API key (z.ai/GLM, MiniMax, …) ซึ่งสลับด้วย
+ *  การเขียนบล็อก env ของ settings.json ไม่ใช่การสลับไฟล์ credentials
+ *  ⛔ กฎเดียวกับอีกสองโซน: ไม่มีค่า key จริงในข้อมูลที่ส่งออกไป มีแต่ mask */
+function pushApi(panel: vscode.WebviewPanel): void {
+  const v = listApiProviders();
+  const live = v.live;
+  const activeLabel = v.active ? v.active.provider + " / " + v.active.label : "";
+  // ⛔ แยก "vault บอกว่า active" กับ "settings.json ชี้ไปไหนจริง" ให้เห็นคนละบรรทัด:
+  //    ถ้าใครแก้ settings.json ด้วยมือ สองอย่างนี้จะไม่ตรงกัน และคนต้องรู้ทันที
+  let liveText: string;
+  if (!live) {
+    liveText = "กำลังใช้: Anthropic ปกติ (ไม่มี env ของ provider อื่นอยู่ใน settings.json)";
+  } else if (activeLabel) {
+    liveText =
+      "กำลังใช้: " + activeLabel + " · " + live.baseUrl + (live.model ? " · " + live.model : "");
+  } else {
+    liveText =
+      "กำลังใช้: " + live.baseUrl + (live.model ? " · " + live.model : "") +
+      " · ไม่ตรงกับ account ไหนใน vault (ถูกแก้ settings.json ด้วยมือ)";
+  }
+  panel.webview.postMessage({
+    type: "api",
+    liveText,
+    routed: live !== null,
+    settingsReadable: v.settingsReadable,
+    presets: PROVIDER_PRESETS.map((x) => ({ id: x.id, name: x.name, baseUrl: x.baseUrl, note: x.note })),
+    providers: v.providers.map((ps) => ({
+      provider: ps.provider,
+      title: ps.name,
+      accounts: ps.accounts.map((a) => ({
+        label: a.label,
+        active: v.active?.provider === ps.provider && v.active?.label === a.label,
+        sub:
+          a.keyMask + " · " + a.baseUrl + (a.model ? " · " + a.model : "") +
+          (a.savedAt ? " · บันทึก " + a.savedAt.slice(0, 10) : ""),
+      })),
+    })),
+  });
+}
+
+/** ยิงคำขอที่เล็กที่สุดเท่าที่เป็นไปได้ไปที่ endpoint ของ account หนึ่ง เพื่อจับ base URL /
+ *  key ที่ผิด **ก่อน** จะเอาไปตั้งทั้งเครื่อง — เพราะถ้าตั้งผิด claude ทุกตัวจะพังพร้อมกัน
+ *  ⛔ ค่าที่คืนกลับเป็นข้อความสถานะเท่านั้น ไม่มี key ไม่มี body ดิบ */
+async function testApiAccount(provider: string, label: string): Promise<{ ok: boolean; text: string }> {
+  const secret = apiAccountSecret(provider, label);
+  if (!secret) return { ok: false, text: "ไม่พบ key/base URL ของ account นี้" };
+  const url = secret.baseUrl.replace(/\/+$/, "") + "/v1/messages";
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": secret.apiKey,
+        authorization: "Bearer " + secret.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: secret.model || "claude-sonnet-4-20250514",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      signal: ctrl.signal,
+    });
+    if (res.ok) return { ok: true, text: "ต่อได้ (HTTP " + res.status + ")" };
+    // 400 = endpoint พูดภาษา Anthropic แต่ model/param ไม่ตรง ⇒ เส้นทางถูก key ผ่าน
+    if (res.status === 400) {
+      return { ok: true, text: "endpoint ตอบแบบ Anthropic (400 — น่าจะเป็นชื่อ model) เส้นทางใช้ได้" };
+    }
+    if (res.status === 401 || res.status === 403) return { ok: false, text: "key ไม่ผ่าน (HTTP " + res.status + ")" };
+    if (res.status === 404) return { ok: false, text: "ไม่มี /v1/messages ที่ URL นี้ (404) — base URL น่าจะผิด" };
+    return { ok: false, text: "HTTP " + res.status };
+  } catch (e) {
+    const m = String((e as Error)?.message ?? e);
+    return { ok: false, text: ctrl.signal.aborted ? "หมดเวลา 15 วินาที" : "ต่อไม่ได้: " + m };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** โซน Git — ⛔ ไม่มีค่า secret ในนี้เลย มีแต่ host/org + สถานะ (กฎเดียวกับ token ของ AI) */
@@ -197,9 +291,133 @@ export function openAccountsPanel(): vscode.WebviewPanel {
       case "ready":
       case "reload":
         pushList(panel);
+        pushApi(panel);
         pushGit(panel);
         void pushUsage(panel);
         return;
+
+      // ── โซน API providers ────────────────────────────────────────────────────
+      // ⛔ key มาจาก webview ครั้งเดียวตอนกดบันทึก แล้วฝั่งหน้าจอล้างช่องทันที
+      case "api_save": {
+        const prov = String(msg.provider ?? "").trim();
+        const label = String(msg.label ?? "").trim();
+        if (!isSafeId(prov) || !isSafeId(label)) {
+          void vscode.window.showErrorMessage("ชื่อ provider/account ใช้ได้เฉพาะ A-Z a-z 0-9 . _ - (1-60 ตัว)");
+          return;
+        }
+        if (!isSafeBaseUrl(msg.baseUrl)) {
+          void vscode.window.showErrorMessage("base URL ต้องเป็น http(s) เต็มรูปแบบ");
+          return;
+        }
+        const r = saveApiAccount(
+          prov,
+          label,
+          {
+            apiKey: String(msg.apiKey ?? ""),
+            baseUrl: String(msg.baseUrl ?? ""),
+            model: String(msg.model ?? ""),
+            smallFastModel: String(msg.smallFastModel ?? ""),
+          },
+          new Date().toISOString(),
+        );
+        notify(r, `บันทึก ${prov} / ${label} แล้ว (ยังไม่สลับไปใช้)`);
+        pushApi(panel);
+        return;
+      }
+
+      case "api_switch": {
+        const prov = String(msg.provider ?? "");
+        const label = String(msg.label ?? "");
+        if (!isSafeId(prov) || !isSafeId(label)) return;
+        // เตือนให้ชัดว่านี่คือระดับเครื่อง ไม่ใช่แค่แท็บนี้ — และของที่เปิดค้างไม่เปลี่ยน
+        const pick = await vscode.window.showWarningMessage(
+          `ให้ claude ทุกตัวบนเครื่องนี้วิ่งไปที่ ${prov} / ${label}?`,
+          { modal: true, detail: "เขียนบล็อก env ใน settings.json (สำรองไฟล์เดิมให้ก่อน) · มีผลกับ process ที่เปิดใหม่เท่านั้น" },
+          "สลับ",
+        );
+        if (pick !== "สลับ") return;
+        const r = activateApiAccount(prov, label);
+        notify(r, `สลับไป ${prov} / ${label} แล้ว — เปิด session ใหม่เพื่อให้มีผล`);
+        pushApi(panel);
+        return;
+      }
+
+      case "api_clear": {
+        const pick = await vscode.window.showWarningMessage(
+          "กลับไปใช้ Anthropic ปกติ?",
+          { modal: true, detail: "ลบเฉพาะ env ที่ MC เขียนไว้ ค่าอื่นใน settings.json ไม่แตะ" },
+          "กลับไปใช้ Anthropic",
+        );
+        if (pick !== "กลับไปใช้ Anthropic") return;
+        const r = clearApiRoute();
+        notify(r, "กลับไปใช้ Anthropic ปกติแล้ว — เปิด session ใหม่เพื่อให้มีผล");
+        pushApi(panel);
+        return;
+      }
+
+      case "api_test": {
+        const prov = String(msg.provider ?? "");
+        const label = String(msg.label ?? "");
+        if (!isSafeId(prov) || !isSafeId(label)) return;
+        const r = await testApiAccount(prov, label);
+        panel.webview.postMessage({ type: "api_test_result", provider: prov, label, ok: r.ok, text: r.text });
+        return;
+      }
+
+      // เปิด dashboard ของ CCS — ของนอก ไม่ใช่ทางที่ MC ใช้สลับ account/provider
+      // ⛔ `ccs config` เปิดเบราว์เซอร์เองและปลุก CLIProxy daemon (ไม่มี flag ปิด) จึงเรียกได้
+      //    เฉพาะตอนคนกดปุ่มนี้เท่านั้น ห้ามเรียกจากที่อื่นหรือเบื้องหลังเด็ดขาด
+      case "open_ccs_ui": {
+        let bin = "";
+        try {
+          // ผ่าน login shell เพราะ bin ของ bun/npm global มักไม่อยู่ใน PATH ของ extension host
+          bin = execFileSync("bash", ["-lc", "command -v ccs"], {
+            encoding: "utf8",
+            timeout: 5000,
+          }).trim();
+        } catch {
+          bin = "";
+        }
+        if (!bin) {
+          const CMD = "bun add -g @kaitranntt/ccs";
+          const pick = await vscode.window.showInformationMessage(
+            "ยังไม่ได้ลง CCS บนเครื่องนี้ — UI นั้นเป็นของ CLI ตัวนั้น ไม่ใช่ของ MC",
+            {
+              modal: true,
+              detail:
+                "MC สลับ account/provider ได้เองอยู่แล้ว ไม่ต้องพึ่ง CCS · ปุ่มนี้มีไว้เปิด UI ของเขาถ้าอยากดู\n\nลงด้วย:\n" +
+                CMD +
+                "\n\nข้อควรระวังที่อ่านจากซอร์สมาแล้ว: อย่ารัน 'ccs sync' เพราะมันเอา skills/commands ของตัวเอง symlink เข้า ~/.claude",
+            },
+            "คัดลอกคำสั่งลง",
+          );
+          if (pick) {
+            await vscode.env.clipboard.writeText(CMD);
+            vscode.window.setStatusBarMessage("คัดลอกคำสั่งแล้ว — วางใน terminal เพื่อลง", 4000);
+          }
+          return;
+        }
+        const term = vscode.window.createTerminal({ name: "CCS UI" });
+        term.sendText("ccs config");
+        term.show();
+        return;
+      }
+
+      case "api_del": {
+        const prov = String(msg.provider ?? "");
+        const label = String(msg.label ?? "");
+        if (!isSafeId(prov) || !isSafeId(label)) return;
+        const pick = await vscode.window.showWarningMessage(
+          `ลบ ${prov} / ${label} ออกจาก vault?`,
+          { modal: true, detail: "ถ้าเป็นตัวที่ใช้อยู่ จะกลับไปใช้ Anthropic ปกติให้ด้วย" },
+          "ลบ",
+        );
+        if (pick !== "ลบ") return;
+        const r = deleteApiAccount(prov, label);
+        notify(r, `ลบ ${prov} / ${label} แล้ว`);
+        pushApi(panel);
+        return;
+      }
 
       // ── modal กลางจอ: เช็ค URL แล้วตอบ host/org กลับไปโชว์ใต้ช่องกรอก ────────
       case "git_url_check": {
@@ -484,6 +702,7 @@ function renderShell(): string {
   <div class="lead">ทุกอย่างที่ MC ต่ออยู่ข้างนอก — บัญชี AI และ credential ของ git</div>
   <div class="zones">
     <button class="zone on" data-z="ai">AI accounts</button>
+    <button class="zone" data-z="api">API providers</button>
     <button class="zone" data-z="git">Git</button>
   </div>
   <div id="zone-ai">
@@ -494,6 +713,51 @@ function renderShell(): string {
     <b>usage คงเหลือ (Claude):</b> ดึงจาก endpoint <b>/api/oauth/usage</b> ของ account เอง (ไม่กิน quota) — โชว์ 5ชม/7วัน ที่เหลือ + เวลารีเซ็ต · account ที่ active ดึงได้เสมอ (token สด) · ตัวที่ save ไว้นานจน token หมดอายุจะขึ้น "สลับไปเช็ค" · endpoint นี้ private อาจเปลี่ยนได้ กด "⟳ usage" รีเฟรช (ห่าง ≥180 วิ)<br />
     <b>ความปลอดภัย:</b> token เก็บใน ~/.claude/.mc-accounts/ (เครื่องนี้เท่านั้น, สิทธิ์ 0600) ไม่ push git ไม่แสดงค่า token
   </div>
+  </div>
+
+  <div id="zone-api" style="display:none">
+    <section class="prov">
+      <div class="ph">
+        <div><h2>Provider ที่เข้าด้วย API key</h2>
+        <div class="live" id="api-live"></div></div>
+        <div class="ph-btns">
+          <button class="b ccsui">เปิด UI ของ CCS</button>
+          <button class="b apiclear">กลับไปใช้ Anthropic</button>
+          <button class="primary api-add">+ เพิ่ม account</button>
+        </div>
+      </div>
+      <div id="api-rows"></div>
+    </section>
+    <div class="note">
+      <b>ใช้ยังไง:</b> กด "+ เพิ่ม account" เลือก provider (หรือกรอกเอง) แล้ววาง base URL แบบ Anthropic กับ API key — เก็บได้หลาย provider และหลาย account ต่อ provider · กด <b>ทดสอบ</b> ก่อน แล้วค่อยกด <b>สลับ</b><br />
+      <b>ต่างจากโซน AI accounts ตรงไหน:</b> โซนนั้นสลับ <b>ไฟล์ credentials</b> ของ CLI (subscription login) · โซนนี้เขียนบล็อก <b>env ใน settings.json</b> (ANTHROPIC_BASE_URL / AUTH_TOKEN / MODEL) ซึ่งเป็นวิธีที่ Claude Code ใช้ชี้ไป endpoint อื่น<br />
+      <b>ข้อควรรู้:</b> มีผลระดับ <b>เครื่อง</b> กับ process ที่เปิด <b>ใหม่</b> เท่านั้น · MC แตะเฉพาะ env ที่ตัวเองเขียน ค่าอื่นใน settings.json (hooks, statusLine, permissions, env ของคุณ) ไม่ถูกแก้ และสำรองไฟล์เดิมไว้ที่ settings.json.mc-bak ก่อนเขียนทุกครั้ง · base URL ผิด = claude ทุกตัวพังพร้อมกัน จึงควรกดทดสอบก่อน<br />
+      <b>ความปลอดภัย:</b> key เก็บที่ ~/.claude/.mc-api-providers/ (สิทธิ์ 0600) ไม่ push git · หน้านี้เห็นแค่ค่าที่ปิดบังไว้ เช่น zai-…1234
+    </div>
+  </div>
+
+  <div id="amodal" class="modal-backdrop" style="display:none">
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <div class="mt">เพิ่ม account ของ provider</div>
+      <div class="mh" id="am-hint">endpoint ต้องรับ /v1/messages แบบ Anthropic — ดู docs ของ provider นั้น</div>
+      <div class="ml">provider</div>
+      <select id="am-preset"></select>
+      <div class="ml">ชื่อ account (ตั้งเอง เช่น work / personal)</div>
+      <input id="am-label" type="text" spellcheck="false" placeholder="work" />
+      <div class="ml">API key</div>
+      <input id="am-key" type="password" spellcheck="false" placeholder="วาง key ของ provider" />
+      <div id="am-customwrap" style="display:none">
+        <div class="ml">ชื่อ provider ที่ใช้เก็บ (A-Z a-z 0-9 . _ -)</div>
+        <input id="am-prov" type="text" spellcheck="false" placeholder="myprovider" />
+        <div class="ml">base URL</div>
+        <input id="am-url" type="text" spellcheck="false" placeholder="https://…/anthropic" />
+      </div>
+      <div class="merr" id="am-err"></div>
+      <div class="mact">
+        <button class="mbtn" id="am-cancel">ยกเลิก</button>
+        <button class="mbtn primary" id="am-ok" disabled>บันทึก</button>
+      </div>
+    </div>
   </div>
 
   <div id="zone-git" style="display:none">
@@ -681,6 +945,134 @@ function renderShell(): string {
     document.getElementById("git-rows").innerHTML = html;
   }
 
+  // ── โซน API providers ──────────────────────────────────────────────────────
+  // ⛔ apiView ไม่มีค่า key จริง (host ส่งมาแต่ mask) จึง render ซ้ำได้ไม่มีความเสี่ยง
+  let apiView = null;
+  const apiTestMap = {};
+  function apiKeyOf(p, l) { return p + " / " + l; }
+
+  function renderApi() {
+    const v = apiView;
+    if (!v) return;
+    document.getElementById("api-live").textContent = v.liveText || "";
+    const clearBtn = document.querySelector(".apiclear");
+    if (clearBtn) clearBtn.style.display = v.routed ? "" : "none";
+    const root = document.getElementById("api-rows");
+    const provs = v.providers || [];
+    let html = "";
+    if (!v.settingsReadable) {
+      html += '<div class="tres bad">อ่าน settings.json ไม่ออก (ไม่ใช่ JSON object) — ปุ่มสลับจะไม่เขียนไฟล์นี้จนกว่าจะซ่อมด้วยมือ</div>';
+    }
+    if (!provs.length) {
+      html += '<div class="empty">ยังไม่มี provider — กด "+ เพิ่ม account" แล้ววาง base URL กับ API key</div>';
+      root.innerHTML = html;
+      return;
+    }
+    for (let i = 0; i < provs.length; i++) {
+      const ps = provs[i];
+      html += '<div class="live" style="margin:14px 0 6px">' + esc(ps.title) + '</div><div class="rows">';
+      const list = ps.accounts || [];
+      for (let j = 0; j < list.length; j++) {
+        const a = list[j];
+        const pAttr = esc(ps.provider), lAttr = esc(a.label);
+        const t = apiTestMap[apiKeyOf(ps.provider, a.label)];
+        const tcls = t == null ? "tres" : t.ok === true ? "tres good" : "tres bad";
+        html +=
+          '<div class="row' + (a.active ? " active" : "") + '"><div class="ri">' +
+            '<div class="rl">' + esc(a.label) + (a.active ? ' <span class="badge">ACTIVE</span>' : "") + '</div>' +
+            '<div class="rs">' + esc(a.sub || "") + '</div>' +
+            (t ? '<div class="' + tcls + '">' + esc(t.text) + '</div>' : "") +
+          '</div><div class="ra">' +
+            '<button class="b apitest" data-ap="' + pAttr + '" data-al="' + lAttr + '">ทดสอบ</button>' +
+            (a.active
+              ? '<span class="cur">ใช้อยู่</span>'
+              : '<button class="b apisw" data-ap="' + pAttr + '" data-al="' + lAttr + '">สลับ</button>') +
+            '<button class="b apidel" data-ap="' + pAttr + '" data-al="' + lAttr + '">ลบ</button>' +
+          '</div></div>';
+      }
+      html += "</div>";
+    }
+    root.innerHTML = html;
+  }
+
+  // ── modal เพิ่ม account ของ provider ───────────────────────────────────────
+  // ⛔ key อยู่ในช่อง input จนกดบันทึก แล้วล้างทันที ไม่เคยถูกเก็บใน state ที่ render ซ้ำ
+  function amEl(id) { return document.getElementById(id); }
+  function amFillPresets() {
+    const sel = amEl("am-preset");
+    if (sel.options.length) return; // เติมครั้งเดียว
+    const ps = (apiView && apiView.presets) || [];
+    let html = "";
+    for (let i = 0; i < ps.length; i++) {
+      html += '<option value="' + esc(ps[i].id) + '">' + esc(ps[i].name) + "</option>";
+    }
+    sel.innerHTML = html;
+  }
+  function amPreset() {
+    const ps = (apiView && apiView.presets) || [];
+    const id = amEl("am-preset").value;
+    for (let i = 0; i < ps.length; i++) { if (ps[i].id === id) return ps[i]; }
+    return null;
+  }
+  function amApplyPreset() {
+    const p = amPreset();
+    if (!p) return;
+    amEl("am-hint").textContent = p.note || "";
+    // ⛔ preset รู้ทั้งชื่อและ base URL อยู่แล้ว จึงไม่ถามซ้ำ — เหลือแค่ชื่อ account + key
+    //    ช่องคู่นี้โผล่เฉพาะ "อื่นๆ" ที่เราไม่รู้ปลายทางจริงๆ
+    const custom = p.id === "custom";
+    amEl("am-customwrap").style.display = custom ? "" : "none";
+    amEl("am-prov").value = custom ? "" : p.id;
+    amEl("am-url").value = custom ? "" : p.baseUrl;
+    amSync();
+  }
+  const ID_OK = /^[A-Za-z0-9._-]{1,60}$/;
+  function amSync() {
+    const prov = amEl("am-prov").value.trim();
+    const label = amEl("am-label").value.trim();
+    const url = amEl("am-url").value.trim();
+    const key = amEl("am-key").value;
+    let err = "";
+    if (prov && (!ID_OK.test(prov) || prov === "_index")) err = "ชื่อ provider ใช้ได้เฉพาะ A-Z a-z 0-9 . _ -";
+    else if (label && (!ID_OK.test(label) || label === "_index")) err = "ชื่อ account ใช้ได้เฉพาะ A-Z a-z 0-9 . _ -";
+    else if (url && url.indexOf("http") !== 0) err = "base URL ต้องขึ้นต้นด้วย http:// หรือ https://";
+    amEl("am-err").textContent = err;
+    amEl("am-ok").disabled = !!err || !prov || !label || !url || !key;
+  }
+  function openApiAdd() {
+    amFillPresets();
+    amEl("am-label").value = ""; amEl("am-key").value = "";
+    amEl("am-err").textContent = "";
+    amApplyPreset();
+    amEl("amodal").style.display = "flex";
+    amEl("am-label").focus();
+  }
+  function closeApiAdd() {
+    amEl("amodal").style.display = "none";
+    // ⛔ อย่าให้ key ค้างใน DOM — retainContextWhenHidden ทำให้ DOM อยู่ต่อตอนซ่อนแท็บ
+    amEl("am-key").value = "";
+  }
+  function amSave() {
+    if (amEl("am-ok").disabled) return;
+    // ⛔ ไม่ส่ง model — user สั่ง 2026-08-20 ว่าใช้เพื่อเลือก "account ไหนจ่าย" ไม่ใช่เปลี่ยนโมเดล
+    //    ปล่อยว่าง = ไม่เขียน ANTHROPIC_MODEL ⇒ โมเดลยังเลือกจากที่เดิม (statusline / --model)
+    post("api_save", {
+      provider: amEl("am-prov").value.trim(),
+      label: amEl("am-label").value.trim(),
+      baseUrl: amEl("am-url").value.trim(),
+      apiKey: amEl("am-key").value
+    });
+    closeApiAdd();
+  }
+  amEl("am-preset").addEventListener("change", amApplyPreset);
+  amEl("am-prov").addEventListener("input", amSync);
+  amEl("am-label").addEventListener("input", amSync);
+  amEl("am-url").addEventListener("input", amSync);
+  amEl("am-key").addEventListener("input", amSync);
+  amEl("am-cancel").addEventListener("click", closeApiAdd);
+  amEl("am-ok").addEventListener("click", amSave);
+  amEl("amodal").addEventListener("click", function (e) { if (e.target === amEl("amodal")) closeApiAdd(); });
+
   // ── modal กลางจอสำหรับใส่ credential (แทน showInputBox 3 ชั้นของ host) ──────
   // โหมด: "add" = กรอก URL เอง · "pat" = รู้ host/org แล้ว (กด "เปลี่ยน PAT") ·
   //       "exp" = แก้แค่วันหมดอายุ (ไม่ต้องกรอก PAT ใหม่)
@@ -823,11 +1215,16 @@ function renderShell(): string {
   cmEl("cmodal").addEventListener("click", function (e) { if (e.target === cmEl("cmodal")) closeCred(); });
   cmEl("cmodal").addEventListener("keydown", function (e) {
     if (e.key === "Enter") { e.preventDefault(); cmSave(); }
-    else if (e.key === "Escape") { e.preventDefault(); closeCred(); }
+    else if (e.key === "Escape") {
+      e.preventDefault();
+      if (amEl("amodal").style.display === "flex") closeApiAdd();
+      else closeCred();
+    }
   });
 
   function showZone(z) {
     document.getElementById("zone-ai").style.display = z === "ai" ? "" : "none";
+    document.getElementById("zone-api").style.display = z === "api" ? "" : "none";
     document.getElementById("zone-git").style.display = z === "git" ? "" : "none";
     const bs = document.querySelectorAll(".zone");
     for (let i = 0; i < bs.length; i++) {
@@ -841,6 +1238,15 @@ function renderShell(): string {
     if (!t || !t.classList || !t.getAttribute) return;
     const z = t.getAttribute("data-z");
     if (z) { showZone(z); return; }
+    // โซน API providers มาก่อน เพื่อไม่ให้ปุ่มของมันไปตกที่ handler ท้ายไฟล์
+    const ap = t.getAttribute("data-ap");
+    const al = t.getAttribute("data-al");
+    if (t.classList.contains("api-add")) { openApiAdd(); return; }
+    if (t.classList.contains("ccsui")) { post("open_ccs_ui"); return; }
+    if (t.classList.contains("apiclear")) { post("api_clear"); return; }
+    if (t.classList.contains("apitest")) { post("api_test", { provider: ap, label: al }); return; }
+    if (t.classList.contains("apisw")) { post("api_switch", { provider: ap, label: al }); return; }
+    if (t.classList.contains("apidel")) { post("api_del", { provider: ap, label: al }); return; }
     const h = t.getAttribute("data-h");
     const u = t.getAttribute("data-u");
     if (t.classList.contains("git-add")) { openCred("add"); return; }
@@ -866,6 +1272,11 @@ function renderShell(): string {
     if (!m) return;
     if (m.type === "accounts") { lastView = m; render(); }
     else if (m.type === "usage") { usageMap = m.results || {}; render(); }
+    else if (m.type === "api") { apiView = m; renderApi(); }
+    else if (m.type === "api_test_result") {
+      apiTestMap[apiKeyOf(m.provider, m.label)] = { ok: m.ok, text: m.text };
+      renderApi();
+    }
     else if (m.type === "git") { gitView = m; renderGit(); }
     else if (m.type === "git_url_result") { cmUrlResult(m); }
     else if (m.type === "git_pat_dates_result") { cmDatesResult(m); }
