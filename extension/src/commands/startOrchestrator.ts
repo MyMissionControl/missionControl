@@ -676,7 +676,6 @@ export async function launchOrchestrator(opts: {
 
   const baseSession = readSessionPin(orch)?.trim() || `claude-${orch}`;
   let session = baseSession;
-  let inject = false; // deliver kickoff into the live pane instead of creating
 
   if (tmuxHasSession(baseSession)) {
     // Base session is busy with ANOTHER run — no modal, no twin/inject choice.
@@ -697,16 +696,6 @@ export async function launchOrchestrator(opts: {
     }
   }
 
-  if (inject) {
-    // `tmux new-session -A` on an existing session drops its command — deliver
-    // the kickoff into the LIVE pane instead (send-keys; NOT `maw wake -p`
-    // which spawns an uncontrolled twin).
-    try {
-      cp.execFileSync("tmux", ["send-keys", "-t", `=${session}`, kickoff, "Enter"]);
-    } catch {
-      /* best-effort — still attach so the user lands in the session */
-    }
-  }
   // Stamp "<project> / <team>" as the session label at create-time whenever the
   // name is already known: a resume (project loaded) OR a new build named up-front
   // in the dashboard popup (projectName). Only a nameless new build defers to the
@@ -716,16 +705,19 @@ export async function launchOrchestrator(opts: {
     team.name,
   );
   // Safe: session = maw pin (NN-oracle) / claude-<safe-orch> (+ "-N" twin suffix).
-  const command = inject
-    ? `tmux attach -t '=${session}'`
-    : buildTmuxLaunchCommand(
-        // attach=FALSE → create the session DETACHED. The chat webview is the sole
-        // interface; an ATTACHED terminal reacts to every send-keys keystroke + pane
-        // toggle and yanks editor focus back to the (garbled-Thai) terminal. Detached
-        // → the terminal only bootstraps, then doLaunch disposes it once the session is up.
-        orch, repoPath, kickoff, session, workers, false, orchesLabel,
-        orchestratorModel(team.name, orch),
-      );
+  // ⛔ There was an `inject` branch here that send-keys'd the kickoff into a live pane
+  // instead of creating a session. It was dead (`inject` was never assigned true after
+  // the twin-session redesign) and it carried a trap: its target was a bare
+  // `=${session}`, the one form tmux 3.4 rejects for send-keys, inside a silent
+  // try/catch. Removed 2026-08-20; `commands/tmuxTarget.guard.test.ts` keeps the shape out.
+  const command = buildTmuxLaunchCommand(
+    // attach=FALSE → create the session DETACHED. The chat webview is the sole
+    // interface; an ATTACHED terminal reacts to every send-keys keystroke + pane
+    // toggle and yanks editor focus back to the (garbled-Thai) terminal. Detached
+    // → the terminal only bootstraps, then doLaunch disposes it once the session is up.
+    orch, repoPath, kickoff, session, workers, false, orchesLabel,
+    orchestratorModel(team.name, orch),
+  );
 
   // CHAT-FIRST: the launch command creates the tmux session DETACHED (attach=false),
   // so it is fire-and-forget — tmux daemonizes the session and the command returns at

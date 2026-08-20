@@ -596,6 +596,22 @@ function renderShell(): string {
   /* Body: rail + grid */
   .body { flex: 1; display: flex; gap: var(--gap); min-height: 0; }
   .rail { width: 184px; flex: none; display: flex; flex-direction: column; gap: 6px; }
+  .railcol { width: 184px; flex: none; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+  /* ⛔ Drop target for the window-level drag handlers below. It had been removed from
+     BOTH the markup and the stylesheet while those handlers kept adding the .drag class
+     to it, so dragging a file over the panel showed nothing and the panel read as
+     "takes no drops" — even though the drop itself worked (found 2026-08-20). Pinned to
+     the bottom of the rail so the filter tiles keep their position.
+     ⛔ No backticks in here: this comment lives inside a TS template literal, so one
+     would close the string and the next token becomes a property access (tsc TS2339). */
+  .drop { margin-top: auto; display: flex; align-items: center; justify-content: center; gap: 7px;
+    padding: 10px 12px; border-radius: 10px; border: 1px dashed var(--border2);
+    color: var(--faint); font-size: 11.5px; line-height: 1.35; text-align: center; }
+  .drop svg { width: 14px; height: 14px; flex-shrink: 0; }
+  /* Explicit <br /> + a sub-line, because letting ".zip" wrap on its own put a bare
+     leading "." at the start of the second line (seen in a headless render). */
+  .drop i { font-style: normal; opacity: .72; white-space: nowrap; }
+  .drop.drag { border-color: var(--accent); background: var(--accentSoft); color: var(--txt); }
   .tile { display: flex; align-items: center; gap: 10px; padding: 11px 12px; border-radius: 10px;
     cursor: pointer; background: var(--card); border: 1px solid var(--border); color: var(--muted); }
   .tile:hover { border-color: var(--accent); }
@@ -754,7 +770,10 @@ function renderShell(): string {
   </div>
 
   <div class="body">
-    <div class="rail" id="rail"></div>
+    <div class="railcol">
+      <div class="rail" id="rail"></div>
+      <div class="drop" id="drop"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg><span>ลากไฟล์มาวางที่นี่<br /><i>SKILL.md หรือ .zip</i></span></div>
+    </div>
     <div class="grid-col">
       <div class="grid-head">
         <span class="gl" id="grid-label">ALL SKILLS</span>

@@ -52,7 +52,6 @@ import {
   computeSessionLabel,
   teamFromOrchesLabel,
 } from "./sessions";
-import { listSkills } from "./skills";
 import { setTabIcon } from "./tabIcon";
 
 type Project = {
@@ -136,13 +135,14 @@ export function openDashboardPanel(
   let projectsLoaded = false;
 
   // Live cards can go stale from sources the dashboard never sees an event
-  // for — budget from sprint spend, skill count from a toggle in the separate
-  // Skills panel, memory_share from a curl. Refresh them every poll tick
-  // (cheap GETs) so they self-heal within STATUS_POLL_MS (bug-audit #4/#5).
+  // for — budget from sprint spend, memory_share from a curl. Refresh them every
+  // poll tick (cheap GETs) so they self-heal within STATUS_POLL_MS (bug-audit #4/#5).
+  // ⛔ Nothing that costs disk I/O belongs here: this runs every STATUS_POLL_MS for as
+  // long as the dashboard is open. A skill count used to be pushed from here into an
+  // element that no longer exists — 150 synchronous SKILL.md reads per tick, for nobody.
   const refreshLiveCards = async () => {
     await Promise.all([
       pushBudget(panel),
-      pushSkillCount(panel),
       pushMemoryShare(panel),
     ]);
   };
@@ -890,17 +890,6 @@ async function pushMemoryShare(panel: vscode.WebviewPanel): Promise<void> {
   }
 }
 
-async function pushSkillCount(panel: vscode.WebviewPanel): Promise<void> {
-  try {
-    // Local: count ~/.claude/skills/*/SKILL.md off disk (same source the Skills
-    // panel uses). They're all "active" on disk, so enabled == total.
-    const n = listSkills().length;
-    panel.webview.postMessage({ type: "skill_count", total: n, enabled: n });
-  } catch {
-    panel.webview.postMessage({ type: "skill_count", total: 0, enabled: 0 });
-  }
-}
-
 function renderHtml(): string {
   return `<!DOCTYPE html>
 <html>
@@ -1503,9 +1492,6 @@ function renderHtml(): string {
       if (st) st.textContent = m.online ? "Running" : "Stopped";
     } else if (m.type === "budget") {
       setBudget(m);
-    } else if (m.type === "skill_count") {
-      const sub = document.getElementById("skillsSub");
-      if (sub) sub.textContent = (m.enabled ?? 0) + " active / " + (m.total ?? 0) + " total";
     } else if (m.type === "sessions") {
       const list = m.sessions || [];
       renderSessions(list);
