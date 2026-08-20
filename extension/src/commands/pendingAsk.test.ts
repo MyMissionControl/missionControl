@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   autoOpenSkipReason,
+  nagAllowed,
   nagDue,
   buildInModeArgs,
   buildKeyArgs,
@@ -486,6 +487,32 @@ test("shouldShowOwnAsker: only when NOBODY is attached to that tmux session", ()
   expect(shouldShowOwnAsker(1)).toBe(false); // a human is looking at the native box right now
   expect(shouldShowOwnAsker(3)).toBe(false);
   expect(shouldShowOwnAsker(-1)).toBe(false); // session vanished between sweep and show
+});
+
+// ---- nagAllowed: the 2026-08-16 rule must hold on the nag path too ----
+
+const MIN = 60_000;
+
+test("nagAllowed: ห้ามเตือนด้วยตัวถามของเรา ถ้ามีคน attach อยู่ (กล่อง native อยู่บนจอเขาแล้ว)", () => {
+  // this is the regression: waited 22 นาที, nag เดิมเด้งทับกล่อง native ที่เขากำลังมองอยู่
+  const waited = { waitedMs: 22 * MIN, nagMs: 10 * MIN, alreadyNagged: false };
+  expect(nagAllowed({ clients: 1, ...waited })).toBe(false);
+  expect(nagAllowed({ clients: 3, ...waited })).toBe(false);
+  expect(nagAllowed({ clients: 0, ...waited })).toBe(true); // ไม่มีใครดู → ยังต้องเตือน
+});
+
+test("nagAllowed: เกณฑ์เวลาเดิมยังอยู่ครบเมื่อไม่มีใคร attach", () => {
+  const base = { clients: 0, nagMs: 10 * MIN, alreadyNagged: false };
+  expect(nagAllowed({ ...base, waitedMs: 9 * MIN })).toBe(false); // ยังไม่ถึงเวลา
+  expect(nagAllowed({ ...base, waitedMs: 10 * MIN })).toBe(true); // ถึงพอดี
+  expect(nagAllowed({ ...base, waitedMs: 99 * MIN, alreadyNagged: true })).toBe(false); // ครั้งเดียว
+  expect(nagAllowed({ ...base, nagMs: 0, waitedMs: 99 * MIN })).toBe(false); // 0 = ปิด nag
+});
+
+test("nagAllowed: จำนวน client ที่อ่านไม่ออก = ถือว่ามีคนดู (fail closed)", () => {
+  const waited = { waitedMs: 99 * MIN, nagMs: 10 * MIN, alreadyNagged: false };
+  expect(nagAllowed({ clients: Number.NaN, ...waited })).toBe(false);
+  expect(nagAllowed({ clients: -1, ...waited })).toBe(false);
 });
 
 test("shouldShowOwnAsker: a garbled count must not open a panel over someone's screen", () => {

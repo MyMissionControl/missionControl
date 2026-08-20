@@ -445,6 +445,21 @@ export function shouldShowOwnAsker(clients: number): boolean {
   return Number.isInteger(clients) && clients === 0;
 }
 
+/** เตือนซ้ำ (nag) ได้ไหม — เกณฑ์ attach เดียวกับ auto-open ต่างกันแค่เรื่องเวลา.
+ *  ⛔⛔ ถ้ามีคน attach session นั้นอยู่ **ห้ามเตือนด้วยตัวถามของ MC** ไม่ว่ารอนานแค่ไหน:
+ *  ทุก hit คือกล่อง native ของ Claude Code ซึ่งอยู่บนจอเขาแล้ว ตัวถามใบที่สองคือสิ่งที่
+ *  user สั่งห้ามไว้ (กฎ 2026-08-16 · ถูกละเมิดโดย nag ที่เพิ่มใน 710069d และเขาเห็นซ้ำ 2026-08-20).
+ *  เคสที่ nag ยังต้องทำงานคือ "ไม่มีใครดูอยู่" — กล่องเคยถูกปิดไป หรือไม่มีใคร attach. */
+export function nagAllowed(o: {
+  clients: number;
+  waitedMs: number;
+  nagMs: number;
+  alreadyNagged: boolean;
+}): boolean {
+  if (!shouldShowOwnAsker(o.clients)) return false;
+  return nagDue({ waitedMs: o.waitedMs, nagMs: o.nagMs, alreadyNagged: o.alreadyNagged });
+}
+
 /** A pane blocked on a choice box, plus where to answer it. */
 export interface PendingHit {
   pane: string;

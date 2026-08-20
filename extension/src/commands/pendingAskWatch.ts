@@ -38,6 +38,7 @@ import { tabLabel } from "../webview/tabModel";
 import {
   PANE_LIST_FMT,
   autoOpenSkipReason,
+  nagAllowed,
   buildAnswerArgs,
   buildInModeArgs,
   buildKeyArgs,
@@ -45,7 +46,6 @@ import {
   isDigitAnswerable,
   isInMode,
   isMultiAnswerable,
-  nagDue,
   parseAskFromPane,
   parsePaneList,
   parseReviewFromPane,
@@ -362,13 +362,19 @@ function showBox(hit: PendingHit, opts: { preserveFocus?: boolean } = {}): void 
   _open = { key: hit.key, panel };
 }
 
-function refreshStatus(hits: PendingHit[], skipReason = ""): void {
+function refreshStatus(hits: PendingHit[], skipReason = "", warnMin = 0): void {
   if (!_status) return;
   if (!hits.length) {
     _status.hide();
     return;
   }
-  _status.text = `$(question) ${hits.length} รอตอบ`;
+  // ⭐ รอนานแต่ห้ามเด้ง (มีคน attach) → บอกด้วยสีของแถบสถานะ ไม่ใช่ด้วยตัวถามใบที่สอง
+  _status.text = warnMin
+    ? `$(question) ${hits.length} รอตอบ ${warnMin} นาที`
+    : `$(question) ${hits.length} รอตอบ`;
+  _status.backgroundColor = warnMin
+    ? new vscode.ThemeColor("statusBarItem.warningBackground")
+    : undefined;
   // ⛔ เหตุผลที่ "ไม่เด้งเอง" ต้องอยู่ในที่ที่คนมองอยู่แล้ว ไม่ใช่ใน log ที่ต้องไปเปิด —
   //   สาเหตุทั้งสามข้อถูกต้องตามดีไซน์ แต่ไม่มีทางรู้จากหน้าจอเลย (ดู autoOpenSkipReason)
   _status.tooltip = new vscode.MarkdownString(
@@ -402,26 +408,44 @@ async function tick(): Promise<void> {
   for (const h of hits) if (!_firstSeen.has(h.key)) _firstSeen.set(h.key, now);
   for (const k of [..._firstSeen.keys()]) if (!live.has(k)) _firstSeen.delete(k);
   for (const k of [..._nagged]) if (!live.has(k)) _nagged.delete(k);
+  // ⛔⛔ ต้องรู้ว่ามีคน attach หรือยัง **ก่อน** ทุกเส้นตัดสิน ไม่ใช่แค่เส้น auto-open:
+  //   nag เดิมเรียก showBox โดยไม่ดู attach เลย ⇒ เด้งตัวถามซ้อนกล่อง native ที่คนกำลังมองอยู่
+  //   (user เห็นซ้ำ 2026-08-20 — "ถ้าใช้ native ห้ามขึ้น ตอนนี้มันขึ้นอีกละแค่ย้ายตำแหน่ง")
+  const sessions = parseTmuxSessions((await tmux(["list-sessions", "-F", TMUX_FMT])) ?? "");
+  const clientsOf = (session: string): number => sessionClients(sessions, session);
+  const waitedMs = (h: PendingHit): number => now - (_firstSeen.get(h.key) ?? now);
+
   const overdue = hits.find((h) =>
-    nagDue({ waitedMs: now - (_firstSeen.get(h.key) ?? now), nagMs: nagMs(), alreadyNagged: _nagged.has(h.key) }),
+    nagAllowed({
+      clients: clientsOf(h.session),
+      waitedMs: waitedMs(h),
+      nagMs: nagMs(),
+      alreadyNagged: _nagged.has(h.key),
+    }),
   );
-  /** เตือนซ้ำหนึ่งครั้ง — ใช้เมื่อเส้นปกติเลือกที่จะเงียบ (กล่องเคยปิดไปแล้ว / มีคน attach อยู่) */
+  /** เตือนซ้ำหนึ่งครั้ง — เฉพาะเคส "ไม่มีใครดูอยู่" (กล่องเคยปิดไปแล้ว และไม่มีคน attach) */
   const nag = (): void => {
     if (!overdue) return;
     _nagged.add(overdue.key);
     showBox(overdue, { preserveFocus: true });
   };
+  /** รอนานเกิน nagMinutes แต่มีคน attach — ห้ามเด้งตัวถาม จึงให้แถบสถานะเปลี่ยนเป็นสีเตือน
+   *  แทน: เห็นได้โดยไม่แย่งโฟกัสและไม่สร้างตัวถามใบที่สอง */
+  const stalled = hits
+    .filter((h) => clientsOf(h.session) > 0 && nagMs() > 0 && waitedMs(h) >= nagMs())
+    .sort((a, b) => waitedMs(b) - waitedMs(a))[0];
+  const warnMin = stalled ? Math.floor(waitedMs(stalled) / 60000) : 0;
 
   if (_open) {
     // Answered in the pane while the box was up → close it rather than leave a
     // dead box whose click would send a keystroke nobody is waiting for.
     if (!hits.some((h) => h.key === _open!.key)) closeOpen();
-    refreshStatus(hits, autoOpenSkipReason({ openBox: true, unseenHits: 1, clients: 0 }));
+    refreshStatus(hits, autoOpenSkipReason({ openBox: true, unseenHits: 1, clients: 0 }), warnMin);
     return; // one box at a time
   }
   const next = hits.find((h) => !_seen.has(h.key));
   if (!next) {
-    refreshStatus(hits, autoOpenSkipReason({ openBox: false, unseenHits: 0, clients: 0 }));
+    refreshStatus(hits, autoOpenSkipReason({ openBox: false, unseenHits: 0, clients: 0 }), warnMin);
     nag();
     return;
   }
@@ -430,10 +454,8 @@ async function tick(): Promise<void> {
   //   opening ours on top is the duplicate the user asked us to drop (2026-08-16).
   //   Auto-open is for the headless case only; the status bar and the
   //   `missioncontrol.pendingAsk` command still reach every hit by hand.
-  const sess = await tmux(["list-sessions", "-F", TMUX_FMT]);
-  const clients = sessionClients(parseTmuxSessions(sess ?? ""), next.session);
-  const skip = autoOpenSkipReason({ openBox: false, unseenHits: 1, clients });
-  refreshStatus(hits, skip);
+  const skip = autoOpenSkipReason({ openBox: false, unseenHits: 1, clients: clientsOf(next.session) });
+  refreshStatus(hits, skip, warnMin);
   if (skip) {
     nag();
     return;
