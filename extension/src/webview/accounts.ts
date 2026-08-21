@@ -25,20 +25,8 @@ import {
   listApiProviders,
   saveApiAccount,
 } from "../commands/apiProvidersOps";
-import { listAzurePats } from "../commands/azurePats";
 import { fetchClaudeUsage } from "../commands/usage";
 import { setTabIcon } from "./tabIcon";
-import {
-  CRED_FILE,
-  credTargetFromUrl,
-  isValidExpiryDate,
-  listGitCredentials,
-  providerLabelForHost,
-  removeGitCredential,
-  setGitCredential,
-  setPatExpiry,
-  testGitCredential,
-} from "../commands/gitCredentials";
 
 // Editor-area panel for managing multiple subscription logins across AI CLIs.
 // Singleton _panel, a display-ready postMessage + a message switch — mirrors
@@ -176,31 +164,6 @@ async function testApiAccount(provider: string, label: string): Promise<{ ok: bo
   }
 }
 
-/** โซน Git — ⛔ ไม่มีค่า secret ในนี้เลย มีแต่ host/org + สถานะ (กฎเดียวกับ token ของ AI) */
-function pushGit(panel: vscode.WebviewPanel): void {
-  const { rows, ghLogin } = listGitCredentials();
-  panel.webview.postMessage({
-    type: "git",
-    file: CRED_FILE,
-    ghLogin,
-    rows: rows.map((r) => ({
-      host: r.host,
-      user: r.user,
-      provider: r.provider,
-      // ⛔ ห้ามใส่สัญลักษณ์/emoji ในข้อความที่ผู้ใช้เห็น — เครื่องนี้เรนเดอร์เป็นกล่องเปล่า
-      //    (ใช้คำว่า "ใช้ไม่ได้:" นำหน้าแทน แล้วให้สีของ .tres เป็นตัวบอกระดับ)
-      sub:
-        r.provider + " · " + r.host +
-        (r.helper ? "" : " · ใช้ไม่ได้: ยังไม่ได้ตั้ง credential helper ของ host นี้"),
-      testable: r.provider === "Azure DevOps",
-      // สถานะวันหมดอายุ — level ให้ฝั่งหน้าจอเลือกสี, text เป็นข้อความไทยพร้อมโชว์
-      expiry: r.expiry.text,
-      expiryLevel: r.expiry.level,
-      expiresAt: r.expiresAt,
-    })),
-  });
-}
-
 /** Fetch remaining usage for every Claude account whose token is still valid and
  *  post it to the webview keyed by the SAME row label buildView uses. Tokens
  *  never leave the host. Best-effort — each account degrades to a status string
@@ -292,7 +255,6 @@ export function openAccountsPanel(): vscode.WebviewPanel {
       case "reload":
         pushList(panel);
         pushApi(panel);
-        pushGit(panel);
         void pushUsage(panel);
         return;
 
@@ -416,93 +378,6 @@ export function openAccountsPanel(): vscode.WebviewPanel {
         const r = deleteApiAccount(prov, label);
         notify(r, `ลบ ${prov} / ${label} แล้ว`);
         pushApi(panel);
-        return;
-      }
-
-      // ── modal กลางจอ: เช็ค URL แล้วตอบ host/org กลับไปโชว์ใต้ช่องกรอก ────────
-      case "git_url_check": {
-        const url = String(msg.url ?? "").trim();
-        const t = credTargetFromUrl(url);
-        panel.webview.postMessage(
-          t
-            ? {
-                type: "git_url_result",
-                url,
-                ok: true,
-                host: t.host,
-                user: t.user,
-                provider: providerLabelForHost(t.host),
-              }
-            : { type: "git_url_result", url, ok: false, reason: "อ่าน host/org จาก URL นี้ไม่ได้" },
-        );
-        return;
-      }
-
-      // ดึงวันหมดอายุจริงจาก Azure (ผ่าน Entra token ของ az) — ของแถม ล้มได้ไม่กระทบอะไร
-      case "git_pat_dates": {
-        const org = String(msg.org ?? "");
-        const r = await listAzurePats(org);
-        panel.webview.postMessage({ type: "git_pat_dates_result", org, ...r });
-        return;
-      }
-
-      // บันทึก PAT — ใช้ทั้งตอนเพิ่มใหม่ (host/user มาจากผลเช็ค URL) และตอนเปลี่ยน PAT
-      // ⛔ ห้ามเชื่อ host/user ที่ webview ส่งมาแบบไม่ตรวจ: setGitCredential validate อีกชั้น
-      //    (whitelist + กัน newline) เพราะค่านี้ถูกเขียนลงไฟล์ที่ 1 บรรทัด = 1 credential
-      case "git_cred_save": {
-        const host = String(msg.host ?? "");
-        const user = String(msg.user ?? "");
-        const pat = String(msg.pat ?? "");
-        const exp = String(msg.expiresAt ?? "");
-        const r = setGitCredential(host, user, pat, exp);
-        notify(r, `เก็บ PAT ของ ${user} (${host}) แล้ว`);
-        pushGit(panel);
-        return;
-      }
-
-      case "git_expiry_save": {
-        // แก้เฉพาะวันหมดอายุ — ไม่แตะ PAT · ค่าว่าง = ลืมวันไปเลย
-        const host = String(msg.host ?? "");
-        const user = String(msg.user ?? "");
-        const next = String(msg.expiresAt ?? "").trim();
-        if (next && !isValidExpiryDate(next)) {
-          vscode.window.showErrorMessage("Accounts: วันหมดอายุต้องเป็น YYYY-MM-DD");
-          return;
-        }
-        setPatExpiry(host, user, next || null);
-        vscode.window.showInformationMessage(
-          next ? `ตั้งวันหมดอายุของ ${user} เป็น ${next}` : `ลบวันหมดอายุของ ${user} แล้ว`,
-        );
-        pushGit(panel);
-        return;
-      }
-
-      case "git_del": {
-        const host = String(msg.host ?? "");
-        const user = String(msg.user ?? "");
-        const pick = await vscode.window.showWarningMessage(
-          `ลบ credential ของ '${user}' (${host}) ออกจาก ${CRED_FILE}?`,
-          { modal: true },
-          "ลบ",
-        );
-        if (pick !== "ลบ") return;
-        notify(removeGitCredential(host, user), `ลบ '${user}' แล้ว`);
-        pushGit(panel);
-        return;
-      }
-
-      case "git_test": {
-        const host = String(msg.host ?? "");
-        const user = String(msg.user ?? "");
-        panel.webview.postMessage({ type: "git_test_result", host, user, text: "กำลังเช็ค…" });
-        const r = await testGitCredential(host, user);
-        panel.webview.postMessage({
-          type: "git_test_result",
-          host,
-          user,
-          ok: r.ok,
-          text: (r.ok ? "PASS: " : "FAIL: ") + r.text,
-        });
         return;
       }
 
@@ -699,11 +574,10 @@ function renderShell(): string {
 </head>
 <body>
   <h1>Connections</h1>
-  <div class="lead">ทุกอย่างที่ MC ต่ออยู่ข้างนอก — บัญชี AI และ credential ของ git</div>
+  <div class="lead">ทุกอย่างที่ MC ต่ออยู่ข้างนอก — บัญชี AI (subscription login + API key)</div>
   <div class="zones">
     <button class="zone on" data-z="ai">AI accounts</button>
     <button class="zone" data-z="api">API providers</button>
-    <button class="zone" data-z="git">Git</button>
   </div>
   <div id="zone-ai">
   <div id="providers"></div>
@@ -756,55 +630,6 @@ function renderShell(): string {
       <div class="mact">
         <button class="mbtn" id="am-cancel">ยกเลิก</button>
         <button class="mbtn primary" id="am-ok" disabled>บันทึก</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="zone-git" style="display:none">
-    <section class="prov">
-      <div class="ph">
-        <div><h2>Azure DevOps · เจ้าอื่น ๆ</h2>
-        <div class="live" id="git-file"></div></div>
-        <div class="ph-btns"><button class="primary git-add">+ เพิ่มจาก URL repo</button></div>
-      </div>
-      <div id="git-rows"></div>
-    </section>
-    <section class="prov">
-      <div class="ph"><div><h2>GitHub</h2><div class="live" id="gh-live"></div></div></div>
-    </section>
-  </div>
-
-  <div id="cmodal" class="modal-backdrop" style="display:none">
-    <div class="modal-card" role="dialog" aria-modal="true">
-      <div class="mt" id="cm-title">เพิ่ม credential</div>
-      <div class="mh" id="cm-hint"></div>
-      <div id="cm-urlwrap">
-        <div class="ml">URL repo (copy จากปุ่ม Clone)</div>
-        <input id="cm-url" type="text" spellcheck="false"
-               placeholder="https://ORG@dev.azure.com/ORG/PROJECT/_git/REPO" />
-        <div class="merr" id="cm-urlstatus"></div>
-      </div>
-      <div id="cm-fixedwrap" style="display:none">
-        <div class="ml">credential ของ</div>
-        <div class="fixed" id="cm-fixed"></div>
-      </div>
-      <div id="cm-patwrap">
-        <div class="ml">Personal Access Token — scope Code (Read)</div>
-        <input id="cm-pat" type="password" spellcheck="false" placeholder="วาง PAT ที่ copy มาจาก Azure" />
-        <div class="merr" id="cm-patstatus"></div>
-      </div>
-      <div id="cm-pickwrap" style="display:none">
-        <div class="ml">token ของคุณใน Azure (ดึงวันหมดอายุจริงมาให้)</div>
-        <select id="cm-pick"></select>
-      </div>
-      <div id="cm-expwrap" style="display:none">
-        <div class="ml">วันหมดอายุ (ข้ามได้ — ใส่ไว้เพื่อให้เตือนก่อนหมด)</div>
-        <input id="cm-exp" type="date" />
-      </div>
-      <div class="merr" id="cm-expstatus"></div>
-      <div class="mact">
-        <button class="mbtn" id="cm-cancel">ยกเลิก</button>
-        <button class="mbtn primary" id="cm-ok" disabled>บันทึก</button>
       </div>
     </div>
   </div>
@@ -898,51 +723,6 @@ function renderShell(): string {
       html += "</section>";
     }
     root.innerHTML = html;
-  }
-
-  let gitView = null;
-  const testMap = {};
-  function key(h, u) { return h + " " + u; }
-
-  function renderGit() {
-    const v = gitView;
-    if (!v) return;
-    document.getElementById("git-file").textContent = "เก็บที่ " + (v.file || "");
-    document.getElementById("gh-live").textContent = v.ghLogin
-      ? "ใช้ gh auth อยู่ (account " + v.ghLogin + ") — ไม่ต้องทำอะไร"
-      : "ยังไม่ได้ login: รัน gh auth login แล้วกดรีเฟรช";
-    const rows = v.rows || [];
-    let html = "";
-    if (!rows.length) {
-      html = '<div class="empty">ยังไม่มี credential — กด "+ เพิ่มจาก URL repo" แล้ววาง URL ที่ copy จากปุ่ม Clone</div>';
-    } else {
-      html += '<div class="rows">';
-      for (let i = 0; i < rows.length; i++) {
-        const r = rows[i];
-        const t = testMap[key(r.host, r.user)];
-        const cls = t == null ? "tres" : t.ok === true ? "tres good" : t.ok === false ? "tres bad" : "tres";
-        // สถานะวันหมดอายุ: หมดแล้ว/ใกล้หมด = สีเตือน · ไม่รู้วัน = สีจาง (ไม่ใช่ error)
-        const ecls =
-          r.expiryLevel === "expired" ? "tres bad"
-          : r.expiryLevel === "soon" ? "tres warn"
-          : r.expiryLevel === "ok" ? "tres good" : "tres";
-        const etext = r.expiryLevel === "expired" ? "PAT " + r.expiry + " — กด 'เปลี่ยน PAT'" : r.expiry;
-        html +=
-          '<div class="row"><div class="ri">' +
-            '<div class="rl">' + esc(r.user) + '</div>' +
-            '<div class="rs">' + esc(r.sub) + '</div>' +
-            (r.expiry ? '<div class="' + ecls + '">' + esc(etext) + '</div>' : "") +
-            (t ? '<div class="' + cls + '">' + esc(t.text) + '</div>' : "") +
-          '</div><div class="ra">' +
-            (r.testable ? '<button class="b gtest" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '">ทดสอบ</button>' : "") +
-            '<button class="b gexp" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '" data-e="' + esc(r.expiresAt || "") + '">วันหมดอายุ</button>' +
-            '<button class="b gedit" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '">เปลี่ยน PAT</button>' +
-            '<button class="b del gdel" data-h="' + esc(r.host) + '" data-u="' + esc(r.user) + '">ลบ</button>' +
-          '</div></div>';
-      }
-      html += "</div>";
-    }
-    document.getElementById("git-rows").innerHTML = html;
   }
 
   // ── โซน API providers ──────────────────────────────────────────────────────
@@ -1073,159 +853,14 @@ function renderShell(): string {
   amEl("am-ok").addEventListener("click", amSave);
   amEl("amodal").addEventListener("click", function (e) { if (e.target === amEl("amodal")) closeApiAdd(); });
 
-  // ── modal กลางจอสำหรับใส่ credential (แทน showInputBox 3 ชั้นของ host) ──────
-  // โหมด: "add" = กรอก URL เอง · "pat" = รู้ host/org แล้ว (กด "เปลี่ยน PAT") ·
-  //       "exp" = แก้แค่วันหมดอายุ (ไม่ต้องกรอก PAT ใหม่)
-  // ⛔ PAT อยู่ในช่อง input ของ webview จนกดบันทึก แล้วล้างทันที — และไม่เคยถูกเก็บใน
-  //    ตัวแปร/state ที่ render ซ้ำ (retainContextWhenHidden ทำให้ DOM ค้างอยู่ตอนซ่อน)
-  var _cmMode = "add", _cmHost = "", _cmUser = "", _cmUrlOk = false, _cmTimer = null;
-  function cmEl(id) { return document.getElementById(id); }
-  function openCred(mode, host, user, expiresAt) {
-    _cmMode = mode; _cmHost = host || ""; _cmUser = user || ""; _cmUrlOk = false;
-    var isAdd = mode === "add", isExp = mode === "exp";
-    cmEl("cm-title").textContent = isAdd ? "เพิ่ม credential จาก URL repo"
-      : isExp ? "วันหมดอายุของ PAT" : "เปลี่ยน PAT";
-    cmEl("cm-hint").textContent = isAdd
-      ? "วาง URL ที่ copy จากปุ่ม Clone แล้ว MC จะแกะ host + org ให้เอง"
-      : "Azure DevOps: User settings → Personal access tokens → New Token";
-    cmEl("cm-urlwrap").style.display = isAdd ? "" : "none";
-    cmEl("cm-fixedwrap").style.display = isAdd ? "none" : "";
-    cmEl("cm-patwrap").style.display = isExp ? "none" : "";
-    cmEl("cm-fixed").textContent = _cmUser + "  ·  " + _cmHost;
-    cmEl("cm-url").value = ""; cmEl("cm-pat").value = "";
-    cmEl("cm-exp").value = expiresAt || "";
-    cmEl("cm-urlstatus").textContent = ""; cmEl("cm-urlstatus").className = "merr";
-    cmEl("cm-patstatus").textContent = ""; cmEl("cm-patstatus").className = "merr";
-    // ⛔ ซ่อนทั้ง dropdown และปฏิทินไว้ก่อน — user บอกว่า "ถ้าดึงจริงไม่ต้องให้มันแสดงปฏิทิน"
-    //    ปฏิทินโผล่เฉพาะตอน "แปะลิงก์แล้วดึงไม่ได้จริง ๆ" เท่านั้น (user สั่งตัดปุ่มกรอกเองออกด้วย)
-    cmEl("cm-pickwrap").style.display = "none";
-    cmEl("cm-pick").innerHTML = "";
-    cmEl("cm-expwrap").style.display = "none";
-    cmEl("cm-expstatus").textContent = ""; cmEl("cm-expstatus").className = "merr";
-    cmEl("cmodal").style.display = "flex";
-    (isAdd ? cmEl("cm-url") : isExp ? cmEl("cm-exp") : cmEl("cm-pat")).focus();
-    cmSync();
-    // โหมดที่รู้ org อยู่แล้ว = ขอวันหมดอายุจริงได้เลย · โหมด add รอผลเช็ค URL ก่อน
-    if (!isAdd && _cmUser) askDates(_cmUser);
-  }
-
-  // ── ดึงวันหมดอายุจริงจาก Azure ────────────────────────────────────────────
-  // ⛔ API ไม่คืนค่า token กลับมา จับคู่อัตโนมัติว่า PAT ที่เก็บไว้เป็นตัวไหน "ไม่ได้" →
-  //    ให้เลือกจากรายการ (1 คลิก) · เหลือ token เดียว = เลือกให้เลย ไม่ต้องคลิก
-  var _cmDatesOrg = "";
-  function askDates(org) {
-    if (!org || org === _cmDatesOrg) return;
-    _cmDatesOrg = org;
-    cmEl("cm-expstatus").textContent = "กำลังดึงวันหมดอายุจาก Azure…";
-    cmEl("cm-expstatus").className = "merr";
-    post("git_pat_dates", { org: org });
-  }
-  function cmDatesResult(m) {
-    if (m.org !== _cmDatesOrg) return;
-    var st = cmEl("cm-expstatus"), wrap = cmEl("cm-pickwrap"), sel = cmEl("cm-pick");
-    var pats = m.pats || [];
-    if (!m.ok || !pats.length) {
-      // ดึงไม่ได้จริง → ตรงนี้เท่านั้นที่ปฏิทินควรโผล่
-      wrap.style.display = "none";
-      cmEl("cm-expwrap").style.display = "";
-      st.textContent = m.ok ? "ไม่เจอ token ที่ยังใช้ได้ใน org นี้ — กรอกวันเองได้" : (m.reason || "");
-      st.className = "merr warn";
-      return;
-    }
-    // ⛔ ติดป้าย Global PAT: Microsoft เลิกรองรับ token ที่ครอบทุก org ตั้งแต่ 1 ธ.ค. 2026
-    //    (ประกาศบนหน้า PAT ของ Azure เอง) → ต้องเห็นก่อนเลือก ไม่ใช่รู้ตอน clone ล้มวันนั้น
-    var html = '<option value="">— เลือกเอง / ไม่ระบุ —</option>';
-    for (var i = 0; i < pats.length; i++) {
-      html += '<option value="' + esc(pats[i].expiresAt) + '" data-g="' + (pats[i].global ? "1" : "") + '">' +
-              esc(pats[i].name) + "  ·  หมด " + esc(pats[i].expiresAt) +
-              (pats[i].global ? "  ·  Global PAT (เลิกรองรับ 1 ธ.ค. 2026)" : "") + "</option>";
-    }
-    sel.innerHTML = html;
-    wrap.style.display = "";
-    cmEl("cm-expwrap").style.display = "none";   // ดึงได้แล้ว = ไม่ต้องมีปฏิทิน
-    if (pats.length === 1) { sel.value = pats[0].expiresAt; cmEl("cm-exp").value = pats[0].expiresAt; }
-    st.textContent = pats.length === 1
-      ? "เจอ token เดียว ใส่วันให้แล้ว"
-      : "เจอ " + pats.length + " token — เลือกตัวที่กำลังวาง";
-    st.className = "merr ok";
-    cmGlobalWarn();
-  }
-  function closeCred() {
-    // ⛔ ล้าง PAT ออกจาก DOM ทุกครั้งที่ปิด ไม่ปล่อยค้างในหน้าที่ซ่อนอยู่
-    cmEl("cm-pat").value = ""; cmEl("cm-url").value = "";
-    cmEl("cmodal").style.display = "none";
-    _cmDatesOrg = "";
-    if (_cmTimer) { clearTimeout(_cmTimer); _cmTimer = null; }
-  }
-  function cmSync() {
-    var isAdd = _cmMode === "add", isExp = _cmMode === "exp";
-    var okUrl = isAdd ? _cmUrlOk : true;
-    var okPat = isExp ? true : cmEl("cm-pat").value.trim().length > 0;
-    cmEl("cm-ok").disabled = !(okUrl && okPat);
-  }
-  function cmUrlChanged() {
-    _cmUrlOk = false; cmSync();
-    var u = cmEl("cm-url").value.trim();
-    var st = cmEl("cm-urlstatus");
-    if (!u) { st.textContent = ""; st.className = "merr"; return; }
-    st.textContent = "กำลังอ่าน URL…"; st.className = "merr";
-    if (_cmTimer) clearTimeout(_cmTimer);
-    _cmTimer = setTimeout(function () { post("git_url_check", { url: u }); }, 350);
-  }
-  function cmUrlResult(m) {
-    var st = cmEl("cm-urlstatus");
-    if (m.url !== cmEl("cm-url").value.trim()) return; // ผลของ URL เก่า ทิ้ง
-    if (m.ok) {
-      _cmHost = m.host; _cmUser = m.user; _cmUrlOk = true;
-      st.textContent = m.provider + " · org " + m.user;
-      st.className = "merr ok";
-      askDates(m.user);
-    } else {
-      _cmUrlOk = false; st.textContent = m.reason || "อ่าน URL นี้ไม่ได้"; st.className = "merr bad";
-    }
-    cmSync();
-  }
-  function cmSave() {
-    if (cmEl("cm-ok").disabled) return;
-    var exp = cmEl("cm-exp").value.trim();
-    if (_cmMode === "exp") { post("git_expiry_save", { host: _cmHost, user: _cmUser, expiresAt: exp }); }
-    else {
-      post("git_cred_save", {
-        host: _cmHost, user: _cmUser, pat: cmEl("cm-pat").value, expiresAt: exp,
-      });
-    }
-    closeCred();
-  }
-  cmEl("cm-cancel").addEventListener("click", closeCred);
-  cmEl("cm-ok").addEventListener("click", cmSave);
-  cmEl("cm-url").addEventListener("input", cmUrlChanged);
-  cmEl("cm-pat").addEventListener("input", cmSync);
-  cmEl("cm-pick").addEventListener("change", function () {
-    if (cmEl("cm-pick").value) cmEl("cm-exp").value = cmEl("cm-pick").value;
-    cmGlobalWarn();
-  });
-  // เตือนถ้า token ที่เลือกเป็น Global PAT — ยังบันทึกได้ (ตอนนี้ยังใช้งานได้จริง) แต่ต้องรู้ตัว
-  function cmGlobalWarn() {
-    var sel = cmEl("cm-pick"), o = sel.options[sel.selectedIndex];
-    if (!o || o.getAttribute("data-g") !== "1") return;
-    cmEl("cm-expstatus").textContent =
-      "token นี้เป็น Global PAT (ครอบทุก org) — Azure เลิกรองรับ 1 ธ.ค. 2026 ควรสร้างใหม่แบบเลือก org เดียว";
-    cmEl("cm-expstatus").className = "merr warn";
-  }
-  cmEl("cmodal").addEventListener("click", function (e) { if (e.target === cmEl("cmodal")) closeCred(); });
-  cmEl("cmodal").addEventListener("keydown", function (e) {
-    if (e.key === "Enter") { e.preventDefault(); cmSave(); }
-    else if (e.key === "Escape") {
-      e.preventDefault();
-      if (amEl("amodal").style.display === "flex") closeApiAdd();
-      else closeCred();
-    }
+  amEl("amodal").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); amSave(); }
+    else if (e.key === "Escape") { e.preventDefault(); closeApiAdd(); }
   });
 
   function showZone(z) {
     document.getElementById("zone-ai").style.display = z === "ai" ? "" : "none";
     document.getElementById("zone-api").style.display = z === "api" ? "" : "none";
-    document.getElementById("zone-git").style.display = z === "git" ? "" : "none";
     const bs = document.querySelectorAll(".zone");
     for (let i = 0; i < bs.length; i++) {
       if (bs[i].getAttribute("data-z") === z) bs[i].classList.add("on");
@@ -1247,16 +882,6 @@ function renderShell(): string {
     if (t.classList.contains("apitest")) { post("api_test", { provider: ap, label: al }); return; }
     if (t.classList.contains("apisw")) { post("api_switch", { provider: ap, label: al }); return; }
     if (t.classList.contains("apidel")) { post("api_del", { provider: ap, label: al }); return; }
-    const h = t.getAttribute("data-h");
-    const u = t.getAttribute("data-u");
-    if (t.classList.contains("git-add")) { openCred("add"); return; }
-    if (t.classList.contains("gtest")) { post("git_test", { host: h, user: u }); return; }
-    // เปลี่ยน PAT = เขียนทับคู่ host+user เดิม → modal โหมด "pat" (ไม่ต้องถาม URL ซ้ำ)
-    if (t.classList.contains("gedit")) { openCred("pat", h, u, t.getAttribute("data-e") || ""); return; }
-    // แก้แค่วันหมดอายุ ไม่ต้องกรอก PAT ใหม่ (เผื่อ user เพิ่งไปต่ออายุที่เว็บ Azure)
-    if (t.classList.contains("gexp")) { openCred("exp", h, u, t.getAttribute("data-e") || ""); return; }
-    // ⛔ ต้องมาก่อน .del ตัวล่าง: gdel มีคลาส del ด้วย ถ้าปล่อยไปถึงบรรทัดนั้นจะกลายเป็นลบ account AI
-    if (t.classList.contains("gdel")) { post("git_del", { host: h, user: u }); return; }
     const p = t.getAttribute("data-p");
     const l = t.getAttribute("data-l");
     if (t.classList.contains("usage-btn")) { post("refresh_usage"); return; }
@@ -1277,10 +902,6 @@ function renderShell(): string {
       apiTestMap[apiKeyOf(m.provider, m.label)] = { ok: m.ok, text: m.text };
       renderApi();
     }
-    else if (m.type === "git") { gitView = m; renderGit(); }
-    else if (m.type === "git_url_result") { cmUrlResult(m); }
-    else if (m.type === "git_pat_dates_result") { cmDatesResult(m); }
-    else if (m.type === "git_test_result") { testMap[key(m.host, m.user)] = { ok: m.ok, text: m.text }; renderGit(); }
   });
 
   post("ready");

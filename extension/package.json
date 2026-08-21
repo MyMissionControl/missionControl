@@ -82,7 +82,7 @@
       },
       {
         "command": "missioncontrol.accounts",
-        "title": "Mission Control: Connections (AI accounts + git credentials)"
+        "title": "Mission Control: Connections (AI accounts + API providers)"
       },
       {
         "command": "missioncontrol.settings",
