@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ import {
   runSessionLiveForProject,
   resolveCardActions,
   type RunMarker,
+  classifyRunTransition,
 } from "./continueRun";
 import type { OracleTeam } from "./teams";
 
@@ -353,4 +354,54 @@ test("resolveCardActions: stale → actions + crash 'stale' (session ดับ)"
 test("resolveCardActions: error → actions + crash 'error'", () => {
   expect(resolveCardActions("error", false, 2)).toEqual({ kind: "actions", runNEnabled: true, crash: "error" });
   expect(resolveCardActions("error", false, 1)).toEqual({ kind: "actions", runNEnabled: false, crash: "error" });
+});
+
+// ⛔⛔ 2b: the spin poll reaped a DEATH exactly like a clean finish. A run whose
+// session vanished with its marker still saying `running` was rewritten as a normal
+// completion — the card went green, the button unlocked, and nothing said the sprint
+// had died mid-flight. The classification has to be explicit, and it has to be pure
+// so it is testable without the webview.
+describe("classifyRunTransition", () => {
+  const live: RunMarker = { status: "running", session: "claude-bob", startedAt: "2026-08-21T00:00:00.000Z" };
+
+  test("R1 marker ยัง running + tmux ยืนยันว่า session หายไป = ตายกลางรัน", () => {
+    expect(classifyRunTransition({ marker: live, sessionState: "absent", trackedSession: "claude-bob" })).toBe(
+      "died",
+    );
+  });
+
+  test("R2 marker เขียน done/error/cancelled แล้ว = จบตามปกติ", () => {
+    for (const status of ["done", "error", "cancelled"] as const) {
+      expect(
+        classifyRunTransition({ marker: { status }, sessionState: "absent", trackedSession: "claude-bob" }),
+      ).toBe("finished");
+    }
+  });
+
+  test("R3 ไม่มี marker แล้ว = จบตามปกติ (ถูกลบ/ถูกเขียนทับ)", () => {
+    expect(classifyRunTransition({ marker: null, sessionState: "absent", trackedSession: "claude-bob" })).toBe(
+      "finished",
+    );
+  });
+
+  test("R4 ถาม tmux ไม่ได้ = ยังถือว่ารันอยู่ ห้ามประกาศว่าตาย", () => {
+    expect(
+      classifyRunTransition({ marker: live, sessionState: "unknown", trackedSession: "claude-bob" }),
+    ).toBe("running");
+    expect(
+      classifyRunTransition({ marker: live, sessionState: "present", trackedSession: "claude-bob" }),
+    ).toBe("running");
+  });
+
+  test("R5 marker เป็นของรันใหม่ (session ไม่ตรงกับตัวที่เราตาม) = ห้ามแตะ", () => {
+    // A second run can start for the same project between two ticks. Writing an
+    // error into ITS marker would kill a healthy run's card.
+    expect(
+      classifyRunTransition({
+        marker: { status: "running", session: "claude-bob-2", startedAt: "2026-08-21T01:00:00.000Z" },
+        sessionState: "absent",
+        trackedSession: "claude-bob",
+      }),
+    ).toBe("finished");
+  });
 });

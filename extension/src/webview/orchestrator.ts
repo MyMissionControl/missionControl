@@ -50,6 +50,8 @@ import {
   resolveButtonState,
   resolveCardActions,
   runSessionLiveForProject,
+  classifyRunTransition,
+  writeRunMarker,
 } from "../commands/continueRun";
 import type { OracleTeam } from "../commands/teams";
 import {
@@ -338,6 +340,28 @@ function startSpinPoll(panel: vscode.WebviewPanel) {
     // overwrote its marker with a bare done/error (or it vanished). The extension
     // gets no callback, so this transition is the only completion signal.
     const someFinished = [..._runningRuns.keys()].some((path) => !nowRunning.has(path));
+    // ⛔⛤ A run can leave the live set two very different ways, and they used to be
+    // the same code path: it FINISHED (orches-drive rewrote the marker done/error),
+    // or it DIED (session gone with the marker still saying `running` — OOM, a closed
+    // terminal, tmux killed out-of-band). Reaping both silently turned a death into a
+    // green card with the buttons unlocked and nothing on screen saying the sprint
+    // never landed. Classify first, then reap.
+    for (const [projPath, sess] of _runningRuns) {
+      if (nowRunning.has(projPath)) continue;
+      const verdict = classifyRunTransition({
+        marker: readRunMarker(projPath),
+        sessionState: tmuxSessionState(sess),
+        trackedSession: sess,
+      });
+      if (verdict !== "died") continue;
+      writeRunMarker(projPath, {
+        status: "error",
+        errorMsg: "session ดับกลางรัน (ไม่ได้เขียน done/error)",
+      });
+      void vscode.window.showWarningMessage(
+        `รันของ '${path.basename(projPath)}' ดับกลางทาง — session '${sess}' หายไปโดยไม่มีการเขียนผลลัพธ์`,
+      );
+    }
     // Reap the finished headless run's tmux session — `--once` writes its marker
     // then exits WITHOUT the Step-6 teardown, so the session (dead orchestrator +
     // idle worker windows) lingers. This is what closes it when the run finishes.

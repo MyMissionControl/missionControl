@@ -8,6 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import type { SessionState } from "./tmuxProbe";
 import { labelNamesProject } from "../webview/sessions";
 import type { DrivenState, ResumableProject } from "./orchestratorResume";
 import type { OracleTeam } from "./teams";
@@ -209,6 +210,38 @@ export function clampSprintCount(raw: string, remaining: number): number | null 
  *  session name WHILE it was live; this returns the ones to reap now. Blank
  *  sessions are skipped (nothing safe to kill). Pure — the tmux kill is the
  *  caller's job. */
+/** What happened to a run that stopped being live between two poll ticks. */
+export type RunTransition = "running" | "finished" | "died";
+
+/**
+ * Did that run FINISH, or did it DIE?
+ *
+ * ⛔⛔ The poll used to treat both identically: a run that dropped out of the live
+ * set was reaped and re-rendered as a completion, so a session killed out-of-band
+ * (OOM, a closed terminal, `tmux kill-server`) with its marker still saying
+ * `running` showed up as a clean green finish. Hours of sprint could end that way
+ * with nothing on screen saying so.
+ *
+ * The distinction is only ever safe to draw from a CONFIRMED absence — `unknown`
+ * (we could not ask tmux) must read as "still running", never as a death. See
+ * tmuxProbe.ts.
+ *
+ * `trackedSession` is the session this poll was following. A marker naming a
+ * DIFFERENT session belongs to a run that started after we last looked, and writing
+ * an error into it would break a healthy run's card.
+ */
+export function classifyRunTransition(o: {
+  marker: RunMarker | null;
+  sessionState: SessionState;
+  trackedSession: string;
+}): RunTransition {
+  if (o.sessionState !== "absent") return "running";
+  const m = o.marker;
+  if (!m || m.status !== "running") return "finished";
+  if (m.session && o.trackedSession && m.session !== o.trackedSession) return "finished";
+  return "died";
+}
+
 export function finishedSessions(
   prev: ReadonlyMap<string, string>,
   nowRunningPaths: ReadonlySet<string>,
