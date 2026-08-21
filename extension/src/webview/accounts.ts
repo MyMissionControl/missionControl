@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
 
 import * as vscode from "vscode";
 
@@ -26,6 +27,7 @@ import {
   saveApiAccount,
 } from "../commands/apiProvidersOps";
 import { fetchClaudeUsage } from "../commands/usage";
+import { CCS_INSTALL_CMD, ccsLaunchCommand, resolveCcsLaunch } from "../commands/ccsLaunch";
 import { setTabIcon } from "./tabIcon";
 
 // Editor-area panel for managing multiple subscription logins across AI CLIs.
@@ -327,40 +329,33 @@ export function openAccountsPanel(): vscode.WebviewPanel {
       }
 
       // เปิด dashboard ของ CCS — ของนอก ไม่ใช่ทางที่ MC ใช้สลับ account/provider
+      // (ดู docs/ccs-evaluation-2026-08-20.md) · รันตัวที่ลงแบบ contained + CAGED
+      // (HOME ชี้ไป ~/.mc/ccs-home) → CCS มองไม่เห็น ~/.claude จริง
       // ⛔ `ccs config` เปิดเบราว์เซอร์เองและปลุก CLIProxy daemon (ไม่มี flag ปิด) จึงเรียกได้
       //    เฉพาะตอนคนกดปุ่มนี้เท่านั้น ห้ามเรียกจากที่อื่นหรือเบื้องหลังเด็ดขาด
       case "open_ccs_ui": {
-        let bin = "";
-        try {
-          // ผ่าน login shell เพราะ bin ของ bun/npm global มักไม่อยู่ใน PATH ของ extension host
-          bin = execFileSync("bash", ["-lc", "command -v ccs"], {
-            encoding: "utf8",
-            timeout: 5000,
-          }).trim();
-        } catch {
-          bin = "";
-        }
-        if (!bin) {
-          const CMD = "bun add -g @kaitranntt/ccs";
+        const launch = resolveCcsLaunch(os.homedir(), fs.existsSync);
+        if (launch.kind === "missing") {
           const pick = await vscode.window.showInformationMessage(
-            "ยังไม่ได้ลง CCS บนเครื่องนี้ — UI นั้นเป็นของ CLI ตัวนั้น ไม่ใช่ของ MC",
+            "ยังไม่ได้ลง CCS แบบ contained บนเครื่องนี้ — UI นั้นเป็นของ CLI ตัวนั้น ไม่ใช่ของ MC",
             {
               modal: true,
               detail:
-                "MC สลับ account/provider ได้เองอยู่แล้ว ไม่ต้องพึ่ง CCS · ปุ่มนี้มีไว้เปิด UI ของเขาถ้าอยากดู\n\nลงด้วย:\n" +
-                CMD +
+                "MC สลับ account/provider ได้เองอยู่แล้ว ไม่ต้องพึ่ง CCS · ปุ่มนี้มีไว้เปิด UI ของเขาถ้าอยากดู\n\nลงแบบ contained (ไม่ลง global, ไม่แตะ ~/.claude):\n" +
+                CCS_INSTALL_CMD +
                 "\n\nข้อควรระวังที่อ่านจากซอร์สมาแล้ว: อย่ารัน 'ccs sync' เพราะมันเอา skills/commands ของตัวเอง symlink เข้า ~/.claude",
             },
             "คัดลอกคำสั่งลง",
           );
           if (pick) {
-            await vscode.env.clipboard.writeText(CMD);
+            await vscode.env.clipboard.writeText(CCS_INSTALL_CMD);
             vscode.window.setStatusBarMessage("คัดลอกคำสั่งแล้ว — วางใน terminal เพื่อลง", 4000);
           }
           return;
         }
+        // caged: HOME=~/.mc/ccs-home ⇒ CCS อ่าน/เขียนแต่ในกรง เห็น ~/.claude จริงไม่ได้
         const term = vscode.window.createTerminal({ name: "CCS UI" });
-        term.sendText("ccs config");
+        term.sendText(ccsLaunchCommand(launch.entry, launch.cageHome));
         term.show();
         return;
       }
