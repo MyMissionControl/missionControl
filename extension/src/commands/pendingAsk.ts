@@ -37,6 +37,9 @@ export interface PaneAsk {
    *  answering. Both kinds print the SAME footer (checked against real captures
    *  of each), so the `[ ]` in front of every option is the only tell. */
   multiSelect: boolean;
+  /** The printed digits did not read 1..N — the box is clipped or mixed with an
+   *  older frame, so a digit cannot be sent (see `isDigitAnswerable`). */
+  suspect?: boolean;
 }
 
 /** The modal's footer — the ONE unambiguous "a choice box is open" marker.
@@ -59,6 +62,56 @@ const RULE_RE = /^[\s ]*[─━—-]{8,}[\s ]*$/;
 const BUILTIN_RE = /^(Type something\.?|Chat about this)$/i;
 /** The TUI answers with one keystroke, so 9 is the ceiling. */
 const MAX_DIGIT = 9;
+
+/**
+ * The pane is WORKING — ported from the engine's `ORCHES_BUSY_RE`
+ * (orches-integrate.sh:139-140), which was calibrated against real captures.
+ *
+ * Two deliberate differences, both from frames the engine's version misses:
+ *  - the spinner branch is ANCHORED at the start of the line and then allows any
+ *    text up to the ellipsis, instead of `[A-Za-z0-9 ]{0,18}`. Real spinner lines
+ *    like `· Driving sprint 4 (timeline)… (21m 58s …)` and `✽ Completion protocol:
+ *    commit, oracle memory, notes, done marker… (19m 38s)` blow that bound, and
+ *    only classified BUSY when a token counter happened to share the screen.
+ *    Anchoring is what keeps prose safe: a wrapped sentence or a bullet ending in
+ *    `…` never starts with a spinner glyph in column 0.
+ *  - the ellipsis is REQUIRED. `✻ Worked for 3m 40s` is the same glyph family and
+ *    means the turn ENDED — matching it would read every finished pane as busy.
+ */
+const BUSY_SPIN_RE = /^[\s ]*[·*✢✳✶✻✽][\s ]+\S.*…/;
+const BUSY_TOKENS_RE = /[↓↑][^0-9A-Za-z]*[0-9][0-9.]*[kKmM]?[^0-9A-Za-z]*tokens/;
+const BUSY_TOOL_RE = /⎿[^0-9A-Za-z]*Running/;
+const BUSY_INTERRUPT_RE = /esc to interrupt/i;
+
+/**
+ * The pane's own live chrome: the ctx meter and the mode bar at the very bottom.
+ *
+ * ⛔ These matter because a live box REPLACES them. Across all 36 real capture
+ * frames on this machine that contain a footer, not one shows a box footer with
+ * the pane's `ctx [`/`⏵⏵` bar below it (the single apparent exception concatenated
+ * three OTHER panes into one capture with `echo`). So chrome BELOW a footer means
+ * the footer is scrollback, not a live box.
+ */
+const LIVE_CHROME_RE = /(?:ctx \[|^[\s ]*(?:⏵⏵|⏸)[\s ])/;
+
+/** True when the pane is mid-turn (spinner, streaming tokens, a tool running). */
+export function isPaneBusy(text: string): boolean {
+  if (!text) return false;
+  const lines = text.split("\n").filter((l) => l.replace(/[\s ]/g, "") !== "");
+  // Same window the engine uses for `busy`: the last 20 non-blank lines. Wider
+  // than `ready` on purpose — the spinner can sit above a tall tool-output block.
+  for (const line of lines.slice(-20)) {
+    if (
+      BUSY_SPIN_RE.test(line) ||
+      BUSY_TOKENS_RE.test(line) ||
+      BUSY_TOOL_RE.test(line) ||
+      BUSY_INTERRUPT_RE.test(line)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 const isBlank = (l: string) => !l.replace(/[\s ]/g, "");
 
@@ -84,19 +137,45 @@ export function parseAskFromPane(text: string): PaneAsk | null {
   }
   if (footer < 0) return null;
 
+  // ⛔⛔ Is that footer LIVE, or is it scrollback? `pendingAskWatch` captures
+  // `-S -60`, so an answered box stays inside the window for a long time; keying on
+  // the footer alone made MC report a working agent as blocked, and "answering" it
+  // typed a digit into that agent's composer.
+  //   The tell is what the TUI drew BELOW the footer. A live box owns the bottom of
+  // the pane: no composer, no ctx meter, no mode bar, no spinner. If any of those
+  // are below the footer, the box is already gone.
+  //   ⛔ NOT the same as "the footer must be the last non-blank line" — that rule
+  // looks equivalent and is not: 16 of this machine's 36 real footer frames have
+  // content below the footer, 7 of them being blocking permission modals with the
+  // task panel rendered underneath (see REAL_MODAL_WITH_TODO in the tests). A
+  // last-line rule would classify every one of those as "nothing waiting".
+  const below = lines.slice(footer + 1);
+  if (below.some((l) => LIVE_CHROME_RE.test(l)) || isPaneBusy(below.join("\n"))) return null;
+
   // Walk up from the footer to the header, keeping option rows in screen order.
   const options: AskOption[] = [];
   const seen = new Set<number>();
   let header = "";
   let headerIdx = -1;
   let multiSelect = false;
+  let boxTop = Math.max(0, footer - 59); // where the walk gave up — see the description pass
   for (let i = footer - 1; i >= 0 && footer - i < 60; i--) {
     const line = lines[i];
     if (isBlank(line) || RULE_RE.test(line)) continue;
+    // ⛔ A SECOND footer going up is the previous box's boundary. Without this the
+    // walk only stopped at a header, so a header-less modal (every `Do you want to
+    // proceed?` shape) kept harvesting the older box's numbered rows as its own
+    // options 3..9 — digits the live box cannot accept, "sent" anyway, and then
+    // suppressed by `_seen` for good.
+    if (FOOTER_RE.test(line)) {
+      boxTop = i + 1;
+      break;
+    }
     const h = HEADER_RE.exec(line);
     if (h) {
       header = h[1].trim();
       headerIdx = i;
+      boxTop = i;
       break;
     }
     const m = OPTION_RE.exec(line);
@@ -130,7 +209,9 @@ export function parseAskFromPane(text: string): PaneAsk | null {
   }
 
   // A description is the indented run directly under an option row.
-  for (let i = 0; i < lines.length && i < footer; i++) {
+  // ⛔ Bounded to THIS box (`boxTop`), not from index 0: an unbounded scan lifted
+  // descriptions off an older box's identically-numbered rows.
+  for (let i = boxTop; i < lines.length && i < footer; i++) {
     const m = OPTION_RE.exec(lines[i]);
     if (!m) continue;
     const opt = options.find((o) => o.key === Number(m[1]));
@@ -141,7 +222,14 @@ export function parseAskFromPane(text: string): PaneAsk | null {
       if (d !== opt.label && !FOOTER_RE.test(d)) opt.description = d;
     }
   }
-  return { header, question, options, multiSelect };
+  // ⛔ Digits must read 1..N with nothing missing. When they do not, the box was
+  // clipped by the capture window (its option 1 scrolled off) or rows from another
+  // frame leaked in — either way the mapping digit->choice is a GUESS. Show it,
+  // never type into it: `suspect` is what `isDigitAnswerable` refuses on.
+  // (A built-in row dropped mid-list cannot cause this: the TUI only ever appends
+  // `Type something.` / `Chat about this` at the END.)
+  const suspect = options.some((o, i) => o.key !== i + 1);
+  return { header, question, options, multiSelect, suspect };
 }
 
 /**
@@ -154,7 +242,7 @@ export function parseAskFromPane(text: string): PaneAsk | null {
  * half-answered from here.
  */
 export function isDigitAnswerable(ask: PaneAsk): boolean {
-  return !ask.multiSelect && ask.options.length > 0;
+  return !ask.multiSelect && !ask.suspect && ask.options.length > 0;
 }
 
 /**
@@ -375,10 +463,26 @@ export interface PaneRow {
   pane: string;
   session: string;
   cmd: string;
+  /** `@orch_role` — the pane option orches-drive stamps (orchestrator/worker). A
+   *  pane TITLE can be overwritten by whatever runs inside the pane; the option
+   *  cannot, which is why the engine tags panes this way. */
+  role?: string;
+  /** `@orch_member` — WHICH agent (bob, jack, …). This is the name a human needs
+   *  when four workers are open and one of them is stuck. */
+  member?: string;
+  windowIndex?: string;
+  /** Is that pane's window the one on screen? (`#{window_active}`) */
+  windowActive?: boolean;
+  /** Is it the focused pane inside that window? (`#{pane_active}`) */
+  paneActive?: boolean;
 }
 
-/** tmux format for the one `list-panes -a` the poller runs per tick. */
-export const PANE_LIST_FMT = "#{pane_id}\t#{session_name}\t#{pane_current_command}";
+/** tmux format for the one `list-panes -a` the poller runs per tick.
+ *  ⛔ Appended fields only — `parsePaneList` still accepts the 3-column form, so a
+ *  stale format string can never blank the whole sweep. Verified on this tmux
+ *  build: user options render as an empty field for panes that lack them. */
+export const PANE_LIST_FMT =
+  "#{pane_id}\t#{session_name}\t#{pane_current_command}\t#{@orch_role}\t#{@orch_member}\t#{window_index}\t#{window_active}\t#{pane_active}";
 
 /** Parse `tmux list-panes -a -F PANE_LIST_FMT`. Rows whose pane id would be
  *  unsafe to hand back to tmux are dropped, so every row is a valid target. */
@@ -388,9 +492,19 @@ export function parsePaneList(raw: string): PaneRow[] {
     if (!line) continue;
     const f = line.split("\t");
     if (f.length < 3) continue;
-    const [pane, session, cmd] = f;
+    const [pane, session, cmd, role, member, windowIndex, windowActive, paneActive] = f;
     if (!/^%\d+$/.test(pane) || !session) continue;
-    out.push({ pane, session, cmd: cmd || "" });
+    const opt = (v: string | undefined): string | undefined => (v && v.trim() ? v.trim() : undefined);
+    out.push({
+      pane,
+      session,
+      cmd: cmd || "",
+      role: opt(role),
+      member: opt(member),
+      windowIndex: opt(windowIndex),
+      windowActive: windowActive === undefined ? undefined : windowActive.trim() === "1",
+      paneActive: paneActive === undefined ? undefined : paneActive.trim() === "1",
+    });
   }
   return out;
 }
@@ -415,8 +529,14 @@ export function parsePaneList(raw: string): PaneRow[] {
  *
  *  ⛔⛔ ทำไมต้องมี: กฎสองข้อที่ถูกต้องทั้งคู่รวมกันแล้วทำให้ run ค้างเงียบได้จริง —
  *  (1) มีคน attach = ไม่เด้ง (กฎ 2026-08-16) แต่ "เปิดแท็บค้างไว้" ไม่เท่ากับ "กำลังมองอยู่"
- *  (2) กล่องที่เคยเด้งแล้วถูกปิด จะไม่เด้งอีกเลย (`_seen` ไม่เคยล้าง)
+ *  (2) กล่องที่เคยเด้งแล้วถูกปิด จะไม่เด้งอีกเลย
  *  ⇒ ทางแก้ที่ครอบทั้งสองข้อด้วยกฎเดียว: เงียบได้ แต่ถ้ายังไม่มีใครตอบเกิน N นาที ให้พูดหนึ่งครั้ง
+ *
+ *  ⛔ อัปเดต 2026-08-21 — สองบรรทัดข้างบนเคยอธิบายพฤติกรรมที่เลิกจริงไปแล้ว:
+ *  · ตั้งแต่ `2ac91ac` ตัว nag ถูกครอบด้วยด่าน attach เหมือน auto-open (`nagAllowed`)
+ *    ⇒ **ถ้ามีคน attach อยู่ nag ไม่เด้งกล่องอีกแล้ว** เปลี่ยนแค่สีแถบสถานะ
+ *    ⇒ สำหรับคนที่ attach ค้างไว้ `nagMinutes` คือปุ่มปรับ "แถบสถานะเตือนเมื่อไร" ไม่ใช่ "เด้งซ้ำเมื่อไร"
+ *  · `_seen` ถูกล้างแล้วเมื่อคำถามหายไปจากจอ (ดู `reconcileSeen`) ⇒ ถามใหม่เด้งได้อีก
  *  ⛔ ครั้งเดียวต่อคำถาม (alreadyNagged) — เตือนทุก tick คือเหตุผลที่กฎเดิมมีอยู่แต่แรก
  *  ⛔ nagMs <= 0 = ปิดฟีเจอร์ (คนที่นั่งเฝ้าจออยู่ตลอดไม่ต้องถูกกวน) */
 export function nagDue(o: { waitedMs: number; nagMs: number; alreadyNagged: boolean }): boolean {
@@ -460,12 +580,54 @@ export function nagAllowed(o: {
   return nagDue({ waitedMs: o.waitedMs, nagMs: o.nagMs, alreadyNagged: o.alreadyNagged });
 }
 
+/**
+ * Which agent is this pane? The name a human can act on, never `%NN` alone.
+ *
+ * Falls back `@orch_member` -> `@orch_role` -> pane id so the label is never empty:
+ * a status bar that named only the session is what made a four-worker team
+ * indistinguishable when one of them blocked.
+ */
+export function paneLabel(row: PaneRow): string {
+  return `${row.session} · ${row.member || row.role || row.pane}`;
+}
+
+/**
+ * Did tmux answer "there is no server", or did the call itself fail?
+ *
+ * ⛔ These must not collapse into one outcome. "No server" really means no agents,
+ * so an empty sweep is the truth. Anything else — tmux missing from PATH, the wrong
+ * socket, EAGAIN under load, a killed child — means WE cannot see, and reporting
+ * that as "nothing is waiting" hides an open question, hides the status bar, and
+ * closes the box that was on screen. The honest move is to keep the last known
+ * state and say on screen that we are blind.
+ */
+export function tmuxNoServer(stderr: string): boolean {
+  return /no server running|error connecting to/i.test(stderr || "");
+}
+
+/**
+ * Keys to forget from the "already shown" set: everything no longer on screen.
+ *
+ * `_seen` is what stops a box re-popping on every 4s tick, but it was never pruned
+ * (unlike `_firstSeen`/`_nagged`), so the SAME question asked again in the same pane
+ * could never auto-open again for the life of the window.
+ *
+ * ⛔ Caller contract: never pass a `live` set derived from a FAILED sweep — that
+ * would forget everything on one tmux hiccup. See `tmuxNoServer`.
+ */
+export function reconcileSeen(seen: Iterable<string>, live: Iterable<string>): string[] {
+  const alive = new Set(live);
+  return [...seen].filter((k) => !alive.has(k));
+}
+
 /** A pane blocked on a choice box, plus where to answer it. */
 export interface PendingHit {
   pane: string;
   session: string;
   ask: PaneAsk;
   key: string;
+  /** The `list-panes` row this came from — carries WHICH agent is blocked. */
+  row?: PaneRow;
 }
 
 /**
@@ -486,7 +648,7 @@ export function scanPending(panes: PaneRow[], capture: (pane: string) => string 
     }
     if (!text) continue;
     const ask = parseAskFromPane(text);
-    if (ask) out.push({ pane: p.pane, session: p.session, ask, key: askKey(p.pane, ask) });
+    if (ask) out.push({ pane: p.pane, session: p.session, ask, key: askKey(p.pane, ask), row: p });
   }
   return out;
 }

@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import {
   autoOpenSkipReason,
+  isPaneBusy,
+  paneLabel,
+  reconcileSeen,
+  tmuxNoServer,
   nagAllowed,
   nagDue,
   buildInModeArgs,
@@ -558,5 +562,265 @@ describe("nagDue", () => {
   test("ตั้ง 0 หรือค่าพิการ = ปิดฟีเจอร์", () => {
     expect(nagDue({ waitedMs: MS * 9, nagMs: 0, alreadyNagged: false })).toBe(false);
     expect(nagDue({ waitedMs: MS * 9, nagMs: Number.NaN, alreadyNagged: false })).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// A pane that is WORKING must never be reported as blocked — and a real box must
+// never be missed. Both halves are load-bearing; see the fixture comments.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ⭐ REAL `tmux capture-pane -p` frames, byte-exact (NBSP and all), pulled out of this
+// machine's own session transcripts on 2026-08-21 — not retyped.
+//
+// REAL_MODAL_WITH_TODO: a genuine permission modal with the TUI's task panel rendered
+// BELOW its footer (7 non-blank lines below it). Source: foreman-oracle session
+// 5ff2f15d-ea1d-469f-9290-c4ab0099fd24.jsonl:203, `tmux capture-pane -t %1 -p | tail -40`.
+// ⛔ This frame is why "the footer must be the last non-blank line" is NOT a valid
+// liveness rule: 16 of the 36 real footer frames on this box have content below the
+// footer, and 7 of those are blocking permission modals exactly like this one. A
+// last-line rule would silently classify all of them as "no box open".
+const REAL_MODAL_WITH_TODO = [
+  "   cat prisma.config.ts",
+  "   echo \"=== .env ===\"",
+  "   cat .env",
+  "   Run shell command",
+  "",
+  " Claude requested permissions to edit",
+  " /home/chillox-intern/Desktop/soulbrew/github.com/fufu-2345/projects/agentskill",
+  " -marketplace-newflow4/agents/foundation/.claude which is a sensitive file.",
+  "",
+  " Do you want to proceed?",
+  " ❯ 1. Yes",
+  "   2. Yes, and always allow access to .claude/ from this project",
+  "   3. No",
+  "",
+  " Esc to cancel · Tab to amend · ctrl+e to explain",
+  "",
+  "  9 tasks (0 done, 1 in progress, 8 open)",
+  "  ◼ Install deps + scaffold Next.js/Prisma structure",
+  "  ◻ Write schema.prisma with all Sprint 1 models",
+  "  ◻ Generate prisma client + db push + seed script",
+  "  ◻ Implement auth lib (hash, session, requireAuth)",
+  "  ◻ Implement /api/auth/register and /api/auth/login routes",
+  "   … +4 pending",
+].join("\n");
+
+
+// REAL_ASKBOX_TABFORM: a real AskUserQuestion box whose footer uses the
+// `Tab/Arrow keys` wording instead of `↑/↓` (both forms are live in the field), with a
+// tab strip, Thai labels and `4. Chat about this` printed BELOW the closing box rule.
+// Source: session a43210d6-f9a1-4cb7-b2a0-30b4cabd174f.jsonl:522.
+const REAL_ASKBOX_TABFORM = [
+  "  เข้าใจ state ปัจจุบัน ✅",
+  "",
+  "  - learningPlatform: redesign (UI corporate+hightech) + auth/callback fix — ผม review + verify",
+  "  (tsc/vitest 110/vitest·build ผ่านหมด) + commit + push แล้ว (83665ea, in sync กับ origin)",
+  "  - orches-skills: gate 1-3 opt-in merge+push แล้ว, DEFAULT-SKIP → ไม่กระทบ build ที่ผมขับ (รับทราบ)",
+  "",
+  "  Preview บน extension — ยังต้องเตรียม (นี่คือที่อยากเคาะกับ user ก่อน)",
+  "",
+  "  เช็คเครื่องแล้ว: Postgres รันอยู่ ✅ · ffmpeg ✅ · tables auto-create ตอน boot ✅",
+  "  แต่ที่ยังขาด → ทำให้ preview เปิดแล้วคลิกได้ทุกฟีเจอร์ไม่ได้:",
+  "  1. ไม่มี seed data — DB ว่าง → ทุกหน้าว่างเปล่า (ไม่มีคอร์ส/วิดีโอ/ข้อสอบ/อันดับให้กด)",
+  "  2. login = SCG SSO2 จริง — ไม่มี dev-bypass → ต้องมี SCG account จริง + SSO redirect กลับ localhost ได้ และสิทธิ์",
+  "  admin ขึ้นกับ profile จริง (กดฟีเจอร์ admin เช่นอัปโหลด/สร้างคอร์สอาจไม่ได้)",
+  "  3. ไม่มี .env (api/web) + DB/user learning ยังต้องตั้ง password/สร้าง db",
+  "",
+  "  ขอเคาะ 3 อย่างก่อนลงมือ (จะได้ไม่เดางานใหญ่):",
+  "──────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "←  ☐ Login  ☐ Seed  ☐ วิธีทำ  ✔ Submit  →",
+  "",
+  "Preview จะให้ login ยังไง? (ตัวชี้ขาดว่าจะกดฟีเจอร์ admin ได้ครบไหม)",
+  "",
+  "❯ 1. เพิ่ม dev-login bypass",
+  "     ทำปุ่ม/endpoint dev-login (เฉพาะ NODE_ENV=development) + seed admin 1 + learner 1 → คลิกได้ทุกฟีเจอร์รวม",
+  "     admin โดยไม่พึ่ง SCG. เป็น feature ลง repo ได้ (มีประโยชน์ demo/test ต่อ)",
+  "  2. ใช้ SCG SSO2 จริง",
+  "     login ด้วย SCG account จริง — ต้องเข้าถึง sso2-dev ได้จาก browser preview + สิทธิ์ admin ขึ้นกับ profile จริง",
+  "     (อาจกด admin ไม่ได้ถ้า profile ไม่ใช่ admin)",
+  "  3. Type something.",
+  "──────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "  4. Chat about this",
+  "",
+  "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+].join("\n");
+
+
+// REAL_LIVE_TAIL: the bottom of a real pane with NO box open — the finished-turn line,
+// the composer between two rules, the ctx meter and the mode bar. Byte-exact from the
+// engine's own committed capture fixture
+// orches-skills/skills/orches-drive/tests/fixtures/pane-busy/final-112206-pane1-bob-IDLE.txt.
+const REAL_LIVE_TAIL = [
+  "✻ Worked for 3m 40s",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────",
+  "❯ ok land it",
+  "────────────────────────────────────────────────────────────────────────────────",
+  "  ctx [██████████] 100%",
+  "  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
+].join("\n");
+
+// A real 2-option permission modal (verbatim tail of a live capture).
+const PERM_2_OPTIONS = [
+  "Do you want to proceed?",
+  " ❯ 1. Yes",
+  "   2. No",
+  "",
+  " Esc to cancel · Tab to amend · ctrl+e to explain",
+].join("\n");
+
+describe("stale frame vs live box", () => {
+  test("V1 (lock) permission modal จริงที่มี todo panel ใต้ footer = ยังต้องเป็นกล่อง", () => {
+    const ask = parseAskFromPane(REAL_MODAL_WITH_TODO);
+    expect(ask).not.toBeNull();
+    expect(ask!.options.map((o) => o.key)).toEqual([1, 2, 3]);
+    expect(ask!.options[0].label).toBe("Yes");
+  });
+
+  test("V2 (lock) กล่องรูป Tab/Arrow keys + label ไทย = ยังต้องเป็นกล่อง", () => {
+    const ask = parseAskFromPane(REAL_ASKBOX_TABFORM);
+    expect(ask).not.toBeNull();
+    // The frame prints FOUR numbered rows; `3. Type something.` and `4. Chat about
+    // this` are the TUI's own built-ins and BUILTIN_RE drops them on purpose, so two
+    // real choices is the correct answer here — not a parse miss.
+    expect(ask!.options.map((o) => o.key)).toEqual([1, 2]);
+    expect(ask!.options[0].label).toBe("เพิ่ม dev-login bypass");
+  });
+
+  // ⛔⛔ The real false positive, and it is NOT "the todo panel draws the footer" —
+  // it is the CAPTURE WINDOW. pendingAskWatch captures `-S -60`, i.e. 60 lines of
+  // SCROLLBACK, and parseAskFromPane anchors on the LAST footer in that text. Once a
+  // box is answered the pane scrolls on, but the answered box is still inside the
+  // 60-line window, so MC keeps reporting it: the agent is working, MC says "waiting
+  // for you", and pressing an option types a digit into its composer.
+  // The tell that the box is gone is what the TUI draws BELOW that footer: the composer
+  // rule + `❯` prompt, the `ctx [` meter, the `⏵⏵/⏸` mode bar. A live modal replaces
+  // all three (36/36 real footer frames on this machine — the only frame that shows
+  // both concatenated three OTHER panes into one capture with `echo`).
+  test("V3 กล่องเก่าใน scrollback + UI สดอยู่ข้างล่าง = ต้องไม่รายงานว่าค้าง", () => {
+    const stale = REAL_MODAL_WITH_TODO + "\n" + REAL_LIVE_TAIL;
+    expect(parseAskFromPane(stale)).toBeNull();
+  });
+
+  test("V4 ctx meter คนเดียวก็พอชี้ว่ากล่องไปแล้ว", () => {
+    const stale = REAL_ASKBOX_TABFORM + "\n\n  ctx [███░░░░░░░] 31%";
+    expect(parseAskFromPane(stale)).toBeNull();
+  });
+});
+
+describe("isPaneBusy", () => {
+  test("B1 spinner จริงที่ regex ของ engine จับไม่ได้ ต้องจับได้", () => {
+    // Both lines are verbatim from real captures. ORCHES_BUSY_SPIN bounds the text at
+    // 18 chars of [A-Za-z0-9 ] before the ellipsis, so neither matches there; they only
+    // classified BUSY when a `↓ N tokens` or `⎿ Running` happened to share the screen.
+    expect(isPaneBusy("· Driving sprint 4 (timeline)… (21m 58s · ↓ 37.6k tokens)")).toBe(true);
+    expect(
+      isPaneBusy("✽ Completion protocol: commit, oracle memory, notes, done marker… (19m 38s)"),
+    ).toBe(true);
+  });
+
+  test("B2 กล่องข้อความ/บรรทัดจบงาน ต้องไม่ใช่ busy", () => {
+    expect(isPaneBusy("✻ Worked for 3m 40s")).toBe(false); // turn ENDED — no ellipsis
+    expect(isPaneBusy("  - สรุปสั้นๆ ว่าเกิดอะไรขึ้น…")).toBe(false); // prose bullet
+    expect(isPaneBusy("  Bash(npx vitest run…)")).toBe(false); // tool arg, not a spinner
+    expect(isPaneBusy(REAL_LIVE_TAIL)).toBe(false);
+  });
+
+  test("B3 สัญญาณ busy รูปอื่นที่ engine ใช้", () => {
+    expect(isPaneBusy("esc to interrupt")).toBe(true);
+    expect(isPaneBusy("  ⎿ \u00a0Running…")).toBe(true);
+    expect(isPaneBusy("✻ Thinking… (12s · ↓ 181 tokens)")).toBe(true);
+  });
+});
+
+describe("phantom options", () => {
+  // 1b: the upward walk only stopped at HEADER_RE, so numbered rows belonging to an
+  // OLDER box still inside the capture window became options of the current one.
+  // Clicking one sends a digit the live box cannot accept, MC reports "sent", and
+  // _seen then suppresses the box for good.
+  test("P1 กล่องเก่า 3 ตัวเลือกเหนือกล่องใหม่ 2 ตัวเลือก = ต้องไม่ดูดตัวที่ 3 มา", () => {
+    // Both halves are real modals. The live box (bottom) offers 1. Yes / 2. No; the
+    // one still in the capture window above it offered a third row. Walking up past
+    // the older box's footer harvests that row as option 3 of the live box — a digit
+    // it cannot accept. `parseAskFromPane` must stop at the older footer.
+    const twoBox = REAL_MODAL_WITH_TODO + "\n" + PERM_2_OPTIONS;
+    const ask = parseAskFromPane(twoBox);
+    expect(ask).not.toBeNull();
+    expect(ask!.options.map((o) => o.key)).toEqual([1, 2]);
+  });
+
+  test("P2 ตัวเลขไม่ต่อเนื่องจาก 1 = ห้ามส่ง digit", () => {
+    // Box scrolled so option 1 is above the capture window: 2,3 only. Showing it is
+    // fine; SENDING into it is not — digit 2 in a box whose 1 we never saw is a guess.
+    const clipped = ["   2. ไม่เอา", "   3. ขอคุยก่อน", "", " Esc to cancel · Tab to amend"].join(
+      "\n",
+    );
+    const ask = parseAskFromPane(clipped);
+    expect(ask).not.toBeNull();
+    expect(isDigitAnswerable(ask!)).toBe(false);
+  });
+});
+
+describe("tmux failure is not the same as 'nothing waiting'", () => {
+  // 1c: the watcher's tmux() collapsed exec-failure, a missing binary, the wrong
+  // socket and "no server" into one null, so sweep() returned [] and the status bar
+  // hid an OPEN question with no log and nothing on screen.
+  test("N1 'no server running' = ไม่มี agent จริง", () => {
+    expect(tmuxNoServer("no server running on /tmp/tmux-1000/default")).toBe(true);
+    expect(tmuxNoServer("error connecting to /tmp/tmux-1000/default (No such file or directory)")).toBe(
+      true,
+    );
+  });
+  test("N2 อย่างอื่น = ติดต่อ tmux ไม่ได้ ไม่ใช่ว่าไม่มีคำถาม", () => {
+    expect(tmuxNoServer("")).toBe(false);
+    expect(tmuxNoServer("spawn tmux ENOENT")).toBe(false);
+    expect(tmuxNoServer("EAGAIN: resource temporarily unavailable")).toBe(false);
+    expect(tmuxNoServer("can't find pane: %7")).toBe(false);
+  });
+});
+
+describe("reconcileSeen", () => {
+  // 1d: _seen was the only collection never pruned (_firstSeen/_nagged are). An
+  // identical question asked again in the same pane could never auto-open again.
+  test("S1 คำถามที่หายไปแล้วต้องถูกลืม เพื่อให้ถามใหม่เด้งได้อีก", () => {
+    expect(reconcileSeen(["a", "b"], ["b"])).toEqual(["a"]);
+  });
+  test("S2 ของที่ยังอยู่ต้องไม่ถูกลืม (ไม่งั้นเด้งซ้ำทุก 4 วิ)", () => {
+    expect(reconcileSeen(["a", "b"], ["a", "b"])).toEqual([]);
+  });
+  test("S3 รายการ live ว่าง = ลืมทั้งหมด (คนเรียกต้องไม่ส่ง live ว่างตอน tmux ล้ม)", () => {
+    expect(reconcileSeen(["a"], [])).toEqual(["a"]);
+  });
+});
+
+describe("naming the blocked agent", () => {
+  // 1f: with four worker panes the tooltip said only the session and the popup an
+  // opaque %NN — never which worker is stuck.
+  const FMT_ROW = ["%3", "09-foreman", "claude", "worker", "bob", "2", "0", "1"].join("\t");
+  test("F1 อ่านคอลัมน์ role/member/หน้าต่างที่เพิ่มเข้ามาได้", () => {
+    const rows = parsePaneList(FMT_ROW);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ pane: "%3", session: "09-foreman", cmd: "claude" });
+    expect(rows[0].member).toBe("bob");
+    expect(rows[0].role).toBe("worker");
+    expect(rows[0].windowIndex).toBe("2");
+    expect(rows[0].windowActive).toBe(false);
+    expect(rows[0].paneActive).toBe(true);
+  });
+  test("F2 แถวรูปเดิม 3 คอลัมน์ยังอ่านได้ (ไม่พังตอน format เก่า)", () => {
+    const rows = parsePaneList("%1\tsess\tclaude");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].member).toBeUndefined();
+  });
+  test("F3 ป้ายที่คนอ่าน = ชื่อ agent ไม่ใช่ %NN", () => {
+    expect(paneLabel({ pane: "%3", session: "09-foreman", cmd: "claude", member: "bob" })).toBe(
+      "09-foreman · bob",
+    );
+    expect(
+      paneLabel({ pane: "%3", session: "09-foreman", cmd: "claude", role: "orchestrator" }),
+    ).toBe("09-foreman · orchestrator");
+    // no tags at all → fall back to the pane id, never an empty string
+    expect(paneLabel({ pane: "%3", session: "09-foreman", cmd: "claude" })).toBe("09-foreman · %3");
   });
 });

@@ -52,6 +52,9 @@ import {
   reviewMatches,
   sameAsk,
   scanPending,
+  paneLabel,
+  reconcileSeen,
+  tmuxNoServer,
   type PaneAsk,
   type PendingHit,
 } from "./pendingAsk";
@@ -81,19 +84,31 @@ const _nagged = new Set<string>();
 //   directly — a null deref here would kill the watcher tick and the run parks silently.
 let _open: { key: string; panel: vscode.WebviewPanel | null } | null = null;
 
-/** Close whatever surface is showing the box (sidebar card or fallback panel). */
-function closeOpen(): void {
+/** Close whatever surface is showing the box (sidebar card or fallback panel).
+ *  `gone: true` = the question disappeared on its own, so this close must NOT be
+ *  recorded as "the human has seen it" (the panel's onDidDispose adds to `_seen`). */
+function closeOpen(gone = false): void {
   if (!_open) return;
-  if (_open.panel) _open.panel.dispose();
-  else {
-    getSidebarProvider()?.clearAsk();
-    _open = null;
+  _closingGone = gone;
+  try {
+    if (_open.panel) _open.panel.dispose();
+    else {
+      getSidebarProvider()?.clearAsk();
+      _open = null;
+    }
+  } finally {
+    _closingGone = false;
   }
 }
 let _timer: ReturnType<typeof setInterval> | undefined;
 let _status: vscode.StatusBarItem | undefined;
 let _lastHits: PendingHit[] = [];
 let _ticking = false;
+/** Non-empty while we cannot read tmux — shown on the status bar, not swallowed. */
+let _blind = "";
+/** True while a close is driven by "the box is gone / we went blind", not by a
+ *  human dismissing it. `_seen` must not grow in that case (see 1d). */
+let _closingGone = false;
 
 function enabled(): boolean {
   return vscode.workspace.getConfiguration("missioncontrol").get<boolean>("pendingAsk.enabled", true);
@@ -113,9 +128,31 @@ function nagMs(): number {
  *  every POLL_MS, scaling linearly with pane count. Async also lets the captures
  *  run in parallel, so a tick costs the SLOWEST pane instead of their sum. */
 function tmux(args: string[]): Promise<string | null> {
+  return tmuxRun(args).then((r) => (r.ok ? r.out : null));
+}
+
+/**
+ * The same call, but it says WHY it failed.
+ *
+ * ⛔⛔ `null` for every failure is what made the only alarm in this extension fail
+ * silent-CLOSED: `sweep()` returned `[]`, the status bar hid, and an open box was
+ * dismissed — with nothing on screen and nothing in a log. "No tmux server" and "we
+ * could not run tmux" have to be different answers, because only the first one means
+ * there is nothing waiting.
+ */
+type TmuxResult = { ok: true; out: string } | { ok: false; err: string; noServer: boolean };
+
+function tmuxRun(args: string[]): Promise<TmuxResult> {
   return new Promise((resolve) => {
-    cp.execFile("tmux", args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, (err, stdout) =>
-      resolve(err ? null : stdout),
+    cp.execFile(
+      "tmux",
+      args,
+      { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (!err) return resolve({ ok: true, out: stdout });
+        const text = `${stderr || ""}${err.message ? `\n${err.message}` : ""}`.trim();
+        resolve({ ok: false, err: text || "tmux failed", noServer: tmuxNoServer(text) });
+      },
     );
   });
 }
@@ -124,9 +161,16 @@ const capture = (pane: string) => tmux(["capture-pane", "-p", "-t", pane, "-S", 
 
 /** Every live pane with a choice box open. One `list-panes -a`, then all the
  *  Claude panes captured concurrently. */
-async function sweep(): Promise<PendingHit[]> {
-  const raw = await tmux(["list-panes", "-a", "-F", PANE_LIST_FMT]);
-  if (!raw) return []; // no tmux server = no agents = nothing waiting
+async function sweep(): Promise<PendingHit[] | null> {
+  const res = await tmuxRun(["list-panes", "-a", "-F", PANE_LIST_FMT]);
+  // null = WE ARE BLIND (exec failed / wrong socket / EAGAIN). [] = tmux answered
+  // and there is genuinely nothing. The caller must treat these differently.
+  if (!res.ok) {
+    _blind = res.noServer ? "" : res.err;
+    return res.noServer ? [] : null;
+  }
+  _blind = "";
+  const raw = res.out;
   const panes = parsePaneList(raw).filter((p) => CLAUDE_CMD.test(p.cmd));
   if (!panes.length) return [];
   const texts = await Promise.all(panes.map((p) => capture(p.pane)));
@@ -170,6 +214,12 @@ async function openPane(hit: PendingHit): Promise<void> {
 
 function title(ask: PaneAsk): string {
   return ask.header || ask.question || "คำถาม";
+}
+
+/** WHO is blocked — `session · agent`, so four open workers stay distinguishable.
+ *  Falls back to the pane id, never to a bare session name (see `paneLabel`). */
+function label(hit: PendingHit): string {
+  return hit.row ? paneLabel(hit.row) : `${hit.session} · ${hit.pane}`;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -356,7 +406,10 @@ function showBox(hit: PendingHit, opts: { preserveFocus?: boolean } = {}): void 
 
   panel.onDidDispose(() => {
     _open = null;
-    _seen.add(hit.key); // answered or dismissed — the status bar still shows it is waiting
+    // ⛔ Only a HUMAN closing this counts as "seen". A close driven by the question
+    // vanishing (or by us going blind) used to land here too, so one tmux hiccup
+    // permanently demoted a live question to a silent status-bar item.
+    if (!_closingGone) _seen.add(hit.key);
   });
 
   _open = { key: hit.key, panel };
@@ -364,6 +417,24 @@ function showBox(hit: PendingHit, opts: { preserveFocus?: boolean } = {}): void 
 
 function refreshStatus(hits: PendingHit[], skipReason = "", warnMin = 0): void {
   if (!_status) return;
+  // ⛔ "We cannot read tmux" is never silence. Say it where the human already looks,
+  // keeping whatever we last knew — the same doctrine as `autoOpenSkipReason`.
+  if (_blind) {
+    _status.text = hits.length ? `$(alert) ${hits.length} รอตอบ (อ่าน tmux ไม่ได้)` : "$(alert) อ่าน tmux ไม่ได้";
+    _status.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+    _status.tooltip = new vscode.MarkdownString(
+      [
+        "**อ่านสถานะจาก tmux ไม่ได้** — ตัวเลขข้างล่างคือของรอบล่าสุดที่อ่านได้",
+        ...hits.map((h) => `**${label(h)}** — ${title(h.ask)}`),
+        "",
+        "```",
+        _blind.slice(0, 400),
+        "```",
+      ].join("\n\n"),
+    );
+    _status.show();
+    return;
+  }
   if (!hits.length) {
     _status.hide();
     return;
@@ -378,7 +449,7 @@ function refreshStatus(hits: PendingHit[], skipReason = "", warnMin = 0): void {
   // ⛔ เหตุผลที่ "ไม่เด้งเอง" ต้องอยู่ในที่ที่คนมองอยู่แล้ว ไม่ใช่ใน log ที่ต้องไปเปิด —
   //   สาเหตุทั้งสามข้อถูกต้องตามดีไซน์ แต่ไม่มีทางรู้จากหน้าจอเลย (ดู autoOpenSkipReason)
   _status.tooltip = new vscode.MarkdownString(
-    hits.map((h) => `**${h.session}** — ${title(h.ask)}`).join("\n\n") +
+    hits.map((h) => `**${label(h)}** — ${title(h.ask)}`).join("\n\n") +
       (skipReason ? `\n\n_ไม่เด้งเอง: ${skipReason}_` : "") +
       "\n\nคลิกเพื่อเปิดกล่องคำถาม",
   );
@@ -394,12 +465,20 @@ async function tick(): Promise<void> {
     return;
   }
   _ticking = true;
-  let hits: PendingHit[];
+  let swept: PendingHit[] | null;
   try {
-    hits = await sweep();
+    swept = await sweep();
   } finally {
     _ticking = false;
   }
+  // ⛔⛔ BLIND, not empty. Keep the last known hits, keep any open box up, and put
+  // the reason on the status bar. Before this, one failed probe hid the only alarm
+  // this extension has and closed the question that was on screen.
+  if (swept === null) {
+    refreshStatus(_lastHits);
+    return;
+  }
+  const hits = swept;
   _lastHits = hits;
 
   // ⭐ จับเวลา "รอมานานแค่ไหน" ต่อคำถาม แล้วลืมของที่หายไปแล้ว (กันแมพโตไม่จำกัด)
@@ -408,6 +487,11 @@ async function tick(): Promise<void> {
   for (const h of hits) if (!_firstSeen.has(h.key)) _firstSeen.set(h.key, now);
   for (const k of [..._firstSeen.keys()]) if (!live.has(k)) _firstSeen.delete(k);
   for (const k of [..._nagged]) if (!live.has(k)) _nagged.delete(k);
+  // ⛔ `_seen` gets the same treatment — it was the ONE collection never pruned, so
+  // the same question asked again in the same pane could never auto-open again for
+  // the life of the window. Safe only because a failed sweep returns null above and
+  // never reaches this line with an empty `live` (reconcileSeen's contract).
+  for (const k of reconcileSeen(_seen, live)) _seen.delete(k);
   // ⛔⛔ ต้องรู้ว่ามีคน attach หรือยัง **ก่อน** ทุกเส้นตัดสิน ไม่ใช่แค่เส้น auto-open:
   //   nag เดิมเรียก showBox โดยไม่ดู attach เลย ⇒ เด้งตัวถามซ้อนกล่อง native ที่คนกำลังมองอยู่
   //   (user เห็นซ้ำ 2026-08-20 — "ถ้าใช้ native ห้ามขึ้น ตอนนี้มันขึ้นอีกละแค่ย้ายตำแหน่ง")
@@ -439,7 +523,7 @@ async function tick(): Promise<void> {
   if (_open) {
     // Answered in the pane while the box was up → close it rather than leave a
     // dead box whose click would send a keystroke nobody is waiting for.
-    if (!hits.some((h) => h.key === _open!.key)) closeOpen();
+    if (!hits.some((h) => h.key === _open!.key)) closeOpen(true);
     refreshStatus(hits, autoOpenSkipReason({ openBox: true, unseenHits: 1, clients: 0 }), warnMin);
     return; // one box at a time
   }
@@ -467,7 +551,14 @@ async function tick(): Promise<void> {
  *  status bar). Without this, dismissing once would drop the human back to
  *  having no way to see the question — the exact problem this feature fixes. */
 export async function pendingAskCommand(): Promise<void> {
-  const hits = await sweep();
+  const swept = await sweep();
+  if (swept === null) {
+    // Asked for by hand while we cannot read tmux: say so instead of "nothing waiting".
+    refreshStatus(_lastHits);
+    vscode.window.showWarningMessage(`อ่านสถานะจาก tmux ไม่ได้ — ${_blind.slice(0, 200)}`);
+    return;
+  }
+  const hits = swept;
   _lastHits = hits;
   refreshStatus(hits);
   if (!hits.length) {
