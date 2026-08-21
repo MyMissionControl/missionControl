@@ -5,6 +5,7 @@ import * as path from "node:path";
 
 import * as vscode from "vscode";
 
+import { tmuxSessionTaken } from "./tmuxProbe";
 import { openClaudeView } from "../webview/claudeView";
 import { getClaudeViewMode } from "./settingsOps";
 import { isSafeTeamName } from "./teamsModel";
@@ -67,14 +68,10 @@ function baseSessionForTeam(team: string): string {
   return team;
 }
 
-function tmuxHasSession(session: string): boolean {
-  try {
-    cp.execFileSync("tmux", ["has-session", "-t", `=${session}`], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
+/** ⛔ Removed: a private `try/catch → false` copy of the session probe. It read a
+ *  FAILED tmux call as "this name is free", which is how `maw team up` could fire a
+ *  second instance into a session another team was already using. The shared
+ *  tri-state probe lives in ./tmuxProbe — unknown falls to "taken" here. */
 
 /** Run a command in a terminal once shell integration is ready (or after a short
  *  fallback) so the long-running team-up survives. The fallback matters doubly for
@@ -157,7 +154,7 @@ function launchTeamSession(
   label: string,
 ): TeamUpResult {
   const base = baseSessionForTeam(team);
-  const { session, minted } = resolveInstanceSession(base, tmuxHasSession);
+  const { session, minted } = resolveInstanceSession(base, (s) => tmuxSessionTaken(s));
   // base = charter.session / team name (safe), + numeric -N suffix → always
   // matches SAFE_SESSION; guard anyway so a hand-edited charter can't inject.
   if (!SAFE_SESSION.test(session)) return { error: `ชื่อ session ไม่ปลอดภัย: ${session}` };
@@ -216,7 +213,7 @@ export function awakenMember(
   if (!isSafeTeamName(team)) return { error: `ชื่อทีมไม่ปลอดภัย: ${team}` };
   if (!isSafeTeamName(oracle)) return { error: `ชื่อ oracle ไม่ปลอดภัย: ${oracle}` };
   const base = baseSessionForTeam(team);
-  const { session, minted } = resolveInstanceSession(base, tmuxHasSession);
+  const { session, minted } = resolveInstanceSession(base, (s) => tmuxSessionTaken(s));
   if (!SAFE_SESSION.test(session)) return { error: `ชื่อ session ไม่ปลอดภัย: ${session}` };
   const chat = hostBootstrap(context, session, `awaken: ${oracle}`, (attach) =>
     buildAwakenMemberCommand(team, session, SOULBREW_DIR, oracle, attach),

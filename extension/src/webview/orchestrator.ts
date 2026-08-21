@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 
+import { tmuxSessionState } from "../commands/tmuxProbe";
 import * as gitOps from "../commands/gitOps";
 import {
   gitStaleNote,
@@ -325,7 +326,12 @@ function startSpinPoll(panel: vscode.WebviewPanel) {
       // stuck at "running" (session killed out-of-band, no done/error written)
       // would otherwise pin the poll forever — treat it as finished so the poll
       // stops and its (dead) session gets reaped once.
-      if (m?.status === "running" && m.session && tmuxHasSession(m.session))
+      // ⛔⛔ "ถาม tmux ไม่สำเร็จ" ต้องไม่เท่ากับ "session ตายแล้ว": หลุดจาก nowRunning
+      //    หนึ่ง tick = ถูกอ่านว่า "รันจบ" → `reapSession` ฆ่า tmux session ของรันที่
+      //    ยังทำงานอยู่จริง (orchestrator + worker ทั้งชุด) และหน้าจอขึ้น "session ดับ"
+      //    เหมือนมันตายเอง · การกระทำที่ย้อนไม่ได้ต้องไม่ถูกสั่งจาก probe ที่ล้ม ⇒
+      //    unknown = ถือว่ายังรันอยู่ (ดู commands/tmuxProbe.ts)
+      if (m?.status === "running" && m.session && tmuxSessionState(m.session) !== "absent")
         nowRunning.set(p.path, m.session);
     }
     // A run live last tick but not this one JUST finished — `/orches-drive --once`

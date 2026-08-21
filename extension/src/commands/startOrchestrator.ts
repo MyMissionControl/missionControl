@@ -5,6 +5,7 @@ import * as path from "node:path";
 
 import * as vscode from "vscode";
 
+import { tmuxSessionTaken } from "./tmuxProbe";
 import {
   buildContinueKickoff,
   buildCloneKickoffNote,
@@ -428,10 +429,14 @@ export function reapSession(session: string): void {
   }
 }
 
-/** First free twin session name: base-2, base-3, … (base itself is taken). */
+/** First free twin session name: base-2, base-3, … (base itself is taken).
+ *  ⛔ `tmuxSessionTaken`, not `tmuxHasSession`: a probe that FAILED must not hand
+ *  back a name that a live run is using (see tmuxProbe.ts). The cost of being
+ *  wrong the safe way is one more suffix; the other way stacks two teams into one
+ *  session. */
 function nextTwinSession(base: string): string {
   for (let i = 2; i <= 9; i++) {
-    if (!tmuxHasSession(`${base}-${i}`)) return `${base}-${i}`;
+    if (!tmuxSessionTaken(`${base}-${i}`)) return `${base}-${i}`;
   }
   return `${base}-${Date.now() % 1000}`; // 9 twins already?! — just don't collide
 }
@@ -508,7 +513,9 @@ export function launchContinueRun(
   }
 
   const baseSession = readSessionPin(target.orch)?.trim() || `claude-${target.orch}`;
-  const session = tmuxHasSession(baseSession) ? nextTwinSession(baseSession) : baseSession;
+  // unknown ⇒ treat as taken and mint a twin (tmuxProbe.ts): launching into a base
+  // session another run already drives is not recoverable by retrying.
+  const session = tmuxSessionTaken(baseSession) ? nextTwinSession(baseSession) : baseSession;
 
   const workers = target.team.members
     .filter((m) => m.role !== "orchestrator")
@@ -677,8 +684,10 @@ export async function launchOrchestrator(opts: {
   const baseSession = readSessionPin(orch)?.trim() || `claude-${orch}`;
   let session = baseSession;
 
-  if (tmuxHasSession(baseSession)) {
-    // Base session is busy with ANOTHER run — no modal, no twin/inject choice.
+  if (tmuxSessionTaken(baseSession)) {
+    // Base session is busy with ANOTHER run (or we could not ask — same treatment,
+    // because this branch is also what adds `twinKickoffNote`: skipping it lets two
+    // live instances of one oracle write the same ψ files with no provenance tag) — no modal, no twin/inject choice.
     // This run gets its own fresh instance session (1 session = 1 team instance);
     // the orchestrator pulls its workers into THIS session (orches-drive Step 3.5).
     session = nextTwinSession(baseSession); // base-2, base-3, …

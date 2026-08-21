@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 
 import * as vscode from "vscode";
 
+import { tmuxSessionState } from "../commands/tmuxProbe";
 import { ApiError, BACKEND_DISABLED, SERVER_URL, api } from "../api";
 import { isPortUp, isMawUp } from "../commands/mawServe";
 import {
@@ -18,7 +19,6 @@ import {
   launchOrchestrator,
   listOrchestratorTeams,
   scanProjects,
-  tmuxHasSession,
 } from "../commands/startOrchestrator";
 import { parseTeamRoster, type OracleTeam } from "../commands/teams";
 import { parseOrchesMeta, serializeOrchesMeta, type ResumableProject } from "../commands/orchestratorResume";
@@ -305,9 +305,18 @@ export function openDashboardPanel(
           });
           // ⛔ ถามว่า "ตายจริงไหม" ไม่ใช่ "คำสั่งคืนค่าอะไร": tmux ตอบ 0 แล้ว session
           //    ยังอยู่ก็เกิดได้ (timeout ตัดกลางทาง / server ไม่ตอบ) → เช็คซ้ำแล้วบอกให้รู้
-          if (tmuxHasSession(target)) {
+          // ⛔⛔ แต่การเช็คซ้ำต้องไม่พังแบบเดียวกับสิ่งที่มันกำลังตรวจ: `has-session` ที่
+          //    try/catch → false อ่าน "ถามไม่ได้" ว่า "ตายแล้ว" ⇒ ถ้า kill ถูก timeout ตัด
+          //    เพราะเครื่องโหลด การเช็คซ้ำบนโหลดเดียวกันก็ล้มพอกัน แล้วเราจะประกาศ "ปิดแล้ว"
+          //    พร้อมทิ้ง terminal ทั้งที่ session ยังอยู่ — คือความเท็จที่บล็อกนี้มีไว้กันเอง
+          const state = tmuxSessionState(target);
+          if (state !== "absent") {
             survivors.push(target);
-            void vscode.window.showWarningMessage(killFailureMessage(target, stderr));
+            void vscode.window.showWarningMessage(
+              state === "present"
+                ? killFailureMessage(target, stderr)
+                : `ปิด '${target}' แล้วแต่ยืนยันไม่ได้ว่าตายจริง (ถาม tmux ไม่สำเร็จ) — ยังไม่ทิ้ง terminal ของมัน${stderr ? ` · ${stderr.slice(0, 160)}` : ""}`,
+            );
             continue; // ตัวถัดไปยังต้องได้โอกาสปิด — อย่าเงียบและอย่าหยุดทั้งชุด
           }
           // Drop any reused attach-terminal for the now-dead session.
