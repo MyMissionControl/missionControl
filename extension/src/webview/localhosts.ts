@@ -1,10 +1,11 @@
 import * as vscode from "vscode";
 
-import { scanLocalhostsEnriched, type EnrichedGroup } from "../commands/localhostScan";
+import { scanLocalhostsEnriched, scanMcServices, type EnrichedGroup } from "../commands/localhostScan";
 import { setTabIcon } from "./tabIcon";
 import {
   stopAllLocalhosts,
   stopGroupLocalhosts,
+  stopMcServiceByPort,
   stopPortLocalhost,
 } from "../commands/localhostStop";
 
@@ -25,7 +26,8 @@ const POLL_MS = 5_000;
 function pushGroups(panel: vscode.WebviewPanel): void {
   let groups: EnrichedGroup[] = [];
   try {
-    groups = scanLocalhostsEnriched();
+    // MC services (CCS dashboard, …) first, then project dev servers
+    groups = [...scanMcServices(), ...scanLocalhostsEnriched()];
   } catch {
     groups = [];
   }
@@ -74,6 +76,12 @@ export function openLocalhostsPanel(): vscode.WebviewPanel {
       case "stopPort":
         if (typeof msg.port === "number") {
           await stopPortLocalhost(msg.port);
+          pushGroups(panel);
+        }
+        return;
+      case "stopMcService":
+        if (typeof msg.port === "number") {
+          await stopMcServiceByPort(msg.port);
           pushGroups(panel);
         }
         return;
@@ -270,7 +278,7 @@ function renderShell(): string {
     return out;
   }
 
-  function stripHtml(p) {
+  function stripHtml(p, mc) {
     var key = p.port + "|" + p.pid;
     var col = kindColor(p.kind);
     var k = KIND[p.kind];
@@ -290,7 +298,7 @@ function renderShell(): string {
       "</div>" +
       '<div class="acts">' +
         '<button class="ico" data-copy="' + p.port + '" title="คัดลอก URL"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>' +
-        '<button class="ico stop" data-stopport="' + p.port + '" title="หยุด (คลิกอีกครั้งเพื่อยืนยัน)"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg></button>' +
+        '<button class="ico stop" ' + (mc ? "data-stopmc" : "data-stopport") + '="' + p.port + '" title="หยุด (คลิกอีกครั้งเพื่อยืนยัน)"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg></button>' +
       "</div></div>";
   }
 
@@ -309,14 +317,16 @@ function renderShell(): string {
     }
     sa.style.display = "";
     root.innerHTML = groups.map(function (g) {
-      var strips = g.ports.map(stripHtml).join("");
+      var strips = g.ports.map(function (p) { return stripHtml(p, g.mc); }).join("");
+      // MC services stop per-strip (their own path); no project-scoped "stop all".
+      var gstop = g.mc ? "" : '<button class="gstop" data-stopgroup="' + esc(g.project) + '" data-confirm="Confirm?">stop all</button>';
       return '<div class="group">' +
         '<div class="ghead"><span class="dot"></span>' +
         '<span class="gname">' + esc(g.project) + "</span>" +
         '<span class="gpath">' + esc(g.path) + "</span>" +
         '<span class="spacer"></span>' +
         '<span class="gcount">' + g.ports.length + " ports</span>" +
-        '<button class="gstop" data-stopgroup="' + esc(g.project) + '" data-confirm="Confirm?">stop all</button>' +
+        gstop +
         "</div>" +
         '<div class="strips">' + strips + "</div></div>";
     }).join("");
@@ -344,7 +354,7 @@ function renderShell(): string {
 
   document.addEventListener("click", function (e) {
     var t = e.target;
-    var b = t.closest ? t.closest("[data-open],[data-copy],[data-stopport],[data-stopgroup],#stopAll,#fetch") : null;
+    var b = t.closest ? t.closest("[data-open],[data-copy],[data-stopport],[data-stopmc],[data-stopgroup],#stopAll,#fetch") : null;
     if (!b) return;
     if (b.id === "fetch") { vscode.postMessage({ type: "fetch" }); return; }
     if (b.hasAttribute("data-open")) { vscode.postMessage({ type: "open", port: Number(b.getAttribute("data-open")) }); return; }
@@ -354,6 +364,7 @@ function renderShell(): string {
       return;
     }
     if (b.hasAttribute("data-stopport")) { armOrFire(b, function () { vscode.postMessage({ type: "stopPort", port: Number(b.getAttribute("data-stopport")) }); }); return; }
+    if (b.hasAttribute("data-stopmc")) { armOrFire(b, function () { vscode.postMessage({ type: "stopMcService", port: Number(b.getAttribute("data-stopmc")) }); }); return; }
     if (b.hasAttribute("data-stopgroup")) { armOrFire(b, function () { vscode.postMessage({ type: "stopGroup", project: b.getAttribute("data-stopgroup") }); }); return; }
     if (b.id === "stopAll") { armOrFire(b, function () { vscode.postMessage({ type: "stopAll" }); }); return; }
   });

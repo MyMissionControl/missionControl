@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { classifyMcService } from "./localhostKill";
+
 export type Listener = {
   port: number;
   pid: number;
@@ -182,7 +184,7 @@ export type PortInfo = {
   memMB: number; // resident set size at scan time, in MB
   uptime: string; // human elapsed time (e.g. "3h 12m")
 };
-export type EnrichedGroup = { project: string; path: string; ports: PortInfo[] };
+export type EnrichedGroup = { project: string; path: string; ports: PortInfo[]; mc?: boolean };
 
 /** Classify a listener into a data-color kind from its command + args + port.
  *  Order matters (db/docs before the broad web/api); a bare `node` with a vite
@@ -286,4 +288,31 @@ export function scanLocalhostsEnriched(): EnrichedGroup[] {
   }
   groups.sort((a, b) => a.project.localeCompare(b.project));
   return groups;
+}
+
+/** MC-managed services (e.g. the CCS dashboard) as a synthetic group, so the panel
+ *  can surface + stop them even though they run OUTSIDE any project (their cwd is
+ *  home/workspace, so scanLocalhostsEnriched drops them). Matched by args signature
+ *  in classifyMcService — only our own vendored processes. Empty when none run. */
+export function scanMcServices(): EnrichedGroup[] {
+  const raws = collectRaw();
+  const info = parsePsFull(psFullRaw(raws.map((r) => r.pid)));
+  const ports: PortInfo[] = [];
+  for (const r of raws) {
+    const f = info.get(r.pid);
+    const svc = classifyMcService(f?.args ?? "");
+    if (!svc) continue;
+    ports.push({
+      port: r.port,
+      pid: r.pid,
+      pgid: r.pgid,
+      kind: "web", // dashboards are web UIs
+      cmd: svc.label,
+      memMB: f ? Math.round(f.rssKB / 1024) : 0,
+      uptime: f ? formatUptime(f.etimes) : "",
+    });
+  }
+  if (!ports.length) return [];
+  ports.sort((a, b) => a.port - b.port);
+  return [{ project: "MC services", path: "caged · not a project", ports, mc: true }];
 }

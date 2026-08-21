@@ -3,8 +3,8 @@ import * as fs from "node:fs";
 
 import * as vscode from "vscode";
 
-import { scanLocalhosts, getProjectsRoot } from "./localhostScan";
-import { canKillGroup, buildKillCmd } from "./localhostKill";
+import { scanLocalhosts, getProjectsRoot, scanMcServices } from "./localhostScan";
+import { canKillGroup, buildKillCmd, isProtectedComm } from "./localhostKill";
 
 // Stop-all orchestration for a project's localhost servers. Kept separate from
 // localhostKill.ts (the pure guardrails) because this module imports `vscode`,
@@ -92,6 +92,21 @@ export async function stopPortLocalhost(port: number): Promise<void> {
   const pgid = target.pgid;
   await termThenKill([pgid], () =>
     scanLocalhosts().flatMap((g) => g.entries.map((e) => e.pgid)),
+  );
+}
+
+/** Stop an MC-managed service (e.g. the CCS dashboard) by the port it listens on.
+ *  scanMcServices only returns our own vendored processes (args-signature guard in
+ *  classifyMcService), so a port found there is safe to stop; we still refuse if the
+ *  pgid leader is a protected process (shell/editor/tmux). No project scoping — these
+ *  run outside any project, which is exactly why the normal stopPort path can't. */
+export async function stopMcServiceByPort(port: number): Promise<void> {
+  const svc = scanMcServices().flatMap((g) => g.ports).find((p) => p.port === port);
+  if (!svc) return;
+  const { comm } = leaderInfo(svc.pgid);
+  if (isProtectedComm(comm)) return;
+  await termThenKill([svc.pgid], () =>
+    scanMcServices().flatMap((g) => g.ports.map((p) => p.pgid)),
   );
 }
 
