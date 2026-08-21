@@ -40,3 +40,31 @@ test("name-popup: ปุ่มถัดไปต้องติดทั้ง�
   expect(js).toContain("if(!u){");
   expect(js).toContain("_nmUrlOk=true");
 });
+
+// ── ป้าย "รอรีวิว" / "อาจค้าง" บนการ์ดที่กำลังทำ ──────────────────────────────────
+// สัญญาณอยู่บนดิสก์มาตลอด (.orches-state: status/heartbeat) แต่ไม่มีใครอ่าน → run ที่
+// จอดรอคนรีวิว กับ run ที่ค้างจริง โชว์คำเดียวกับ run ที่ทำงานอยู่คือ `⟳ กำลังทำ`
+// เส้นทางทั้งเส้นต้องต่อกัน 3 ท่อน: host คำนวณ → ใส่ payload → client วาด
+// ขาดท่อนไหนก็เงียบสนิทเหมือนเดิม โดยไม่มีเทสไหนแดง (host import vscode = unit test ไม่ได้)
+test("health chip: host คำนวณและส่งเข้า payload จริง", () => {
+  expect(SRC).toContain("resolveRunHealth({");
+  expect(SRC).toContain("resolveCardActions(btn.state, driven, pending, health)");
+  // อ่านจากไฟล์ที่ engine เขียน ไม่ใช่เดาจาก marker
+  expect(SRC).toContain("readOrchesState(p.path)");
+  expect(SRC).toContain("heartbeatFreshness(oState?.heartbeat ?? null, nowMs, staleMs)");
+  // และช่องที่ heartbeat มองไม่เห็น (รันที่ไม่เคยปั๊มเลย) ต้องต่อสายด้วย
+  expect(SRC).toContain("silentSinceStart({");
+  expect(SRC).toContain("runAgeMs: isoAgeMs(marker?.startedAt, nowMs)");
+});
+
+test("health chip: client วาดทั้งสองค่า และไม่แตะปุ่ม/การคลิก", () => {
+  const js = clientScript();
+  expect(js).toContain("act.health === 'checkpoint'");
+  expect(js).toContain("act.health === 'stalled'");
+  expect(js).toContain("รอรีวิว");
+  expect(js).toContain("อาจค้าง");
+  // ⛔ ปุ่ม busy ต้องเหมือนเดิมเป๊ะ: การคลิก .cont.spin = ยกเลิกรัน — ถ้าป้ายไปเปลี่ยน
+  //   label/คลาสของปุ่ม จะกลายเป็น "ป้ายบอกว่ารอรีวิว แต่คลิกแล้วยกเลิกรัน"
+  expect(js).toContain("if(contEl.classList.contains('spin')) post('cancel_run',{path:path});");
+  expect(js).not.toContain("cont spin\" title=\"รอรีวิว");
+});

@@ -51,8 +51,11 @@ import {
   resolveCardActions,
   runSessionLiveForProject,
   classifyRunTransition,
+  resolveRunHealth,
+  silentSinceStart,
   writeRunMarker,
 } from "../commands/continueRun";
+import { HEARTBEAT_STALE_SEC, heartbeatFreshness, isoAgeMs, readOrchesState } from "../commands/orchesSignals";
 import type { OracleTeam } from "../commands/teams";
 import {
   ORG,
@@ -204,6 +207,15 @@ function ghView(name: string): boolean | null {
   }
 }
 
+/** นานเท่าไรถึงถือว่า heartbeat ของ engine "เก่า" · 0 = ปิดป้ายนี้ทั้งหมด
+ *  ค่าเริ่มต้นผูกกับ ORCHES_HEARTBEAT_STALE ของ engine (600s) และถูกตรึงไว้ใน
+ *  orchesParity.test.ts — สองฝั่งเลื่อนกันแล้วจะรายงานคนละเรื่องบนรันเดียวกัน */
+function heartbeatStaleMs(): number {
+  const def = HEARTBEAT_STALE_SEC / 60;
+  const m = vscode.workspace.getConfiguration("missioncontrol").get<number>("run.heartbeatStaleMinutes", def);
+  return Number.isFinite(m) && m > 0 ? m * 60_000 : 0;
+}
+
 // Navigation token — bumped by every screen push. A push that awaits (git status
 // per project, a GitHub remote lookup) checks it again before posting and drops
 // its result if the user has navigated since.
@@ -235,6 +247,9 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
   // flicker gray between full renders. `fetch==="spin"` only skips the git fetch.
   const sessions = listTmuxSessionsSafe();
   if (!stillCurrent(panel, token)) return; // user drilled into a project while we read git
+  // ONE clock for every card in this render, so two rows can never disagree about "now".
+  const nowMs = Date.now();
+  const staleMs = heartbeatStaleMs();
   panel.webview.postMessage({
     type: "screen_projects",
     // Full inventory — every dir under projects/, no filter, no view toggle.
@@ -263,6 +278,24 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
         aliveForThis &&
         !(marker?.sessionCreatedAt !== undefined && live.createdAt !== undefined && live.createdAt !== marker.sessionCreatedAt);
       const driven = projectDrivenState(p, { sessions, runAlive }).state !== "none";
+      // ป้ายบอกว่า "กำลังทำ" อันนี้คืออะไรจริง ๆ จากสัญญาณที่ engine เขียนไว้แล้วใน
+      // .orches-state (heartbeat/status) — MC เคยอ่านไฟล์นี้แค่คีย์เดียว (owner-session)
+      // ⛔ ป้ายเท่านั้น: ไม่มีปุ่มไหนเปลี่ยนพฤติกรรมตามค่านี้ (ดู resolveRunHealth)
+      const oState = readOrchesState(p.path);
+      const beat = heartbeatFreshness(oState?.heartbeat ?? null, nowMs, staleMs);
+      const health = resolveRunHealth({
+        busy: btn.state === "spinning" || driven,
+        orchesStatus: oState?.status ?? null,
+        heartbeat: beat,
+        // startedAt ปิดช่องที่ heartbeat มองไม่เห็น: รันที่ตายก่อน verb แรกไม่มี heartbeat
+        // ให้เทียบอายุเลย (ค่านี้ถูกเขียนและถูกบังคับให้มีมานาน แต่ไม่มีใครอ่าน)
+        silentStart: silentSinceStart({
+          spinning: btn.state === "spinning",
+          heartbeat: beat,
+          runAgeMs: isoAgeMs(marker?.startedAt, nowMs),
+          staleMs,
+        }),
+      });
       return {
         path: p.path,
         name: p.name,
@@ -278,7 +311,7 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
         driven,
         starred: starred.has(p.path),
         run: { state: btn.state, errorMsg: btn.errorMsg },
-        actions: resolveCardActions(btn.state, driven, pending),
+        actions: resolveCardActions(btn.state, driven, pending, health),
         // `note` = how old the ahead/behind comparison is, shown on hover: the
         // list does not fetch on its own, so a green "up to date" chip can be
         // hours stale (see gitStaleNote).
@@ -2106,6 +2139,11 @@ function renderShell(): string {
         contBtn = run.state === 'spinning'
           ? '<button class="cont spin" title="กำลังทำต่อ — คลิกเพื่อยกเลิก"><span class="cont-rot">⟳</span> กำลังทำ</button>'
           : '<button class="cont busy" title="กำลังทำอยู่ (มี session ขับโปรเจคนี้) — คลิกเพื่อเปิด/เข้า session"><span class="cont-rot">⟳</span> กำลังทำ</button>';
+        // ⟳ กำลังทำ เคยเป็นคำเดียวสำหรับ 3 สถานะ: ทำงานจริง / จบ sprint จอดรอคนรีวิว /
+        // session ยังอยู่แต่ไม่ขยับแล้ว → ติดป้ายจากสิ่งที่ engine เขียนไว้ใน .orches-state
+        // ⛔ ป้ายเท่านั้น — ปุ่มและการคลิกไม่เปลี่ยน (คลิก spin = ยกเลิก เหมือนเดิมเป๊ะ)
+        if (act.health === 'checkpoint') crashChip = '<span class="chip idle" title="จบ sprint แล้วและจอดรออยู่ — orchestrator เขียน status: paused-checkpoint ไว้ · คลิก \'ทำต่อ →\' เพื่อเข้า session ไปรีวิว/สั่งต่อ">รอรีวิว</span>';
+        else if (act.health === 'stalled') crashChip = '<span class="chip act" title="session ยังอยู่ แต่ engine ไม่ได้ปั๊ม heartbeat มานานแล้ว — อาจค้างรอคนตอบหรือหยุดไปเฉย ๆ · เข้า session ไปดูก่อนตัดสิน (ไม่ใช่คำตัดสินว่าตายแล้ว)">อาจค้าง</span>';
       } else if (act.kind === 'actions') {
         contBtn = '<button class="cont" title="ทำต่อ 1 sprint ด้วยทีมล่าสุด (auto, background)">ทำ 1 sprint</button>';
         multiBtn = act.runNEnabled

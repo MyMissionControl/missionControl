@@ -15,6 +15,9 @@
  *  SCOPE: the pairs that exist today —
  *    (1) `.orches-state`  bash cmd_state_get      <-> TS parseStateValue
  *    (2) model id guard   bash cmd_worker_model   <-> TS isSafeModelId
+ *    (3) heartbeat clock  bash `date +%FT%T`/-d   <-> TS heartbeatAgeMs
+ *    (4) stale threshold  bash ORCHES_HEARTBEAT_STALE <-> TS HEARTBEAT_STALE_SEC
+ *    (5) status vocabulary  every `status <v>` the engine writes <-> TS OrchesStatus
  *
  *  This test SKIPS (loudly) when the skill isn't installed, so a clone without orches-drive
  *  still runs green — but it must never pass silently while the engine is present.
@@ -25,6 +28,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
+import { HEARTBEAT_STALE_SEC, heartbeatAgeMs, readOrchesState } from "./orchesSignals";
 import { parseStateValue } from "./orchestratorResume";
 import { isSafeModelId } from "./teamsModel";
 
@@ -122,6 +126,51 @@ test.if(HAVE)("model id: bash guard and TS guard accept exactly the same ids", (
       `${JSON.stringify(model)} -> ${bashAccepts}`,
     );
   }
+});
+
+// ── heartbeat: the engine stamps `date +%FT%T` (local, NO offset) and reads it back
+//    with `date -d`. MC now derives an age from the same string. A format or clock
+//    disagreement here is exactly the invisible kind: MC would just call a live run
+//    hung, or never call a hung one hung.
+//    ⛔ TZ is pinned to UTC for BOTH sides because `bun test` forces the JS clock to UTC
+//      (measured: getTimezoneOffset() === 0 inside bun test, -420 under plain `bun` on
+//      this +07 box) while a child `date` would read /etc/timezone. That is a harness
+//      artifact, not the product: the real-zone reading is proven by orchesSignals'
+//      H4, which spawns a child in Asia/Bangkok on purpose.
+const UTC_ENV = { ...process.env, TZ: "UTC" };
+function shell(args: string[]): string {
+  return execFileSync(args[0], args.slice(1), { encoding: "utf8", env: UTC_ENV }).trim();
+}
+
+test.if(HAVE)("heartbeat: MC's epoch == bash's `date -d` epoch, to the second", () => {
+  const proj = tmpProj("orches-parity-hb-");
+  const hb = shell(["date", "+%FT%T"]); // the engine's own producer
+  engine(["state-set", proj, "heartbeat", hb]);
+  const state = readOrchesState(proj);
+  expect(state?.heartbeat).toBe(hb); // survives bash -> disk -> TS
+  const bashEpoch = Number(shell(["date", "-d", hb, "+%s"])); // the engine's own reader
+  const now = Date.now();
+  const age = heartbeatAgeMs(state?.heartbeat ?? null, now);
+  expect(age).not.toBeNull();
+  expect(Math.round((now - (age as number)) / 1000)).toBe(bashEpoch);
+});
+
+test.if(HAVE)("stale threshold: MC's default is the engine's ORCHES_HEARTBEAT_STALE default", () => {
+  const sh = readFileSync(INTG, "utf8");
+  const m = /ORCHES_HEARTBEAT_STALE="\$\{ORCHES_HEARTBEAT_STALE:-(\d+)\}"/.exec(sh);
+  expect(m).not.toBeNull();
+  expect(HEARTBEAT_STALE_SEC).toBe(Number(m![1]));
+});
+
+test.if(HAVE)("status vocabulary: MC knows every value the engine stamps into `status`", () => {
+  // ⛔ Drift here fails QUIET: an unknown status parses to null, so a 4th value the
+  //    engine starts writing would simply never be surfaced. Read the writers, do not
+  //    trust a list copied by hand. Both writers count: the .sh AND SKILL.md's Layer C
+  //    (`paused-checkpoint` is stamped ONLY from the skill, never from the script).
+  const sources = [INTG, join(INTG, "..", "SKILL.md")].map((f) => readFileSync(f, "utf8")).join("\n");
+  const written = new Set<string>();
+  for (const m of sources.matchAll(/state[-_]set\s+"\$P(?:ROJ)?"\s+status\s+([a-z][a-z-]*)/g)) written.add(m[1]);
+  expect([...written].sort()).toEqual(["done", "in-progress", "paused-checkpoint"]);
 });
 
 test("parity harness: skips loudly rather than passing silently", () => {

@@ -149,6 +149,11 @@
           "type": "boolean",
           "default": true,
           "description": "เฝ้าดูจอของ Claude pane ทุกตัว แล้วเด้งกล่องตัวเลือกใน VS Code เมื่อ agent ถามคำถามแล้วค้างรอคำตอบอยู่ · ตอบกลับได้เลยสำหรับกล่องเลือกข้อเดียว"
+        },
+        "missioncontrol.run.heartbeatStaleMinutes": {
+          "type": "number",
+          "default": 10,
+          "markdownDescription": "นานเท่าไร (นาที) ที่ไม่มี heartbeat จาก orches แล้วการ์ดโปรเจกต์จะติดป้าย `อาจค้าง` · ค่าเริ่มต้น 10 = ตรงกับ `ORCHES_HEARTBEAT_STALE` ของ engine · `0` = ปิดป้ายนี้ · เป็นป้ายเตือนเท่านั้น ไม่มีการฆ่า/ลบอะไรจากค่านี้"
         }
       }
     }

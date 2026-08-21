@@ -8,6 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import type { Freshness, OrchesStatus } from "./orchesSignals";
 import type { SessionState } from "./tmuxProbe";
 import { labelNamesProject } from "../webview/sessions";
 import type { DrivenState, ResumableProject } from "./orchestratorResume";
@@ -296,23 +297,81 @@ export function decideAbortOutcome(verdict: string | null): { status: RunStatus;
 }
 
 /** สิ่งที่การ์ด project โชว์ จาก 2 สัญญาณเดิม (ButtonState + driven) + จำนวนงานค้าง:
- *  - busy (spinning/driven) → คงปุ่ม "กำลังทำ" เดิม (คลิกยกเลิก/เข้า session)
+ *  - busy (spinning/driven) → คงปุ่ม "กำลังทำ" เดิม (คลิกยกเลิก/เข้า session) + ป้าย
+ *    health ถ้ามี (รอรีวิว / อาจค้าง — ดู resolveRunHealth · ป้ายเท่านั้น ไม่แตะปุ่ม)
  *  - none (ไม่มีงานค้าง) → ไม่มีปุ่ม แม้ marker ค้าง stale/error (0 เหลือ = จบจริง)
  *  - actions → โชว์ 2 ปุ่มถาวร: "ทำ 1 sprint" เสมอ + "ทำ N sprint" (เปิดเมื่อเหลือ>=2)
  *    · crash = สาเหตุที่รอบก่อนไม่จบ (stale = session ดับกลางคัน · error = orches-drive
  *      เขียน marker error) → webview โชว์ chip + ขอบเตือน · null = ค้างปกติ
  *  Pure — host คำนวณตัวนี้ก่อนส่งการ์ดให้ webview (webview import host TS ไม่ได้). */
 export type CardActions =
-  | { kind: "busy" }
+  | { kind: "busy"; health?: RunHealth }
   | { kind: "none" }
   | { kind: "actions"; runNEnabled: boolean; crash: "stale" | "error" | null };
+
+/** ป้ายกำกับการ์ดที่ "กำลังทำ" อยู่ — checkpoint = จบ sprint จอดรอคนรีวิว ·
+ *  stalled = session ยังอยู่แต่ engine ไม่ปั๊ม heartbeat มานานแล้ว */
+export type RunHealth = "checkpoint" | "stalled";
+
+/**
+ * แยก 3 สถานะที่การ์ดเคยเรียกว่า `⟳ กำลังทำ` เหมือนกันหมดออกจากกัน จากสัญญาณที่
+ * engine เขียนลง `.orches-state` อยู่แล้ว (ดู orchesSignals.ts).
+ *
+ * ⛔⛔ ลำดับสำคัญ: `paused-checkpoint` ต้องมาก่อน heartbeat — การจอดรอคนตอบทำให้
+ *   heartbeat เก่าโดยธรรมชาติ (เทิร์นจบไปแล้ว ไม่มี verb ไหนวิ่ง) ถ้าเรียงกลับกัน
+ *   ทุกครั้งที่ user ลุกไปกินข้าวจะถูกป้ายว่า "อาจค้าง" = โบ้ยผิด
+ * ⛔ `done` + heartbeat เก่า = เรื่องปกติ (จบรันแล้ว session ยังเปิดอยู่) → เงียบ
+ * ⛔ ผลลัพธ์นี้เป็น "ป้าย" เท่านั้น ห้ามเอาไปสั่ง reap/kill/ลบ — heartbeat ปั๊มแค่ตอน
+ *   engine verb ทำงาน เทิร์นที่ orchestrator เขียน sprint doc/เก็บ memory (Step 4.7–4.8)
+ *   เงียบได้เป็นนาทีโดยชอบธรรม · engine เองใช้ค่าเดียวกันนี้แค่เพื่อ "ถาม user"
+ */
+export function resolveRunHealth(a: {
+  busy: boolean;
+  orchesStatus: OrchesStatus | null;
+  heartbeat: Freshness;
+  /** ไม่มี heartbeat ให้อ่านเลย แม้รันเปิดมานานพอที่ engine ควรปั๊มครั้งแรกไปแล้ว
+   *  (ดู silentSinceStart) = รันที่ตายตั้งแต่ต้น ซึ่ง heartbeat มองไม่เห็นโดยนิยาม */
+  silentStart?: boolean;
+}): RunHealth | null {
+  if (!a.busy) return null;
+  if (a.orchesStatus === "paused-checkpoint") return "checkpoint";
+  if (a.orchesStatus === "done") return null;
+  if (a.heartbeat === "stale") return "stalled";
+  if (a.heartbeat === "unknown" && a.silentStart) return "stalled";
+  return null;
+}
+
+/**
+ * "รันนี้ไม่เคยปั๊ม heartbeat แม้แต่ครั้งเดียว ทั้งที่เปิดมานานแล้ว" — ช่องที่ heartbeat
+ * เพียว ๆ มองไม่เห็น: ถ้า orchestrator ตายก่อนจะเรียก verb แรก ก็ไม่มีค่าให้เทียบอายุ
+ * แล้วการ์ดจะขึ้น `⟳ กำลังทำ` ค้างตลอดกาล (นี่คือ `startedAt` ที่ถูกเขียน + ถูกบังคับ
+ * ให้มีใน parseRunMarker แต่ไม่มีใครอ่าน — audit item 2c)
+ *
+ * ⛔ ต้อง `spinning` เท่านั้น = marker running + session ที่ label ตรงโปรเจกต์นี้ยังอยู่
+ *   + ไม่ใช่ zombie · รันที่ MC ยิงเองทุกตัวเดินผ่าน orches-drive ซึ่ง stamp heartbeat
+ *   ที่ prep-repo (Step 2.1/4.0) ก่อนงาน sprint ใด ๆ → เงียบเกิน 2 เท่าของเส้น stale
+ *   คือผิดปกติจริง ไม่ใช่ sprint ที่ยาว
+ * ⛔ เผื่อ 2 เท่าเสมอ (ไม่ใช่เส้นเดียวกับ heartbeat) เพราะช่วงบูต tmux + โหลด CLAUDE.md
+ *   + gate แผน กินเวลาก่อนถึง verb แรกได้จริง · ราคาของการโบ้ยผิดคือป้ายหนึ่งใบ
+ *   แต่ยังไม่มีเหตุให้ยิงเร็วกว่านั้น
+ */
+export function silentSinceStart(a: {
+  spinning: boolean;
+  heartbeat: Freshness;
+  runAgeMs: number | null;
+  staleMs: number;
+}): boolean {
+  if (!a.spinning || a.heartbeat !== "unknown" || !(a.staleMs > 0)) return false;
+  return a.runAgeMs !== null && a.runAgeMs > a.staleMs * 2;
+}
 
 export function resolveCardActions(
   state: ButtonState,
   driven: boolean,
   pending: number,
+  health?: RunHealth | null,
 ): CardActions {
-  if (state === "spinning" || driven) return { kind: "busy" };
+  if (state === "spinning" || driven) return health ? { kind: "busy", health } : { kind: "busy" };
   if (pending <= 0) return { kind: "none" };
   const crash = state === "stale" ? "stale" : state === "error" ? "error" : null;
   return { kind: "actions", runNEnabled: pending >= 2, crash };

@@ -21,6 +21,8 @@ import {
   resolveCardActions,
   type RunMarker,
   classifyRunTransition,
+  resolveRunHealth,
+  silentSinceStart,
 } from "./continueRun";
 import type { OracleTeam } from "./teams";
 
@@ -404,4 +406,79 @@ describe("classifyRunTransition", () => {
       }),
     ).toBe("finished");
   });
+});
+
+// --- Task 12: resolveRunHealth — แยก "รอคนรีวิว" กับ "อาจค้าง" ออกจาก "กำลังทำ" ---
+//
+// ⛔⛔ ก่อนหน้านี้การ์ดมีคำเดียวคือ `⟳ กำลังทำ` สำหรับ 3 สถานะที่ต่างกันสิ้นเชิง:
+//   (1) ทำงานอยู่จริง (2) จบ sprint แล้วจอดรอคนรีวิว (engine เขียน status:paused-checkpoint
+//   ไว้ตั้งแต่ก่อน checkpoint ทุกครั้ง) (3) session ยังอยู่แต่ไม่มีอะไรขยับแล้ว
+//   → run LP 08-20/21 บล็อกรอคนสองครั้ง โดยไม่มีอะไรบอกใครเลย
+// ⛔ ผลลัพธ์ที่นี่เป็น "ป้าย" เท่านั้น — ห้ามเอาไปสั่ง reap/kill/ลบ (heartbeat ปั๊มแค่ตอน
+//   engine verb ทำงาน → เทิร์นที่ orchestrator เขียนเอกสาร/เก็บ memory เงียบได้เป็นนาที
+//   โดยชอบธรรม · engine เองก็ใช้ค่านี้แค่ "ถาม user" ไม่ใช่ "ตายแล้ว")
+test("resolveRunHealth: การ์ดที่ไม่ busy ไม่มีป้ายสุขภาพ (ปุ่มปกติอธิบายตัวเองอยู่แล้ว)", () => {
+  expect(resolveRunHealth({ busy: false, orchesStatus: "paused-checkpoint", heartbeat: "stale" })).toBeNull();
+  expect(resolveRunHealth({ busy: false, orchesStatus: "in-progress", heartbeat: "stale" })).toBeNull();
+});
+
+test("resolveRunHealth: paused-checkpoint = 'รอรีวิว' ไม่ใช่ค้าง (แม้ heartbeat เก่า)", () => {
+  // จอดรอคนตอบ = heartbeat ต้องเก่าอยู่แล้วโดยธรรมชาติ (turn จบไปแล้ว) → ถ้าเรียงกลับ
+  // จะกลายเป็น "อาจค้าง" ทุกครั้งที่ user ไปกินข้าว ซึ่งเป็นการโบ้ยผิด
+  expect(resolveRunHealth({ busy: true, orchesStatus: "paused-checkpoint", heartbeat: "stale" })).toBe("checkpoint");
+  expect(resolveRunHealth({ busy: true, orchesStatus: "paused-checkpoint", heartbeat: "fresh" })).toBe("checkpoint");
+});
+
+test("resolveRunHealth: status done + heartbeat เก่า = ไม่ต้องเตือน (จบแล้ว เก่าเป็นเรื่องปกติ)", () => {
+  expect(resolveRunHealth({ busy: true, orchesStatus: "done", heartbeat: "stale" })).toBeNull();
+});
+
+test("resolveRunHealth: heartbeat เก่าระหว่าง in-progress = 'อาจค้าง'", () => {
+  expect(resolveRunHealth({ busy: true, orchesStatus: "in-progress", heartbeat: "stale" })).toBe("stalled");
+  expect(resolveRunHealth({ busy: true, orchesStatus: "in-progress", heartbeat: "fresh" })).toBeNull();
+  // unknown = อ่านไม่ได้/ไม่มีไฟล์ → เงียบ ห้ามเดา
+  expect(resolveRunHealth({ busy: true, orchesStatus: "in-progress", heartbeat: "unknown" })).toBeNull();
+  expect(resolveRunHealth({ busy: true, orchesStatus: null, heartbeat: "unknown" })).toBeNull();
+});
+
+test("resolveRunHealth: ไม่มีคีย์ status แต่มี heartbeat เก่า = ยังเตือนได้ (build เก่า)", () => {
+  expect(resolveRunHealth({ busy: true, orchesStatus: null, heartbeat: "stale" })).toBe("stalled");
+});
+
+test("resolveCardActions: busy พก health ไปให้ webview · การ์ดที่ไม่ busy ไม่พก", () => {
+  expect(resolveCardActions("spinning", false, 3, "stalled")).toEqual({ kind: "busy", health: "stalled" });
+  expect(resolveCardActions("idle", true, 3, "checkpoint")).toEqual({ kind: "busy", health: "checkpoint" });
+  expect(resolveCardActions("spinning", false, 3, null)).toEqual({ kind: "busy" });
+  expect(resolveCardActions("spinning", false, 3)).toEqual({ kind: "busy" });
+  // ป้ายสุขภาพต้องไม่รั่วไปโหมดที่มีปุ่มจริง (ปุ่มบอกอยู่แล้วว่ารันไม่จบ)
+  expect(resolveCardActions("stale", false, 2, "stalled")).toEqual({ kind: "actions", runNEnabled: true, crash: "stale" });
+});
+
+// --- Task 13: silentSinceStart — รันที่ตายก่อนปั๊ม heartbeat ครั้งแรก (startedAt ที่ไม่มีใครอ่าน) ---
+const SS = { spinning: true, heartbeat: "unknown" as const, staleMs: 600_000 };
+
+test("silentSinceStart: เงียบเกิน 2 เท่าของเส้น stale = ผิดปกติ · ต่ำกว่านั้น = ยังบูตอยู่", () => {
+  expect(silentSinceStart({ ...SS, runAgeMs: 1_200_001 })).toBe(true);
+  expect(silentSinceStart({ ...SS, runAgeMs: 1_200_000 })).toBe(false); // เส้นพอดี = ยังไม่ฟ้อง
+  expect(silentSinceStart({ ...SS, runAgeMs: 60_000 })).toBe(false); // เพิ่งเริ่ม
+  expect(silentSinceStart({ ...SS, runAgeMs: null })).toBe(false); // อ่าน startedAt ไม่ได้ = เงียบ
+});
+
+test("silentSinceStart: ใช้ได้เฉพาะตอนไม่มี heartbeat จริง ๆ และ session ยังอยู่", () => {
+  // มี heartbeat อ่านได้ = ให้ heartbeat ตัดสิน (อันนี้เป็นช่องเสริม ไม่ใช่ตัวแทน)
+  expect(silentSinceStart({ ...SS, heartbeat: "fresh", runAgeMs: 9_999_999 })).toBe(false);
+  expect(silentSinceStart({ ...SS, heartbeat: "stale", runAgeMs: 9_999_999 })).toBe(false);
+  // ไม่ spinning = marker ไม่ running / session ไม่อยู่ / zombie → ปุ่มอื่นอธิบายอยู่แล้ว
+  expect(silentSinceStart({ ...SS, spinning: false, runAgeMs: 9_999_999 })).toBe(false);
+  // staleMs 0 = ปิดฟีเจอร์
+  expect(silentSinceStart({ ...SS, staleMs: 0, runAgeMs: 9_999_999 })).toBe(false);
+});
+
+test("resolveRunHealth: silentStart ทำงานเฉพาะเมื่อ heartbeat = unknown", () => {
+  expect(resolveRunHealth({ busy: true, orchesStatus: null, heartbeat: "unknown", silentStart: true })).toBe("stalled");
+  expect(resolveRunHealth({ busy: true, orchesStatus: null, heartbeat: "fresh", silentStart: true })).toBeNull();
+  // จอดรอรีวิวยังชนะเสมอ — ห้ามป้ายว่าค้างเพราะ user ยังไม่มาตอบ
+  expect(
+    resolveRunHealth({ busy: true, orchesStatus: "paused-checkpoint", heartbeat: "unknown", silentStart: true }),
+  ).toBe("checkpoint");
 });
