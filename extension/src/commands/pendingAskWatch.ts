@@ -53,6 +53,7 @@ import {
   sameAsk,
   scanPending,
   paneLabel,
+  offscreenWhileAttached,
   reconcileSeen,
   tmuxNoServer,
   type PaneAsk,
@@ -77,6 +78,8 @@ const _seen = new Set<string>();
 const _firstSeen = new Map<string, number>();
 /** เตือนซ้ำไปแล้ว — ครั้งเดียวต่อคำถามต่ออายุ window (ดู nagDue) */
 const _nagged = new Set<string>();
+/** บอกไปแล้วว่า "กล่องนี้อยู่ในหน้าต่างที่ไม่ได้เปิดดู" — ครั้งเดียวต่อคำถาม (ดู 1e) */
+const _toasted = new Set<string>();
 /** The box on screen right now, so the poll can close it if the question gets
  *  answered in the pane instead. */
 // ⛔ `panel: null` = the box is showing INSIDE the sidebar (no editor group was opened).
@@ -210,6 +213,18 @@ async function openPane(hit: PendingHit): Promise<void> {
   });
   term.sendText(`tmux attach -t '=${hit.session}'`);
   term.show(false);
+}
+
+/** บอกว่ามี agent รอคำตอบอยู่ในหน้าต่างที่ไม่ได้เปิดดู — toast ไม่ใช่กล่องตอบ.
+ *  ⛔ ห้าม await จาก tick(): showWarningMessage resolve ตอนคนกด/ปิดเท่านั้น
+ *    ⇒ poll ทั้งเส้นจะค้างอยู่กับ toast ใบเดียวจนกว่าจะมีคนแตะ */
+async function noticeOffscreen(hit: PendingHit): Promise<void> {
+  const go = "ไปที่เพน";
+  const pick = await vscode.window.showWarningMessage(
+    `${label(hit)} รอคำตอบอยู่ — กล่องอยู่ในหน้าต่าง/เพนที่ไม่ได้เปิดดู: ${title(hit.ask)}`,
+    go,
+  );
+  if (pick === go) await openPane(hit);
 }
 
 function title(ask: PaneAsk): string {
@@ -487,6 +502,7 @@ async function tick(): Promise<void> {
   for (const h of hits) if (!_firstSeen.has(h.key)) _firstSeen.set(h.key, now);
   for (const k of [..._firstSeen.keys()]) if (!live.has(k)) _firstSeen.delete(k);
   for (const k of [..._nagged]) if (!live.has(k)) _nagged.delete(k);
+  for (const k of [..._toasted]) if (!live.has(k)) _toasted.delete(k);
   // ⛔ `_seen` gets the same treatment — it was the ONE collection never pruned, so
   // the same question asked again in the same pane could never auto-open again for
   // the life of the window. Safe only because a failed sweep returns null above and
@@ -498,6 +514,19 @@ async function tick(): Promise<void> {
   const sessions = parseTmuxSessions((await tmux(["list-sessions", "-F", TMUX_FMT])) ?? "");
   const clientsOf = (session: string): number => sessionClients(sessions, session);
   const waitedMs = (h: PendingHit): number => now - (_firstSeen.get(h.key) ?? now);
+
+  // ⛔⛤ 1e: `clients > 0` = "มีคน attach session นี้" ไม่ใช่ "กล่องอยู่บนจอเขา" — 1 session
+  //   มี orchestrator ที่ window 0 + worker ที่ window 1/2/3 และคนดูได้ทีละหน้าต่าง ⇒
+  //   worker ที่บล็อกในหน้าต่างที่ไม่ได้เปิดดูเคยเงียบสนิท (เหลือแค่เลขบนแถบสถานะ)
+  //   ⛔ ห้ามเด้ง "กล่องตอบ" ของ MC ตรงนี้ (กฎห้ามซ้อน native ยังอยู่ครบ) — toast + ปุ่ม
+  //     ไปที่เพน เท่านั้น · ครั้งเดียวต่อคำถาม และทำก่อนทางแยก _open/next ทุกเส้น
+  //     เพราะ worker ตัวที่สองที่บล็อกอยู่ต้องถูกบอกด้วยแม้กล่องของตัวแรกยังเปิดค้าง
+  for (const h of hits) {
+    if (_toasted.has(h.key)) continue;
+    if (!offscreenWhileAttached(h.row, clientsOf(h.session))) continue;
+    _toasted.add(h.key); // ⛔ ก่อน await: showWarningMessage resolve ตอนคนกดเท่านั้น
+    void noticeOffscreen(h);
+  }
 
   const overdue = hits.find((h) =>
     nagAllowed({

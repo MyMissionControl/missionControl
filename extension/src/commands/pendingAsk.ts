@@ -565,6 +565,26 @@ export function shouldShowOwnAsker(clients: number): boolean {
   return Number.isInteger(clients) && clients === 0;
 }
 
+/**
+ * "มีคน attach แล้ว แต่กล่องนี้ไม่ได้อยู่บนจอเขา" — ช่องที่ `clients > 0` มองไม่เห็น.
+ *
+ * ⛔⛔ 1 tmux session = orchestrator ที่ window 0 + worker ที่ window 1/2/3 และคนดูได้
+ *   ทีละหน้าต่าง · เกณฑ์ attach ของ auto-open นับ client ของ **session ทั้งใบ** ⇒ คนนั่งดู
+ *   window 0 อยู่ แล้ว worker ที่ window 1 เด้งคำถาม = MC เงียบเพราะ "มีคนดูอยู่แล้ว"
+ *   ทั้งที่กล่องนั้นไม่ได้อยู่บนจอใครเลย · ตัวเร่ง: ปุ่ม "เปิดเพน" ของ MC เองสร้าง
+ *   terminal ที่ attach ค้างไว้ ⇒ `clients>0` ถาวร = เงียบตลอดกาลหลังกดครั้งเดียว
+ * ⛔ ค่านี้ไม่ปลดล็อกให้เด้ง "กล่องตอบ" ของ MC (กฎห้ามซ้อน native 2026-08-16 ยังอยู่ครบ) —
+ *   ทางออกคือ toast + ปุ่มไปที่เพน ซึ่งไม่ใช่ตัวถามใบที่สอง
+ * ⛔ `window_active`/`pane_active` เป็นสมบัติของ session ไม่ใช่ของ client → ตอบได้แค่
+ *   "เพนนี้คือเพนที่ถูกเลือกอยู่ไหม" ซึ่งเป็นการประมาณที่ดีที่สุดที่ tmux ให้ได้ ·
+ *   อ่านไม่ได้/build ไม่มี field = คืน false = พฤติกรรมเดิมเป๊ะ (ไม่เดา)
+ */
+export function offscreenWhileAttached(row: PaneRow | undefined, clients: number): boolean {
+  if (!(clients > 0)) return false;
+  if (typeof row?.windowActive !== "boolean" || typeof row?.paneActive !== "boolean") return false;
+  return !(row.windowActive && row.paneActive);
+}
+
 /** เตือนซ้ำ (nag) ได้ไหม — เกณฑ์ attach เดียวกับ auto-open ต่างกันแค่เรื่องเวลา.
  *  ⛔⛔ ถ้ามีคน attach session นั้นอยู่ **ห้ามเตือนด้วยตัวถามของ MC** ไม่ว่ารอนานแค่ไหน:
  *  ทุก hit คือกล่อง native ของ Claude Code ซึ่งอยู่บนจอเขาแล้ว ตัวถามใบที่สองคือสิ่งที่

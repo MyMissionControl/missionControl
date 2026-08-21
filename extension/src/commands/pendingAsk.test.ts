@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 import {
   autoOpenSkipReason,
@@ -25,6 +27,7 @@ import {
   parsePaneList,
   scanPending,
   shouldShowOwnAsker,
+  offscreenWhileAttached,
 } from "./pendingAsk";
 
 // ── fixtures ───────────────────────────────────────────────────────────────
@@ -823,4 +826,57 @@ describe("naming the blocked agent", () => {
     // no tags at all → fall back to the pane id, never an empty string
     expect(paneLabel({ pane: "%3", session: "09-foreman", cmd: "claude" })).toBe("09-foreman · %3");
   });
+});
+
+// ── 1e: attach gate เป็นรายไฟล์ session ทั้งใบ ⇒ worker ที่บล็อกในหน้าต่างที่ไม่ได้เปิดดู
+//    ถูกลดชั้นเป็นแค่เลขบนแถบสถานะ ─────────────────────────────────────────────────
+//
+// กฎ 2026-08-16 ของ user คือ "ถ้ากล่อง native อยู่บนจอเขาแล้ว ห้าม MC เด้งกล่องซ้อน" —
+// แต่ MC วัด "อยู่บนจอ" ด้วย `clients > 0` ของ session ทั้งใบ ทั้งที่ 1 session =
+// orchestrator ที่ window 0 + worker ที่ window 1/2/3 และคนดูได้ทีละหน้าต่าง ⇒ นั่งดู
+// window 0 อยู่ แล้ว worker ที่ window 1 เด้งคำถาม = เงียบสนิท
+// ตัวเร่ง: ปุ่ม "เปิดเพน" ของ MC เองสร้าง terminal ที่ attach ค้าง ⇒ clients>0 ถาวร
+//
+// ⛔ ทางแก้ต้องไม่ละเมิดกฎเดิม: ไม่เด้ง "กล่องตอบ" ใบที่สอง — แค่ toast + ปุ่มไปที่เพน
+// ⛔ ไม่รู้ = เงียบ: tmux build ที่ไม่ตอบ window_active/pane_active ต้องได้พฤติกรรมเดิมเป๊ะ
+describe("offscreenWhileAttached (1e)", () => {
+  const row = (o: Partial<{ windowActive: boolean; paneActive: boolean }>) => ({
+    pane: "%12",
+    session: "09-foreman",
+    cmd: "node",
+    member: "bob",
+    ...o,
+  });
+
+  test("A1 attach อยู่ แต่กล่องอยู่หน้าต่าง/เพนอื่น = ต้องบอก", () => {
+    expect(offscreenWhileAttached(row({ windowActive: false, paneActive: true }), 1)).toBe(true);
+    expect(offscreenWhileAttached(row({ windowActive: true, paneActive: false }), 1)).toBe(true);
+    expect(offscreenWhileAttached(row({ windowActive: false, paneActive: false }), 2)).toBe(true);
+  });
+
+  test("A2 กล่องอยู่บนจอเขาจริง = ไม่ต้องบอก (กฎห้ามซ้อน native)", () => {
+    expect(offscreenWhileAttached(row({ windowActive: true, paneActive: true }), 1)).toBe(false);
+  });
+
+  test("A3 ไม่มีใคร attach = ไม่ใช่หน้าที่ของเส้นนี้ (auto-open เดิมจัดการ)", () => {
+    expect(offscreenWhileAttached(row({ windowActive: false, paneActive: false }), 0)).toBe(false);
+    expect(offscreenWhileAttached(row({ windowActive: true, paneActive: true }), 0)).toBe(false);
+  });
+
+  test("A4 ไม่รู้ตำแหน่ง (ไม่มี field / ไม่มี row) = เงียบ ไม่เดา", () => {
+    expect(offscreenWhileAttached(row({}), 1)).toBe(false);
+    expect(offscreenWhileAttached(row({ windowActive: true }), 1)).toBe(false);
+    expect(offscreenWhileAttached(undefined, 1)).toBe(false);
+  });
+});
+
+test("1e: ตัว watch ต่อสายจริง (toast + ปุ่มไปที่เพน · ไม่ใช่กล่องตอบใบที่สอง)", () => {
+  // watch import vscode → unit-test ไม่ได้ · เส้นนี้ขาดแล้วเงียบเหมือนเดิมโดยไม่มีเทสแดง
+  const WATCH = fs.readFileSync(path.join(__dirname, "pendingAskWatch.ts"), "utf8");
+  expect(WATCH).toContain("offscreenWhileAttached(h.row, clientsOf(h.session))");
+  expect(WATCH).toContain("ไปที่เพน");
+  expect(WATCH).toContain("_toasted");
+  // ⛔ ห้ามยิง showBox (กล่องตอบของ MC) จากเส้นนี้ และห้าม await toast ในลูป tick
+  //   (showWarningMessage resolve ตอนคนกดเท่านั้น = poll ค้างทั้งเส้นจนกว่าจะกด)
+  expect(WATCH).toContain("void noticeOffscreen(");
 });
