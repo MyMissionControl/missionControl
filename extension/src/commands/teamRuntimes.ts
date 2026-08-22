@@ -146,8 +146,18 @@ export function rosterToSidecars(
   const memory: Record<string, boolean> = {};
   for (const m of members) {
     if (!m.oracle) continue;
-    if (m.runtime) runtimes[m.oracle] = normalizeRuntimeId(m.runtime);
-    if (m.memory === true) memory[m.oracle] = true;
+    const rt = normalizeRuntimeId(m.runtime ?? "");
+    if (rt) runtimes[m.oracle] = rt;
+    // ⛔⛔ A grant is only ever stored for a runtime that can USE it. Found by an
+    //   adversarial pass in real Chromium: the panel rendered the checkbox
+    //   `disabled` when the runtime went back to claude but kept it `checked`, so
+    //   the user could not untick it while Save still posted memory:true. The
+    //   sidecar then held a grant for a claude worker, and the day that worker was
+    //   flipped back to codex it ran with --approve-for-me having never been
+    //   re-ticked. The UI is fixed too, but the invariant belongs HERE: this
+    //   function is the only way a grant reaches disk, so no future panel bug,
+    //   hand-edited payload, or other caller can reintroduce it.
+    if (m.memory === true && rt && rt !== "claude") memory[m.oracle] = true;
   }
   return { runtimes, memory };
 }

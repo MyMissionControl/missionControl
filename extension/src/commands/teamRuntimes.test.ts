@@ -118,6 +118,34 @@ test("rosterToSidecars: the REVOKE case — off must erase, not persist", () => 
   expect(Object.keys(JSON.parse(serializeTeamMemory(after.memory)))).not.toContain("bob");
 });
 
+// ⛔⛔ THE GRANT INVARIANT — found live by an adversarial pass in real Chromium.
+//    The panel could reach a state where the memory box was disabled BUT ticked
+//    (unclearable by any click), so Save posted memory:true for a claude worker.
+//    The UI is fixed, but this function is the ONLY way a grant reaches disk, so
+//    the rule lives here too: a runtime that cannot use the grant never gets one.
+//    Without it, flipping that worker back to codex later would run it with
+//    --approve-for-me having never been re-ticked by anyone.
+test("⛔ a claude worker can never hold a memory grant, whatever the caller says", () => {
+  expect(rosterToSidecars([{ oracle: "jack", runtime: "claude", memory: true }])).toEqual({
+    runtimes: { jack: "claude" },
+    memory: {},
+  });
+});
+
+test("⛔ a worker with no runtime at all can never hold a grant either", () => {
+  expect(rosterToSidecars([{ oracle: "jack", memory: true }])).toEqual({
+    runtimes: {},
+    memory: {},
+  });
+});
+
+test("flipping codex→claude erases the grant in the same write", () => {
+  const before = rosterToSidecars([{ oracle: "jack", runtime: "codex", memory: true }]);
+  expect(before.memory).toEqual({ jack: true });
+  const after = rosterToSidecars([{ oracle: "jack", runtime: "claude", memory: true }]);
+  expect(JSON.parse(serializeTeamMemory(after.memory))).toEqual({});
+});
+
 test("rosterToSidecars skips rows with no oracle name", () => {
   expect(rosterToSidecars([{ runtime: "codex", memory: true }, { oracle: "" }])).toEqual({
     runtimes: {},

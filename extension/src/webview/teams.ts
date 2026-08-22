@@ -504,10 +504,16 @@ export function renderShell(): string {
   //   a checkbox labelled only "memory" would hide the trade.
   function memoryToggle(on, runtime){
     var headless = !!runtime && runtime !== 'claude';
+    // ⛔⛔ disabled AND checked is an unreachable state: greyed out reads as "off" to
+    //   the eye, readMembers still reports true, and the user cannot clear it —
+    //   reproduced in real Chromium (click, synthetic mouse press, Space: all no-op).
+    //   A disabled control must therefore never carry a tick. The on argument is ignored
+    //   for a non-headless runtime, so the picture and the saved value always agree.
+    var ticked = headless && on;
     var t = headless
       ? 'ให้ worker นี้เรียก oracle_learn/oracle_trace ได้ ⚠ ต้องรันด้วย --approve-for-me (approval never → on-request)'
       : 'claude ต่อความจำผ่าน MCP ของตัวเองอยู่แล้ว — ช่องนี้มีผลกับ runtime แบบ headless เท่านั้น';
-    return '<input type="checkbox" class="memory"'+(on?' checked':'')
+    return '<input type="checkbox" class="memory"'+(ticked?' checked':'')
       + (headless?'':' disabled')+' title="'+esc(t)+'">';
   }
   function swatch(c){ return c ? '<span class="sw" style="background:'+(COLOR_HEX[c]||'#8b949e')+'"></span>' : ''; }
@@ -578,7 +584,10 @@ export function renderShell(): string {
         //   one that drops a column) must degrade to the default, not throw and take
         //   the whole Save down with it.
         runtime: (tr.querySelector('.runtime') || {}).value || 'claude',
-        memory: !!(tr.querySelector('.memory') || {}).checked,
+        // ⛔ read the tick ONLY when the control is enabled — a disabled input's
+        //   .checked is not something the user can act on, so reporting it as intent
+        //   is how the stuck-grant bug reached disk in the first place.
+        memory: (function(){ var c = tr.querySelector('.memory'); return !!(c && !c.disabled && c.checked); })(),
         color: tr.querySelector('.color').value,
       });
     });
@@ -644,16 +653,21 @@ export function renderShell(): string {
       var inp = tr.querySelector('.oracle-new');
       if (inp) inp.addEventListener('input', function(){ validateMembers(root); });
       // ⛔ mem is only meaningful for a headless runtime, so its enabled state is
-      //   DERIVED from the runtime select and must follow it live. Re-rendering the
-      //   cell would drop the user's tick, so mutate in place and keep the checked
-      //   value: switching codex→claude→codex must not silently revoke the grant.
+      //   DERIVED from the runtime select and must follow it live.
+      // ⛔⛔ Switching BACK to claude must CLEAR the tick, not carry it. An earlier
+      //   version kept it "so codex→claude→codex would not silently revoke the
+      //   grant" — that reasoning produced the opposite: a checked+disabled box the
+      //   user cannot clear, saved as memory:true for a claude worker, which then
+      //   fires --approve-for-me the moment anyone flips that worker back to codex.
+      //   Re-ticking after a flip is one click; an invisible standing grant is not
+      //   recoverable by the person looking at the screen.
       var rtSel = tr.querySelector('.runtime');
       if (rtSel) rtSel.addEventListener('change', function(){
         var mem = tr.querySelector('.memory');
         if (!mem) return;
-        var keep = mem.checked;
-        var cell = mem.parentNode;
-        cell.innerHTML = memoryToggle(keep, this.value);
+        var headless = this.value && this.value !== 'claude';
+        var keep = headless && mem.checked;
+        mem.parentNode.innerHTML = memoryToggle(keep, this.value);
       });
       var awk = tr.querySelector('.awaken-btn');
       if (awk) awk.addEventListener('click', function(){
