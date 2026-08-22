@@ -205,6 +205,10 @@ export interface TeamMember {
   role: string;
   model?: string; // run-config (tool store); undefined if the team never ran
   color?: string; // run-config (tool store)
+  // Sidecar-only, never in the tool store (`maw team up` would clobber them).
+  // Both are read by the orches engine too — see commands/teamRuntimes.ts.
+  runtime?: string; // which agent CLI drives this worker ("claude" = default)
+  memory?: boolean; // may this worker reach oracle memory (default false)
   awaken?: AwakenStatus; // identity state, read from the oracle's CLAUDE.md (display-only)
 }
 

@@ -18,6 +18,8 @@
  *    (3) heartbeat clock  bash `date +%FT%T`/-d   <-> TS heartbeatAgeMs
  *    (4) stale threshold  bash ORCHES_HEARTBEAT_STALE <-> TS HEARTBEAT_STALE_SEC
  *    (5) status vocabulary  every `status <v>` the engine writes <-> TS OrchesStatus
+ *    (6) runtime sidecar  bash cmd_worker_runtime <-> TS parse/serializeTeamRuntimes
+ *    (7) memory sidecar   bash cmd_worker_memory  <-> TS parse/serializeTeamMemory
  *
  *  This test SKIPS (loudly) when the skill isn't installed, so a clone without orches-drive
  *  still runs green — but it must never pass silently while the engine is present.
@@ -31,6 +33,14 @@ import { afterAll, expect, test } from "bun:test";
 import { HEARTBEAT_STALE_SEC, heartbeatAgeMs, readOrchesState } from "./orchesSignals";
 import { parseStateValue } from "./orchestratorResume";
 import { isSafeModelId } from "./teamsModel";
+import {
+  isSafeRuntimeId,
+  parseTeamMemory,
+  parseTeamRuntimes,
+  rosterToSidecars,
+  serializeTeamMemory,
+  serializeTeamRuntimes,
+} from "./teamRuntimes";
 
 // ⛔ mkdtempSync ทิ้งโฟลเดอร์ไว้ตลอดกาล: สวีตนี้เปิด 5 ที่ ⇒ ทุกครั้งที่รัน `bun test src` /tmp โตขึ้น 5 dir
 //   (เจอจริง 2026-08-19: /tmp มี orches-parity-* ค้าง 16 dir จากการรันวันเดียว)
@@ -181,4 +191,116 @@ test("parity harness: skips loudly rather than passing silently", () => {
     console.warn(`orches parity SKIPPED — no engine at ${INTG} (set ORCHES_INTG to point at it)`);
   }
   expect(typeof HAVE).toBe("boolean");
+});
+
+// ── (6)(7) runtime + memory sidecars ─────────────────────────────────────────
+//  These two decide WHICH agent CLI spends WHICH subscription for a given worker,
+//  and whether that worker may reach oracle memory. MC's Team Config picker is the
+//  only writer; the engine is the only reader. A disagreement here does not throw —
+//  the worker just quietly becomes claude (wrong wallet) or quietly loses/keeps a
+//  privilege the user just changed. Round-trip both directions with the real verbs.
+
+const RUNTIME_ID_CASES = [
+  "codex",
+  "claude",
+  "gemini-cli",
+  "a",
+  "Codex", // uppercase — bash charset is a-z only
+  "1codex", // must start with a letter
+  "-codex",
+  "codex_cli", // underscore not in the bash charset
+  "codex x",
+  "codex;id",
+  "codex$(id)",
+  "codex`id`",
+  "",
+];
+
+test.if(HAVE)("runtime id: bash guard and TS guard accept exactly the same ids", () => {
+  const teams = tmpProj("orches-parity-runtimes-");
+  for (const rt of RUNTIME_ID_CASES) {
+    mkdirSync(join(teams, "t"), { recursive: true });
+    writeFileSync(join(teams, "t", "runtimes.json"), JSON.stringify({ w: rt }));
+    // bash falls back to the literal "claude" when the value is unusable, so
+    // "accepted" means "came back as the value we wrote", not "non-empty".
+    const got = engine(["worker-runtime", "t", "w"], { ORCHES_TEAMS_DIR: teams });
+    const bashAccepts = got === rt.trim().toLowerCase() && got !== "";
+    expect(`${JSON.stringify(rt)} -> ${isSafeRuntimeId(rt)}`).toBe(
+      `${JSON.stringify(rt)} -> ${bashAccepts}`,
+    );
+  }
+});
+
+test.if(HAVE)("runtime sidecar: what MC writes is what the engine dispatches", () => {
+  const teams = tmpProj("orches-parity-runtimes2-");
+  mkdirSync(join(teams, "t"), { recursive: true });
+  const { runtimes } = rosterToSidecars([
+    { oracle: "bob", runtime: "codex" },
+    { oracle: "jack", runtime: "claude" },
+    { oracle: "mike" },
+  ]);
+  writeFileSync(join(teams, "t", "runtimes.json"), serializeTeamRuntimes(runtimes));
+  const read = (w: string) => engine(["worker-runtime", "t", w], { ORCHES_TEAMS_DIR: teams });
+  expect(read("bob")).toBe("codex");
+  // ⛔ MC prunes "claude" on write because it is the engine's default. That is only
+  //    correct if the engine really does answer "claude" for an absent key — pin it,
+  //    or a future prune rule turns every claude worker into an unset one.
+  expect(read("jack")).toBe("claude");
+  expect(read("mike")).toBe("claude");
+  // and the file really is pruned, not just read back leniently
+  expect(JSON.parse(readFileSync(join(teams, "t", "runtimes.json"), "utf8"))).toEqual({
+    bob: "codex",
+  });
+});
+
+test.if(HAVE)("memory sidecar: MC's on/off round-trips through the engine verb", () => {
+  const teams = tmpProj("orches-parity-memory-");
+  mkdirSync(join(teams, "t"), { recursive: true });
+  const on = rosterToSidecars([
+    { oracle: "bob", runtime: "codex", memory: true },
+    { oracle: "jack", runtime: "codex", memory: false },
+  ]);
+  writeFileSync(join(teams, "t", "memory.json"), serializeTeamMemory(on.memory));
+  const read = (w: string) => engine(["worker-memory", "t", w], { ORCHES_TEAMS_DIR: teams });
+  expect(read("bob")).toBe("on");
+  expect(read("jack")).toBe("off");
+  expect(read("nobody")).toBe("off");
+
+  // ⛔⛔ THE REVOKE CASE — the one that matters. The user un-ticks bob in the panel;
+  //    MC rewrites the sidecar from the full roster; the engine must now say off.
+  //    If either side ever switched to a diff/merge write, this is what would catch
+  //    it, and nothing else would: the grant would simply survive its own removal.
+  const off = rosterToSidecars([
+    { oracle: "bob", runtime: "codex", memory: false },
+    { oracle: "jack", runtime: "codex", memory: false },
+  ]);
+  writeFileSync(join(teams, "t", "memory.json"), serializeTeamMemory(off.memory));
+  expect(read("bob")).toBe("off");
+  expect(readFileSync(join(teams, "t", "memory.json"), "utf8").trim()).toBe("{}");
+});
+
+test.if(HAVE)("memory sidecar: a garbage file must fail CLOSED on both sides", () => {
+  const teams = tmpProj("orches-parity-memory2-");
+  mkdirSync(join(teams, "t"), { recursive: true });
+  for (const bad of ["not json", "[1,2]", '{"bob":"maybe"}', '{"bob":0}']) {
+    writeFileSync(join(teams, "t", "memory.json"), bad);
+    expect(`${bad} -> ${engine(["worker-memory", "t", "bob"], { ORCHES_TEAMS_DIR: teams })}`).toBe(
+      `${bad} -> off`,
+    );
+    expect(parseTeamMemory(bad).bob === true).toBe(false);
+  }
+});
+
+test.if(HAVE)("runtime sidecar: a garbage file must fail OPEN to claude on both sides", () => {
+  // Opposite default from memory ON PURPOSE: an unreadable runtime map should still
+  // let the run happen (as claude), while an unreadable memory map must never grant.
+  const teams = tmpProj("orches-parity-runtimes3-");
+  mkdirSync(join(teams, "t"), { recursive: true });
+  for (const bad of ["not json", "[1,2]", '{"bob":123}', '{"bob":"bad id"}']) {
+    writeFileSync(join(teams, "t", "runtimes.json"), bad);
+    expect(`${bad} -> ${engine(["worker-runtime", "t", "bob"], { ORCHES_TEAMS_DIR: teams })}`).toBe(
+      `${bad} -> claude`,
+    );
+    expect(parseTeamRuntimes(bad).bob ?? "claude").toBe("claude");
+  }
 });

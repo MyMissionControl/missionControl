@@ -20,6 +20,7 @@ import {
   type TeamMember,
 } from "../commands/teamsModel";
 import { getDefaultMemberModel } from "../commands/settingsOps";
+import { isSafeRuntimeId, normalizeRuntimeId, RUNTIME_OPTIONS } from "../commands/teamRuntimes";
 import { awakenMember, teamUp, teamUpMember, type TeamUpResult } from "../commands/teamUp";
 import { setTabIcon } from "./tabIcon";
 
@@ -41,7 +42,10 @@ const OPTIONS = {
 // on the Settings page takes effect without reopening the panel. The Settings
 // knob default_member_model drives what a new/empty member row pre-selects.
 function panelOptions() {
-  return { ...OPTIONS, defaultModel: getDefaultMemberModel() };
+  // runtimeOptions rides along with the rest of the vocabulary so the picker has
+  // exactly one source for what a runtime may be — the same list the engine's
+  // adapter switch knows about.
+  return { ...OPTIONS, defaultModel: getDefaultMemberModel(), runtimeOptions: [...RUNTIME_OPTIONS] };
 }
 
 function pushList(panel: vscode.WebviewPanel) {
@@ -76,6 +80,15 @@ function sanitizeMembers(raw: unknown): TeamMember[] {
       role: typeof m?.role === "string" && m.role.trim() ? m.role.trim() : DEFAULT_ROLE,
       model: typeof m?.model === "string" && m.model.trim() ? m.model.trim() : undefined,
       color: typeof m?.color === "string" && m.color.trim() ? m.color.trim() : undefined,
+      // ⛔ This function is the SECOND place a new per-member field gets dropped
+      //   silently (the first is readMembers in the client script). Anything not
+      //   copied here never reaches saveTeam, and the picker looks like it did
+      //   nothing — no error, the value just reverts on reload.
+      runtime:
+        typeof m?.runtime === "string" && isSafeRuntimeId(m.runtime)
+          ? normalizeRuntimeId(m.runtime)
+          : undefined,
+      memory: m?.memory === true,
     });
   }
   return out;
@@ -383,6 +396,10 @@ export function renderShell(): string {
   table.members select.role { min-width: 120px; }
   table.members select.model { min-width: 120px; }
   table.members select.color { width: 92px; }
+  table.members select.runtime { min-width: 92px; }
+  table.members td.mem-cell { text-align: center; }
+  table.members input.memory { cursor: pointer; }
+  table.members input.memory:disabled { opacity: 0.35; cursor: not-allowed; }
   .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px;
     vertical-align: middle; }
   .note { font-size: 11px; opacity: 0.6; margin-top: 8px; line-height: 1.5; }
@@ -422,7 +439,7 @@ export function renderShell(): string {
   // The "awaken" button (create+ritual) only makes sense for a team that exists,
   // so it's shown/wired only when this is set.
   let DETAIL_TEAM = "";
-  let OPT = { roleOptions: [], colorOptions: [], modelOptions: [], defaultRole: "worker", defaultModel: "claude-sonnet-5" };
+  let OPT = { roleOptions: [], colorOptions: [], modelOptions: [], runtimeOptions: ["claude"], defaultRole: "worker", defaultModel: "claude-sonnet-5" };
   const COLOR_HEX = { blue:'#4ea1ff', green:'#3fb950', red:'#f85149', yellow:'#e3b341',
     magenta:'#d2a8ff', cyan:'#39c5cf', white:'#e6edf3', orange:'#f0883e' };
 
@@ -469,6 +486,29 @@ export function renderShell(): string {
     if (opts.indexOf(sel) < 0) opts.unshift(sel); // keep a stored/default value not already in the list
     var body = opts.map(function(v){ return '<option value="'+esc(v)+'"'+(v===sel?' selected':'')+'>'+esc(strip(v))+'</option>'; }).join('');
     return '<select class="model">'+body+'</select>';
+  }
+  // runtime = which agent CLI drives this worker. claude opens a REPL and gets the
+  // brief pasted in; codex runs headless and receives the brief WITH the command —
+  // different shape, same team. The engine reads this from runtimes.json.
+  function runtimeSelect(sel){
+    var opts = (OPT.runtimeOptions || ['claude']).slice();
+    if (!sel) sel = 'claude';
+    if (opts.indexOf(sel) < 0) opts.unshift(sel); // never drop a stored value we do not recognise
+    var body = opts.map(function(v){
+      return '<option value="'+esc(v)+'"'+(v===sel?' selected':'')+'>'+esc(v)+'</option>'; }).join('');
+    return '<select class="runtime" title="claude = REPL ในเพน · codex = รันรวดเดียวแบบ headless">'+body+'</select>';
+  }
+  // ⛔ memory is a PRIVILEGE toggle, not a preference: turning it on makes codex run
+  //   with --approve-for-me, which flips approval from never (every escalation
+  //   refused) to on-request (an automatic reviewer decides). The title says so —
+  //   a checkbox labelled only "memory" would hide the trade.
+  function memoryToggle(on, runtime){
+    var headless = !!runtime && runtime !== 'claude';
+    var t = headless
+      ? 'ให้ worker นี้เรียก oracle_learn/oracle_trace ได้ ⚠ ต้องรันด้วย --approve-for-me (approval never → on-request)'
+      : 'claude ต่อความจำผ่าน MCP ของตัวเองอยู่แล้ว — ช่องนี้มีผลกับ runtime แบบ headless เท่านั้น';
+    return '<input type="checkbox" class="memory"'+(on?' checked':'')
+      + (headless?'':' disabled')+' title="'+esc(t)+'">';
   }
   function swatch(c){ return c ? '<span class="sw" style="background:'+(COLOR_HEX[c]||'#8b949e')+'"></span>' : ''; }
 
@@ -517,6 +557,8 @@ export function renderShell(): string {
       + '<td'+nameAttrs+'>'+nameCell+'</td>'
       + '<td>'+roleSelect(m.role)+'</td>'
       + '<td>'+modelSelect(m.model||'')+'</td>'
+      + '<td>'+runtimeSelect(m.runtime||'')+'</td>'
+      + '<td class="mem-cell">'+memoryToggle(m.memory===true, m.runtime||'claude')+'</td>'
       + '<td>'+swatch(m.color)+colorSelect(m.color)+'</td>'
       + '<td>'+wakeBtn+awakenBtn+rmBtn+'</td>'
       + '</tr>';
@@ -532,6 +574,11 @@ export function renderShell(): string {
         oracle: oracle,
         role: tr.querySelector('.role').value,
         model: tr.querySelector('.model').value.trim(),
+        // ⛔ optional-chain both: a row rendered by an older panel build (or a future
+        //   one that drops a column) must degrade to the default, not throw and take
+        //   the whole Save down with it.
+        runtime: (tr.querySelector('.runtime') || {}).value || 'claude',
+        memory: !!(tr.querySelector('.memory') || {}).checked,
         color: tr.querySelector('.color').value,
       });
     });
@@ -596,6 +643,18 @@ export function renderShell(): string {
       if (x) x.addEventListener('click', function(){ tr.remove(); validateMembers(root); });
       var inp = tr.querySelector('.oracle-new');
       if (inp) inp.addEventListener('input', function(){ validateMembers(root); });
+      // ⛔ mem is only meaningful for a headless runtime, so its enabled state is
+      //   DERIVED from the runtime select and must follow it live. Re-rendering the
+      //   cell would drop the user's tick, so mutate in place and keep the checked
+      //   value: switching codex→claude→codex must not silently revoke the grant.
+      var rtSel = tr.querySelector('.runtime');
+      if (rtSel) rtSel.addEventListener('change', function(){
+        var mem = tr.querySelector('.memory');
+        if (!mem) return;
+        var keep = mem.checked;
+        var cell = mem.parentNode;
+        cell.innerHTML = memoryToggle(keep, this.value);
+      });
       var awk = tr.querySelector('.awaken-btn');
       if (awk) awk.addEventListener('click', function(){
         if (busy(this)) return;
@@ -642,7 +701,7 @@ export function renderShell(): string {
       : '';
     return '<div class="members-wrap'+(gate?' manage-off':'')+'">'
       + '<table class="members"><thead><tr>'
-      + '<th>oracle</th><th>role</th><th>model</th><th>color</th>'
+      + '<th>oracle</th><th>role</th><th>model</th><th>runtime</th><th title="ต่อความจำ (oracle_learn/oracle_trace) ให้ worker แบบ headless">mem</th><th>color</th>'
       + '<th class="th-manage">'+toggle+'</th>'
       + '</tr></thead><tbody>'
       + members.map(function(m){ return memberRowHtml(m, editableOracle, candidates); }).join('')
@@ -654,7 +713,8 @@ export function renderShell(): string {
   function renderDetail(m){
     VIEW = "detail";
     OPT = { roleOptions: m.roleOptions, colorOptions: m.colorOptions,
-      modelOptions: m.modelOptions || [], defaultRole: m.defaultRole, defaultModel: m.defaultModel };
+      modelOptions: m.modelOptions || [], runtimeOptions: m.runtimeOptions || ["claude"],
+      defaultRole: m.defaultRole, defaultModel: m.defaultModel };
     var t = m.team;
     DETAIL_TEAM = t.name; // enables the per-row "awaken" button (detail view only)
     el("title").innerHTML = 'Team · '+esc(t.name);
@@ -699,7 +759,8 @@ export function renderShell(): string {
   function renderNew(m){
     VIEW = "new"; DETAIL_TEAM = "";
     OPT = { roleOptions: m.roleOptions, colorOptions: m.colorOptions,
-      modelOptions: m.modelOptions || [], defaultRole: m.defaultRole, defaultModel: m.defaultModel };
+      modelOptions: m.modelOptions || [], runtimeOptions: m.runtimeOptions || ["claude"],
+      defaultRole: m.defaultRole, defaultModel: m.defaultModel };
     el("title").innerHTML = 'New Team';
     el("topActions").innerHTML =
       '<button onclick="post(\\'reload\\')">← Teams</button>'

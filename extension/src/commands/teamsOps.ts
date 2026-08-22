@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { run, type RunResult } from "./gitOps";
 import { parseOraclePath } from "./teams";
 import { readTeamModels, writeTeamModels } from "./teamModels";
+import { readTeamMemory, readTeamRuntimes, writeTeamRuntimeSidecars } from "./teamRuntimes";
 import {
   awakenStatusFromClaudeMd,
   createArgs,
@@ -236,9 +237,19 @@ export function readTeamDetailSync(name: string): TeamDetail {
   // sidecar is the source of truth for a member's picked model. This makes the panel
   // AND every launch reader (teamUp, orchestrator) see the model that survives a Team up.
   const models = readTeamModels(name);
+  // Same reasoning for runtime/memory: config.json cannot hold them (Team up
+  // clobbers members[]), and these two decide WHICH CLI spends WHICH subscription
+  // and whether that worker can reach memory — losing them silently is expensive.
+  const runtimes = readTeamRuntimes(name);
+  const memory = readTeamMemory(name);
   const members = merged.map((m) => {
     const withModel = models[m.oracle] ? { ...m, model: models[m.oracle] } : m;
-    return { ...withModel, awaken: readAwakenStatus(m.oracle) };
+    return {
+      ...withModel,
+      runtime: runtimes[m.oracle] || "claude",
+      memory: memory[m.oracle] === true,
+      awaken: readAwakenStatus(m.oracle),
+    };
   });
   return { name, description: tool?.description ?? "", members };
 }
@@ -347,6 +358,13 @@ export async function saveTeam(
   } catch (e) {
     errors.push(`models sidecar: ${String(e)}`);
   }
+  // Runtime + memory sidecars — written from the FULL edited roster (not a diff)
+  // so turning one OFF actually removes it. See writeTeamRuntimeSidecars.
+  try {
+    writeTeamRuntimeSidecars(name, edited);
+  } catch (e) {
+    errors.push(`runtime/memory sidecar: ${String(e)}`);
+  }
   return { ok: errors.length === 0, errors };
 }
 
@@ -402,6 +420,11 @@ export async function createTeam(
     writeTeamModels(name, modelMap);
   } catch (e) {
     errors.push(`models sidecar: ${String(e)}`);
+  }
+  try {
+    writeTeamRuntimeSidecars(name, members);
+  } catch (e) {
+    errors.push(`runtime/memory sidecar: ${String(e)}`);
   }
   return { ok: errors.length === 0, errors };
 }
