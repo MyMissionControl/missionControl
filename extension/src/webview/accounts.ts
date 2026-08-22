@@ -21,6 +21,7 @@ import {
   apiAccountSecret,
   clearApiRoute,
   deleteApiAccount,
+  isAnthropicHost,
   isSafeBaseUrl,
   isSafeId,
   listApiProviders,
@@ -139,8 +140,13 @@ async function testApiAccount(provider: string, label: string): Promise<{ ok: bo
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-api-key": secret.apiKey,
-        authorization: "Bearer " + secret.apiKey,
+        // ⛔ ส่ง header เดียวที่ endpoint นั้น "เอกสารตัวเองบอกว่ารับ" — ไม่ใช่ยิงทั้งสองอันเผื่อไว้
+        //   (ของเดิมแนบทั้ง x-api-key และ Bearer ⇒ endpoint ที่รับแค่อันหนึ่งก็ตอบ 200 = เขียวหลอก
+        //   แล้วพอกดสลับจริง claude ส่งอีกอันแล้วได้ 401 = ปุ่มทดสอบโกหก)
+        //   Anthropic เอง = x-api-key · gateway ที่พูดภาษา Anthropic = Authorization: Bearer
+        ...(isAnthropicHost(secret.baseUrl)
+          ? { "x-api-key": secret.apiKey }
+          : { authorization: "Bearer " + secret.apiKey }),
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({

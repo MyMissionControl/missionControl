@@ -408,6 +408,29 @@ export function saveApiAccount(
   return { ok: true };
 }
 
+/** Which env var carries the key, per the VENDOR's own documented setup:
+ *  Anthropic's own endpoint documents `ANTHROPIC_API_KEY` (its header is `x-api-key`);
+ *  every Anthropic-compatible gateway (z.ai/GLM, Kimi, LiteLLM…) documents
+ *  `ANTHROPIC_AUTH_TOKEN` (header `Authorization: Bearer`).
+ *  ⛔ Measured 2026-08-21 (claude 2.1.237, fake endpoint): with a CUSTOM base URL claude
+ *  emits `Authorization: Bearer <key>` for BOTH vars and never `x-api-key` — so this choice
+ *  is about using the var each vendor documents, not about a header we can see from here.
+ *  One var only: setting both would leave the loser behind on the next switch. */
+export function apiKeyEnvVar(baseUrl: string): "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN" {
+  return isAnthropicHost(baseUrl) ? "ANTHROPIC_API_KEY" : "ANTHROPIC_AUTH_TOKEN";
+}
+
+/** True only for Anthropic's own API host — never for a gateway that merely speaks its
+ *  protocol. Parsed as a URL so `https://api.z.ai/api/anthropic` (path, not host) is NOT a
+ *  match, and neither is a look-alike host like `api.anthropic.com.evil.test`. */
+export function isAnthropicHost(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === "api.anthropic.com";
+  } catch {
+    return false;
+  }
+}
+
 /** Route the machine at this account by writing the managed env keys. Affects only
  *  NEWLY-started claude processes. */
 export function activateApiAccount(provider: string, label: string): OpResult {
@@ -419,7 +442,7 @@ export function activateApiAccount(provider: string, label: string): OpResult {
   const small = typeof j.smallFastModel === "string" ? j.smallFastModel : "";
   const res = writeManagedEnv({
     ANTHROPIC_BASE_URL: secret.baseUrl,
-    ANTHROPIC_AUTH_TOKEN: secret.apiKey,
+    [apiKeyEnvVar(secret.baseUrl)]: secret.apiKey,
     ANTHROPIC_MODEL: secret.model || undefined,
     ANTHROPIC_SMALL_FAST_MODEL: small || undefined,
   });

@@ -9,6 +9,8 @@ import {
   apiAccountSecret,
   clearApiRoute,
   deleteApiAccount,
+  apiKeyEnvVar,
+  isAnthropicHost,
   isSafeBaseUrl,
   isSafeId,
   listApiProviders,
@@ -271,5 +273,36 @@ describe("delete", () => {
   test("deleting a missing account is not an error, and bad names are refused", () => {
     expect(deleteApiAccount("zai", "ghost").ok).toBe(true);
     expect(deleteApiAccount("../x", "y").ok).toBe(false);
+  });
+});
+
+describe("which env var carries the key", () => {
+  // ⛔ วัดสด 2026-08-21 (claude 2.1.237 + base URL ปลอม): ทั้งสองตัวแปรออกมาเป็น
+  //   `Authorization: Bearer <key>` และไม่มี x-api-key ⇒ เกณฑ์นี้คือ "ใช้ตัวแปรที่เจ้านั้น
+  //   เอกสารตัวเองบอก" ไม่ใช่การเดา header
+  test("Anthropic's own host gets ANTHROPIC_API_KEY, gateways get ANTHROPIC_AUTH_TOKEN", () => {
+    expect(apiKeyEnvVar("https://api.anthropic.com")).toBe("ANTHROPIC_API_KEY");
+    expect(apiKeyEnvVar("https://api.z.ai/api/anthropic")).toBe("ANTHROPIC_AUTH_TOKEN");
+    expect(apiKeyEnvVar("")).toBe("ANTHROPIC_AUTH_TOKEN");
+  });
+
+  test("host match is parsed, never a substring — a look-alike host is NOT Anthropic", () => {
+    expect(isAnthropicHost("https://api.anthropic.com/v1")).toBe(true);
+    expect(isAnthropicHost("https://API.Anthropic.COM")).toBe(true);
+    expect(isAnthropicHost("https://api.anthropic.com.evil.test")).toBe(false); // ⛔ suffix trick
+    expect(isAnthropicHost("https://api.z.ai/api/anthropic")).toBe(false); // path, not host
+    expect(isAnthropicHost("not a url")).toBe(false);
+  });
+
+  test("activating an Anthropic account writes API_KEY and leaves NO AUTH_TOKEN behind", () => {
+    realisticSettings();
+    saveApiAccount("zai", "work", GLM, AT);
+    activateApiAccount("zai", "work"); // gateway first: sets ANTHROPIC_AUTH_TOKEN
+    saveApiAccount("anthropic", "work", { apiKey: "sk-ant-xyz", baseUrl: "https://api.anthropic.com" }, AT);
+    expect(activateApiAccount("anthropic", "work").ok).toBe(true);
+    const env = readSettings().env as Record<string, string>;
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-xyz");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined(); // ⛔ half-routed machine otherwise
+    expect(env.ORACLE_EMBED_TIMEOUT_MS).toBe("60000");
   });
 });
